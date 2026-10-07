@@ -27,3 +27,4 @@ workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
+zlib-rs.workspace = true

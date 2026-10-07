@@ -36,7 +36,7 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testconcaturl.cpp | 2 | 1 | 0 | 1 |
 | test/testcapabilities.cpp | 27 | 26 | 0 | 1 |
 | test/testsyncfileitem.cpp | 3 | 1 | 0 | 2 |
-| test/testnextcloudpropagator.cpp | 7 | 4 | 2 | 1 |
+| test/testnextcloudpropagator.cpp | 7 | 6 | 0 | 1 |
 | test/testsyncengine.cpp | 57 | 49 | 0 | 8 |
 | test/testsyncmove.cpp | 30 | 28 | 1 | 1 |
 | test/testsyncconflict.cpp | 15 | 14 | 0 | 1 |
@@ -57,7 +57,7 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testinotifywatcher.cpp | 4 | 3 | 0 | 1 |
 | test/testfolderwatcher.cpp | 15 | 14 | 0 | 1 |
 | test/testpushnotifications.cpp | 15 | 14 | 0 | 1 |
-| **Total** | **378** | **308** | **3** | **67** |
+| **Total** | **378** | **310** | **1** | **67** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -65,8 +65,9 @@ testlocaldiscovery, testremotediscovery, testpermissions,
 testallfilesdeleted, testblacklist, testdownload, testuploadreset,
 testselectivesync, testdatabaseerror, testlockedfiles, testlongpath,
 testsyncdelete) is ported. One function is pending
-(testsyncmove/testMovePropagation, a single assertion), plus the two
-`HAVE_QHTTPSERVER` tests of testnextcloudpropagator.
+(testsyncmove/testMovePropagation, a single assertion). The two
+`HAVE_QHTTPSERVER` tests of testnextcloudpropagator are ported in Phase 2
+(decompression safety check, direct download URLs).
 
 # Phase 0 libraries
 
@@ -284,8 +285,8 @@ failure (`LsColError::partial`); subfolders and success only on `Ok`.
 | testTmpDownloadFileNameGeneration | test_tmp_download_file_name_generation | ported |
 | testParseEtag | test_parse_etag | ported |
 | testParseException | test_parse_exception | ported |
-| testGETFileJobDecompressionThreshold (`HAVE_QHTTPSERVER`) | test_get_file_job_decompression_threshold | pending (no decompression-ratio safety check in the GET job yet) |
-| testDirectUrlCredentials (`HAVE_QHTTPSERVER`) | test_direct_url_credentials | pending (direct download URLs are not used yet) |
+| testGETFileJobDecompressionThreshold (`HAVE_QHTTPSERVER`) | test_get_file_job_decompression_threshold | adapted (a minimal local HTTP/1.1 server, `tests/common/http_server.rs`, replaces `QHttpServer`; the real reqwest transport with the ported Qt decompression check; `QSignalSpy` on `finishedSignal` becomes `GetFileResult::finished_signal`; `spy.wait(1000)` is a plain await) |
+| testDirectUrlCredentials (`HAVE_QHTTPSERVER`) | test_direct_url_credentials | adapted (same local server; the `QVERIFY`s of the route handlers become assertions on the recorded requests after the four downloads: no `Authorization` on the 4 requests of the direct download server, `Authorization` on the 2 of the Nextcloud server) |
 
 ## test/testasyncop.cpp → `crates/nc-testutils/tests/testasyncop.rs`
 
@@ -580,6 +581,10 @@ The file keeps upstream's LGPL-2.1-or-later csync header.
 | serverMaintenence | server_maintenence | ported |
 | testMoveFailsInAConflict | test_move_fails_in_a_conflict | adapted (`touchedFile` through the `propagator_event` callback, enabled once `transmissionProgress` reports Propagation; the `QTest::qFail` in the override becomes a flag asserted after the sync) |
 | testHttp2Resend | test_http2_resend | adapted (`ContentReSendError`, `Http2WasUsedAttribute` and the null status are set with a `ReplyOverride` on the fake error reply) |
+
+*rust_only*: `rust_only_network_limits_are_enforced` (absolute download and
+upload limits pace a sync through the bandwidth manager; negative limits do
+not, as in v34.0.5). Upstream has no bandwidth test.
 
 ## test/testblacklist.cpp → `crates/nc-testutils/tests/testblacklist.rs`
 

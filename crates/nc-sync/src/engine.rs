@@ -152,8 +152,8 @@ pub struct SyncEngine {
     local_discovery_paths: Vec<String>,
     last_local_discovery_style: LocalDiscoveryStyle,
     another_sync_needed: AnotherSyncNeeded,
-    upload_limit: i32,
-    download_limit: i32,
+    /// `_uploadLimit` / `_downloadLimit`, shared with the propagator.
+    network_limits: Arc<crate::propagator::NetworkLimits>,
     leading_and_trailing_spaces_files_allowed: Vec<String>,
     should_enforce_windows_file_name_compatibility: bool,
     filesystem_permissions_reliable: bool,
@@ -205,8 +205,7 @@ impl SyncEngine {
             local_discovery_paths: Vec::new(),
             last_local_discovery_style: LocalDiscoveryStyle::FilesystemOnly,
             another_sync_needed: AnotherSyncNeeded::NoFollowUpSync,
-            upload_limit: 0,
-            download_limit: 0,
+            network_limits: Arc::new(crate::propagator::NetworkLimits::default()),
             leading_and_trailing_spaces_files_allowed: Vec::new(),
             should_enforce_windows_file_name_compatibility: false,
             filesystem_permissions_reliable: false,
@@ -287,9 +286,22 @@ impl SyncEngine {
         self.ignore_hidden_files
     }
 
-    pub fn set_network_limits(&mut self, upload: i32, download: i32) {
-        self.upload_limit = upload;
-        self.download_limit = download;
+    /// `setNetworkLimits(upload, download)`: bytes per second, 0 for none
+    /// (`nextcloudcmd --uplimit N` passes `N * 1000`). A change during a
+    /// sync reaches the running propagator (its bandwidth manager picks it
+    /// up within 10 s, like upstream).
+    pub fn set_network_limits(&self, upload: i32, download: i32) {
+        self.network_limits.set(upload, download);
+        if upload != 0 || download != 0 {
+            log::info!(target: LOG, "Network Limits (down/up) {upload} {download}");
+        }
+    }
+
+    /// The engine's network limits, as a handle that can be kept to change
+    /// them while a sync runs (what `Folder::setDirtyNetworkLimits` does
+    /// through `SyncEngine::setNetworkLimits`).
+    pub fn network_limits(&self) -> Arc<crate::propagator::NetworkLimits> {
+        self.network_limits.clone()
     }
 
     /// `isAnotherSyncNeeded()`.
@@ -907,7 +919,7 @@ impl SyncEngine {
             }));
         }
         // apply the network limits to the propagator
-        propagator.set_network_limits(self.upload_limit, self.download_limit);
+        propagator.share_network_limits(self.network_limits.clone());
         self.delete_stale_download_infos(&items);
         self.delete_stale_upload_infos(&items).await;
         self.delete_stale_error_blacklist_entries(&items);

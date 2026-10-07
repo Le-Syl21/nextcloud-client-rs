@@ -12,6 +12,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::sync::Arc;
 
 use http::{HeaderMap, HeaderValue, Method};
 use nc_dav::{JobOptions, NetworkError, Reply, Target};
@@ -20,6 +21,9 @@ use nc_journal::csync::ItemType;
 use nc_journal::journal::{ConflictRecord, DownloadInfo};
 use nc_journal::remote_permissions::Permission;
 
+use tokio_util::sync::CancellationToken;
+
+use super::bandwidth::BandwidthManager;
 use super::{
     DiskSpaceResult, Done, JobCtx, Outcome, PropagatorEvent, classify_error,
     critical_free_space_limit, error_category_from_network_error, get_etag_from_reply,
@@ -48,24 +52,374 @@ pub fn create_download_tmp_file_name(previous: &str) -> String {
     }
 }
 
-/// The result of the GET (`GETFileJob` as seen in `slotGetFinished`).
-struct GetResult {
-    reply: Reply,
-    /// `_errorString` / `_errorStatus` set by the job itself.
-    error_string: String,
-    error_status: Status,
-    etag: Vec<u8>,
-    last_modified: i64,
-    resume_start: i64,
+/// `CustomDecompressedSafetyCheckThreshold`: added to the expected size
+/// for the GET's `decompressedSafetyCheckThreshold`.
+pub const CUSTOM_DECOMPRESSED_SAFETY_CHECK_THRESHOLD: i64 = 20 * 1024 * 1024;
+
+const LOG_GET: &str = "nextcloud.sync.networkjob.get";
+
+/// The device a [`GetFileJob`] writes the body to (the `QIODevice`).
+pub trait GetFileDevice {
+    /// `_device->write(data)`.
+    fn write_data(&mut self, data: &[u8]) -> std::io::Result<()>;
+    /// `_device->close(); _device->open(QIODevice::WriteOnly)`: start again
+    /// from an empty device (the server ignored the range request).
+    fn reopen_truncated(&mut self) -> std::io::Result<()>;
+    fn flush_data(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-impl GetResult {
+impl GetFileDevice for Vec<u8> {
+    fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn reopen_truncated(&mut self) -> std::io::Result<()> {
+        self.clear();
+        Ok(())
+    }
+}
+
+/// The temporary file of a download.
+struct TmpFile<'a> {
+    file: &'a mut std::fs::File,
+    path: &'a str,
+}
+
+impl GetFileDevice for TmpFile<'_> {
+    fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(data)
+    }
+
+    fn reopen_truncated(&mut self) -> std::io::Result<()> {
+        *self.file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.path)?;
+        Ok(())
+    }
+
+    fn flush_data(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// `GETFileJob`: a GET streamed into a device.
+#[derive(Debug, Clone)]
+pub struct GetFileJob {
+    /// `makeDavUrl(path)` ([`Target::Dav`]) or `_directDownloadUrl`
+    /// ([`Target::Url`]: sent without credentials).
+    pub target: Target,
+    /// `_headers`.
+    pub headers: HeaderMap,
+    /// `_expectedEtagForResume`.
+    pub expected_etag_for_resume: Vec<u8>,
+    /// `_resumeStart`.
+    pub resume_start: i64,
+    /// `_expectedContentLength` (-1: not checked).
+    pub expected_content_length: i64,
+    /// `_decompressionThresholdBase`.
+    pub decompression_threshold_base: i64,
+    /// `setBandwidthManager()`.
+    pub bandwidth_manager: Option<Arc<BandwidthManager>>,
+    /// Aborts the request (`reply()->abort()`).
+    pub cancel: Option<CancellationToken>,
+}
+
+/// A finished [`GetFileJob`].
+#[derive(Debug, Clone, Default)]
+pub struct GetFileResult {
+    pub reply: Reply,
+    /// `_errorString` / `_errorStatus` set by the job itself.
+    pub error_string: String,
+    pub error_status: Status,
+    /// `etag()` (empty for a direct download).
+    pub etag: Vec<u8>,
+    /// `lastModified()`.
+    pub last_modified: i64,
+    /// `resumeStart()` (0 after a server ignored the range).
+    pub resume_start: i64,
+    /// `contentLength()` (-1 when unknown).
+    pub content_length: i64,
+    /// `finishedSignal` was emitted. A reply that failed while its body was
+    /// being decoded never emits it upstream.
+    pub finished_signal: bool,
+}
+
+impl GetFileResult {
     /// `GETFileJob::errorString()`.
-    fn error_string(&self) -> String {
+    pub fn error_string(&self) -> String {
         if !self.error_string.is_empty() {
             return self.error_string.clone();
         }
         self.reply.error_string()
+    }
+}
+
+/// Interval of `QNetworkReply::downloadProgress` signals.
+const PROGRESS_SIGNAL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Reads the next chunk of the body; `Err` ends the reply with an error.
+async fn next_body_chunk(
+    body: &mut nc_dav::BodyStream,
+    opts: &JobOptions,
+) -> Result<Option<nc_dav::Bytes>, nc_dav::TransportError> {
+    nc_dav::jobs::next_chunk(body, opts).await
+}
+
+impl GetFileJob {
+    /// `GETFileJob(account, path, device, headers, expectedEtagForResume, resumeStart)`.
+    pub fn new(
+        target: Target,
+        headers: HeaderMap,
+        expected_etag_for_resume: &[u8],
+        resume_start: i64,
+    ) -> Self {
+        Self {
+            target,
+            headers,
+            expected_etag_for_resume: expected_etag_for_resume.to_vec(),
+            resume_start,
+            expected_content_length: -1,
+            decompression_threshold_base: 0,
+            bandwidth_manager: None,
+            cancel: None,
+        }
+    }
+
+    fn is_direct_download(&self) -> bool {
+        matches!(self.target, Target::Url(_))
+    }
+
+    /// `start()` until `finishedSignal`. `progress(received, total)` is
+    /// `downloadProgress` (bytes of this reply, total -1 when unknown).
+    pub async fn run(
+        self,
+        account: &nc_dav::Account,
+        device: &mut dyn GetFileDevice,
+        progress: &mut dyn FnMut(i64, i64),
+    ) -> GetFileResult {
+        let mut headers = self.headers.clone();
+        let resume_start = self.resume_start;
+        if resume_start > 0 {
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes={resume_start}-")) {
+                headers.insert("Range", v);
+            }
+            headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+            log::debug!(target: LOG_GET, "Retry with range {:?}", headers.get("Range"));
+        }
+        let mut opts = match &self.cancel {
+            Some(c) => JobOptions::with_cancel(c.clone()),
+            None => JobOptions::default(),
+        };
+        opts.decompressed_safety_check_threshold =
+            Some(self.decompression_threshold_base + CUSTOM_DECOMPRESSED_SAFETY_CHECK_THRESHOLD);
+        // Use direct URL without credentials
+        opts.dont_add_credentials = self.is_direct_download();
+        let mut result = GetFileResult {
+            resume_start,
+            content_length: -1,
+            ..GetFileResult::default()
+        };
+        // registerDownloadJob (unregistered when dropped)
+        let registration = self
+            .bandwidth_manager
+            .as_ref()
+            .map(|bwm| bwm.register_download_job());
+        let mut progress_choke = std::time::Instant::now();
+        let streaming = match nc_dav::jobs::send_streaming(
+            account,
+            Method::GET,
+            &self.target,
+            headers,
+            nc_dav::Body::empty(),
+            &opts,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(reply) => {
+                if reply.timed_out {
+                    result.error_string = "Connection Timeout".to_owned();
+                    result.error_status = Status::FatalError;
+                }
+                result.reply = reply;
+                result.finished_signal = true;
+                return result;
+            }
+        };
+        let mut reply = streaming.reply;
+        let mut body = streaming.body;
+        let http_status = reply.http_status;
+        let total = {
+            let v = reply.raw_header_str("Content-Length");
+            v.trim().parse::<i64>().unwrap_or(-1)
+        };
+        // slotMetaDataChanged
+        let mut save_body_to_file = false;
+        if http_status / 100 == 2 && reply.is_ok() {
+            let mut abort_with: Option<String> = None;
+            result.etag = get_etag_from_reply(&reply);
+            if self.is_direct_download() && !result.etag.is_empty() {
+                log::info!(target: LOG_GET, "Direct download used, ignoring server ETag {}", String::from_utf8_lossy(&result.etag));
+                result.etag.clear(); // reset received ETag
+            } else if self.is_direct_download() {
+                // All fine, ETag empty and directDownloadUrl used
+            } else if result.etag.is_empty() {
+                log::warn!(target: LOG_GET, "No E-Tag reply by server, considering it invalid");
+                abort_with = Some("No E-Tag received from server, check Proxy/Gateway".to_owned());
+            } else if !self.expected_etag_for_resume.is_empty()
+                && self.expected_etag_for_resume != result.etag
+            {
+                log::warn!(target: LOG_GET, "We received a different E-Tag for resuming!");
+                abort_with = Some(
+                    "We received a different E-Tag for resuming. Retrying next time.".to_owned(),
+                );
+            }
+            if abort_with.is_none() {
+                let content_length = reply.raw_header_str("Content-Length");
+                if let Ok(len) = content_length.trim().parse::<i64>() {
+                    result.content_length = len;
+                    if self.expected_content_length != -1 && len != self.expected_content_length {
+                        log::warn!(target: LOG_GET, "We received a different content length than expected! {} vs {len}", self.expected_content_length);
+                        abort_with =
+                            Some("We received an unexpected download Content-Length.".to_owned());
+                    }
+                }
+            }
+            if abort_with.is_none() {
+                let mut start = 0i64;
+                let ranges = reply.raw_header_str("Content-Range");
+                if !ranges.is_empty()
+                    && let Some(rest) = ranges.find("bytes ").map(|i| &ranges[i + 6..])
+                {
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    if rest[digits.len()..].starts_with('-') {
+                        start = digits.parse().unwrap_or(0);
+                    }
+                }
+                if start != resume_start {
+                    log::warn!(target: LOG_GET, "Wrong content-range: {ranges} while expecting start was {resume_start}");
+                    if ranges.is_empty() {
+                        // device doesn't support range, just try again from scratch
+                        match device.reopen_truncated() {
+                            Ok(()) => result.resume_start = 0,
+                            Err(e) => abort_with = Some(e.to_string()),
+                        }
+                    } else {
+                        abort_with = Some("Server returned wrong content-range".to_owned());
+                    }
+                }
+            }
+            if let Some(msg) = abort_with {
+                // reply()->abort()
+                result.error_string = msg;
+                result.error_status = Status::NormalError;
+                reply.error = NetworkError::OperationCanceledError;
+                progress(0, total);
+                result.reply = reply;
+                result.finished_signal = true;
+                return result;
+            }
+            let last_modified = reply.raw_header_str("Last-Modified");
+            if !last_modified.is_empty()
+                && let Ok(t) = httpdate::parse_http_date(&last_modified)
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                result.last_modified = d.as_secs() as i64;
+            }
+            save_body_to_file = true;
+        }
+        // slotReadyRead
+        let mut received: i64 = 0;
+        let mut error_body = Vec::new();
+        result.finished_signal = true;
+        'read: loop {
+            match next_body_chunk(&mut body, &opts).await {
+                Ok(Some(chunk)) => {
+                    received += chunk.len() as i64;
+                    if progress_choke.elapsed() >= PROGRESS_SIGNAL_INTERVAL {
+                        progress_choke = std::time::Instant::now();
+                        progress(received, total);
+                    }
+                    if !save_body_to_file {
+                        error_body.extend_from_slice(&chunk);
+                        continue;
+                    }
+                    let mut rest: &[u8] = &chunk;
+                    while !rest.is_empty() {
+                        let n = match &registration {
+                            None => rest.len(),
+                            Some(reg) => {
+                                let want = rest.len().min(8 * 1024);
+                                let acquire = reg.client().acquire(want);
+                                match &opts.cancel {
+                                    Some(token) => tokio::select! {
+                                        biased;
+                                        _ = token.cancelled() => {
+                                            reply.error = NetworkError::OperationCanceledError;
+                                            break 'read;
+                                        }
+                                        n = acquire => n,
+                                    },
+                                    None => acquire.await,
+                                }
+                            }
+                        };
+                        if let Err(e) = device.write_data(&rest[..n]) {
+                            log::warn!(target: LOG_GET, "Error while writing to file {e}");
+                            result.error_string = e.to_string();
+                            result.error_status = Status::NormalError;
+                            reply.error = NetworkError::OperationCanceledError;
+                            break 'read;
+                        }
+                        rest = &rest[n..];
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let timed_out = matches!(e, nc_dav::TransportError::Timeout);
+                    reply.error = match e {
+                        nc_dav::TransportError::Timeout | nc_dav::TransportError::Canceled => {
+                            NetworkError::OperationCanceledError
+                        }
+                        nc_dav::TransportError::UnknownContent(_) => {
+                            // Reading from the reply failed: upstream's
+                            // job never emits finishedSignal then.
+                            result.finished_signal = false;
+                            if save_body_to_file {
+                                result.error_status = Status::NormalError;
+                            }
+                            NetworkError::UnknownContentError
+                        }
+                        _ => NetworkError::RemoteHostClosedError,
+                    };
+                    if reply.error == NetworkError::UnknownContentError && save_body_to_file {
+                        result.error_string = reply.error_string();
+                        log::warn!(target: LOG_GET, "Error while reading from device: {}", result.error_string);
+                    }
+                    if timed_out {
+                        log::warn!(target: LOG_GET, "Timeout {}", reply.url);
+                        reply.timed_out = true;
+                        result.error_string = "Connection Timeout".to_owned();
+                        result.error_status = Status::FatalError;
+                    }
+                    break;
+                }
+            }
+        }
+        let _ = device.flush_data();
+        // The last downloadProgress of a finished reply.
+        progress(received, if total == -1 { received } else { total });
+        drop(registration);
+        if result.finished_signal {
+            log::info!(target: LOG_GET, "GET of {} FINISHED WITH STATUS {:?} {} {}", reply.url, reply.error, reply.raw_header_str("Content-Range"), reply.raw_header_str("Content-Length"));
+        }
+        reply.body = error_body.into();
+        result.reply = reply;
+        result
     }
 }
 
@@ -337,15 +691,54 @@ async fn start_download(ctx: &JobCtx, parent: &mut ParentPermissions) -> Outcome
 
     ctx.shared
         .active_add(ctx.id, size < super::Shared::small_file_size());
-    let get = get_file_job(
-        ctx,
-        &file,
-        &mut tmp_file,
-        &tmp_path,
-        &expected_etag_for_resume,
-        resume_start,
-    )
-    .await;
+    let direct_download_url = ctx.item.borrow().direct_download_url.clone();
+    let mut job = if direct_download_url.is_empty() {
+        // Normal job, download from oC instance
+        GetFileJob::new(
+            Target::Dav(ctx.shared.full_remote_path(&file)),
+            HeaderMap::new(),
+            &expected_etag_for_resume,
+            resume_start,
+        )
+    } else {
+        // We were provided a direct URL, use that one
+        log::info!(target: LOG, "directDownloadUrl given for {file} {direct_download_url}");
+        let mut headers = HeaderMap::new();
+        let cookies = ctx.item.borrow().direct_download_cookies.clone();
+        if !cookies.is_empty()
+            && let Ok(v) = HeaderValue::from_str(&cookies)
+        {
+            headers.insert(http::header::COOKIE, v);
+        }
+        GetFileJob::new(
+            Target::Url(direct_download_url.clone()),
+            headers,
+            &expected_etag_for_resume,
+            resume_start,
+        )
+    };
+    if size >= 0 {
+        job.decompression_threshold_base = size;
+    }
+    job.bandwidth_manager = Some(ctx.shared.bandwidth.clone());
+    job.cancel = Some(ctx.shared.soft_abort.child_token());
+    let get = {
+        let mut device = TmpFile {
+            file: &mut tmp_file,
+            path: &tmp_path,
+        };
+        // slotDownloadProgress
+        let mut on_progress = |received: i64, _total: i64| {
+            ctx.shared.committed_disk_space.borrow_mut().insert(
+                ctx.id,
+                (size - resume_start - received).clamp(0, size.max(0)),
+            );
+            let item = ctx.item.borrow().clone();
+            ctx.shared.report_progress(&item, resume_start + received);
+        };
+        job.run(&ctx.shared.account, &mut device, &mut on_progress)
+            .await
+    };
     drop(tmp_file);
     // slotGetFinished
     ctx.shared.active_remove(ctx.id);
@@ -378,6 +771,12 @@ async fn start_download(ctx: &JobCtx, parent: &mut ParentPermissions) -> Outcome
             ctx.shared
                 .journal
                 .set_download_info(&file, &DownloadInfo::default());
+        }
+        if !direct_download_url.is_empty() && err != NetworkError::OperationCanceledError {
+            // If this was with a direct download, retry without direct download
+            log::warn!(target: LOG, "Direct download of {direct_download_url} failed. Retrying through owncloud.");
+            ctx.item.borrow_mut().direct_download_url.clear();
+            return Box::pin(download_inner(ctx, parent)).await;
         }
         let mut error_status = get.error_status;
         let mut error_string_override = None;
@@ -435,8 +834,19 @@ async fn start_download(ctx: &JobCtx, parent: &mut ParentPermissions) -> Outcome
     }
     // Check that the size of the GET reply matches the file size.
     let size_header = get.reply.raw_header("Content-Length");
-    let has_size_header = !size_header.is_empty();
-    let body_size = crate::utility::qstring_to_long_long(&String::from_utf8_lossy(size_header));
+    let mut has_size_header = !size_header.is_empty();
+    let mut body_size = crate::utility::qstring_to_long_long(&String::from_utf8_lossy(size_header));
+    // Qt removes the content-length header for transparently decompressed HTTP1 replies
+    // but not for HTTP2 or SPDY replies. For these it remains and contains the size
+    // of the compressed data. See QTBUG-73364.
+    let content_encoding = get
+        .reply
+        .raw_header("content-encoding")
+        .to_ascii_lowercase();
+    if (content_encoding == b"gzip" || content_encoding == b"deflate") && get.reply.http2_was_used {
+        body_size = 0;
+        has_size_header = false;
+    }
     let tmp_size = std::fs::metadata(&tmp_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
@@ -606,166 +1016,6 @@ async fn checksum_recalculate(
     }
     log::error!(target: LOG, "Checksum recalculation has failed for file: {} OC-Checksum received is: {}", reply.url, String::from_utf8_lossy(&new_header));
     None
-}
-
-/// `GETFileJob`: the GET streamed into the temporary file.
-async fn get_file_job(
-    ctx: &JobCtx,
-    file: &str,
-    tmp_file: &mut std::fs::File,
-    tmp_path: &str,
-    expected_etag_for_resume: &[u8],
-    mut resume_start: i64,
-) -> GetResult {
-    let mut headers = HeaderMap::new();
-    if resume_start > 0 {
-        if let Ok(v) = HeaderValue::from_str(&format!("bytes={resume_start}-")) {
-            headers.insert("Range", v);
-        }
-        headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
-    }
-    let opts = JobOptions::with_cancel(ctx.shared.soft_abort.child_token());
-    let target = Target::Dav(ctx.shared.full_remote_path(file));
-    let mut result = GetResult {
-        reply: Reply::default(),
-        error_string: String::new(),
-        error_status: Status::NoStatus,
-        etag: Vec::new(),
-        last_modified: 0,
-        resume_start,
-    };
-    let streaming = match nc_dav::jobs::send_streaming(
-        &ctx.shared.account,
-        Method::GET,
-        &target,
-        headers,
-        nc_dav::Body::empty(),
-        &opts,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(reply) => {
-            if reply.timed_out {
-                result.error_string = "Connection Timeout".to_owned();
-                result.error_status = Status::FatalError;
-            }
-            result.reply = reply;
-            return result;
-        }
-    };
-    let mut reply = streaming.reply;
-    let mut body = streaming.body;
-    let http_status = reply.http_status;
-    // slotMetaDataChanged
-    let mut save_body_to_file = false;
-    if http_status / 100 == 2 && reply.is_ok() {
-        result.etag = get_etag_from_reply(&reply);
-        let mut abort_with: Option<String> = None;
-        if result.etag.is_empty() {
-            log::warn!(target: "nextcloud.sync.networkjob.get", "No E-Tag reply by server, considering it invalid");
-            abort_with = Some("No E-Tag received from server, check Proxy/Gateway".to_owned());
-        } else if !expected_etag_for_resume.is_empty()
-            && expected_etag_for_resume != result.etag.as_slice()
-        {
-            log::warn!(target: "nextcloud.sync.networkjob.get", "We received a different E-Tag for resuming!");
-            abort_with =
-                Some("We received a different E-Tag for resuming. Retrying next time.".to_owned());
-        }
-        if abort_with.is_none() {
-            let mut start = 0i64;
-            let ranges = reply.raw_header_str("Content-Range");
-            if !ranges.is_empty()
-                && let Some(rest) = ranges.find("bytes ").map(|i| &ranges[i + 6..])
-            {
-                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                if rest[digits.len()..].starts_with('-') {
-                    start = digits.parse().unwrap_or(0);
-                }
-            }
-            if start != resume_start {
-                log::warn!(target: "nextcloud.sync.networkjob.get", "Wrong content-range: {ranges} while expecting start was {resume_start}");
-                if ranges.is_empty() {
-                    // device doesn't support range, just try again from scratch
-                    match std::fs::OpenOptions::new()
-                        .write(true)
-                        .truncate(true)
-                        .open(tmp_path)
-                    {
-                        Ok(f) => {
-                            *tmp_file = f;
-                            resume_start = 0;
-                            result.resume_start = 0;
-                        }
-                        Err(e) => abort_with = Some(e.to_string()),
-                    }
-                } else {
-                    abort_with = Some("Server returned wrong content-range".to_owned());
-                }
-            }
-        }
-        if let Some(msg) = abort_with {
-            // reply()->abort()
-            result.error_string = msg;
-            result.error_status = Status::NormalError;
-            reply.error = NetworkError::OperationCanceledError;
-            result.reply = reply;
-            return result;
-        }
-        let last_modified = reply.raw_header_str("Last-Modified");
-        if !last_modified.is_empty()
-            && let Ok(t) = httpdate::parse_http_date(&last_modified)
-            && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
-        {
-            result.last_modified = d.as_secs() as i64;
-        }
-        save_body_to_file = true;
-    }
-    // slotReadyRead
-    let mut received: i64 = 0;
-    let mut error_body = Vec::new();
-    loop {
-        match nc_dav::jobs::next_chunk(&mut body, &opts).await {
-            Ok(Some(chunk)) => {
-                if save_body_to_file {
-                    if let Err(e) = tmp_file.write_all(&chunk) {
-                        log::warn!(target: "nextcloud.sync.networkjob.get", "Error while writing to file {e}");
-                        result.error_string = e.to_string();
-                        result.error_status = Status::NormalError;
-                        reply.error = NetworkError::OperationCanceledError;
-                        break;
-                    }
-                    received += chunk.len() as i64;
-                    let size = ctx.item.borrow().size;
-                    ctx.shared.committed_disk_space.borrow_mut().insert(
-                        ctx.id,
-                        (size - resume_start - received).clamp(0, size.max(0)),
-                    );
-                } else {
-                    error_body.extend_from_slice(&chunk);
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let timed_out = matches!(e, nc_dav::TransportError::Timeout);
-                reply.error = if timed_out || matches!(e, nc_dav::TransportError::Canceled) {
-                    NetworkError::OperationCanceledError
-                } else {
-                    NetworkError::RemoteHostClosedError
-                };
-                if timed_out {
-                    reply.timed_out = true;
-                    result.error_string = "Connection Timeout".to_owned();
-                    result.error_status = Status::FatalError;
-                }
-                break;
-            }
-        }
-    }
-    let _ = tmp_file.flush();
-    reply.body = error_body.into();
-    result.reply = reply;
-    result
 }
 
 /// `downloadFinished()`.

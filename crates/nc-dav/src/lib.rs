@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod capabilities;
+pub mod decompress;
 pub mod http_client;
 pub mod jobs;
 pub mod push_notifications;
@@ -30,5 +31,6 @@ pub use jobs::{HttpError, JobOptions, Target};
 pub use push_notifications::{PushNotifications, PushNotificationsEvent};
 pub use reply::{NetworkError, Reply, ReplyOverride};
 pub use transport::{
-    Body, BodyStream, BoxFuture, Bytes, Request, Response, Transport, TransportError, method,
+    Body, BodyStream, BoxFuture, Bytes, DecompressedSafetyCheckThreshold, DecompressionError,
+    Request, Response, Transport, TransportError, method,
 };

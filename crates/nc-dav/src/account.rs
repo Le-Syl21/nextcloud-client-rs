@@ -105,6 +105,37 @@ pub fn encode_query_items(items: &[(String, String)]) -> String {
         .join("&")
 }
 
+/// Characters `QUrl::fromUserInput` (tolerant mode) percent-encodes in a
+/// URL given as text: those never valid in a URI. `%`, `#`, `?` and the
+/// delimiters are kept as given.
+const USER_INPUT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// `QUrl::fromUserInput(text)` for the URLs the client gets from the
+/// server (direct download URLs): a text without a scheme is taken as an
+/// `http://` URL, invalid characters are percent-encoded, a fragment is
+/// dropped (it is never sent).
+pub fn url_from_user_input(text: &str) -> Result<http::Uri, UrlError> {
+    let trimmed = text.trim();
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let without_fragment = with_scheme.split('#').next().unwrap_or_default();
+    let encoded = utf8_percent_encode(without_fragment, USER_INPUT_ENCODE_SET).to_string();
+    http::Uri::try_from(encoded.as_str()).map_err(|_| UrlError(text.to_owned()))
+}
+
 /// A server URL split like `QUrl`: scheme, authority (without user info),
 /// decoded path, and the user info.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -728,6 +759,19 @@ impl Account {
         headers: HeaderMap,
         body: Body,
     ) -> (Request, String) {
+        self.build_request_with(method, uri, headers, body, true)
+    }
+
+    /// [`Account::build_request`]; without the `Authorization` header when
+    /// `add_credentials` is false (`DontAddCredentialsAttribute`).
+    pub fn build_request_with(
+        &self,
+        method: Method,
+        uri: http::Uri,
+        headers: HeaderMap,
+        body: Body,
+        add_credentials: bool,
+    ) -> (Request, String) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let mut req = http::Request::new(body);
         *req.method_mut() = method;
@@ -739,7 +783,7 @@ impl Account {
         if let Ok(v) = HeaderValue::from_str(&request_id) {
             h.insert("X-Request-ID", v);
         }
-        if let Some(auth) = self.credentials().authorization_header() {
+        if add_credentials && let Some(auth) = self.credentials().authorization_header() {
             h.insert(http::header::AUTHORIZATION, auth);
         }
         for (k, v) in headers.iter() {

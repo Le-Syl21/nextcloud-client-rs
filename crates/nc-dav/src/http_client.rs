@@ -1,16 +1,25 @@
 // SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-//! The real [`Transport`]: a `reqwest` client (rustls, HTTP/2, cookies,
-//! gzip/deflate decoding), the counterpart of upstream's
-//! `AccessManager`/`QNetworkAccessManager`.
+//! The real [`Transport`]: a `reqwest` client (rustls, HTTP/2, cookies),
+//! the counterpart of upstream's `AccessManager`/`QNetworkAccessManager`.
+//!
+//! Like `QNetworkAccessManager`, the transport asks for and transparently
+//! decodes gzip/deflate bodies, with Qt's decompression safety check (see
+//! [`crate::decompress`]); reqwest's own decoding is not used because it
+//! has no such check.
 
-use futures_util::TryStreamExt;
+use std::collections::VecDeque;
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt};
+
+use crate::decompress::{self, Decompressor};
 use crate::transport::{
-    Body, BoxFuture, NoFollowRedirects, Request, Response, Transport, TransportError,
+    Body, BodyStream, BoxFuture, DecompressedSafetyCheckThreshold, NoFollowRedirects, Request,
+    Response, Transport, TransportError,
 };
 
 /// Options of the HTTP client.
@@ -101,8 +110,24 @@ impl HttpTransport {
 impl Transport for HttpTransport {
     fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
         Box::pin(async move {
-            let (parts, body) = request.into_parts();
+            let (mut parts, body) = request.into_parts();
             let url = parts.uri.to_string();
+            let threshold = parts
+                .extensions
+                .get::<DecompressedSafetyCheckThreshold>()
+                .map_or(
+                    decompress::DEFAULT_DECOMPRESSED_SAFETY_CHECK_THRESHOLD,
+                    |t| t.0,
+                );
+            // Qt decompresses only when the caller did not ask for an
+            // encoding itself.
+            let auto_decompress = !parts.headers.contains_key(http::header::ACCEPT_ENCODING);
+            if auto_decompress {
+                parts.headers.insert(
+                    http::header::ACCEPT_ENCODING,
+                    http::HeaderValue::from_static(decompress::ACCEPTED_ENCODINGS),
+                );
+            }
             let client = if parts.extensions.get::<NoFollowRedirects>().is_some() {
                 &self.client_no_redirect
             } else {
@@ -116,11 +141,27 @@ impl Transport for HttpTransport {
             let resp = builder.send().await.map_err(|e| map_error(&e))?;
             let status = resp.status();
             let version = resp.version();
-            let headers = resp.headers().clone();
-            let len = resp.content_length();
-            let stream = resp
-                .bytes_stream()
-                .map_err(|e| std::io::Error::other(e.to_string()));
+            let mut headers = resp.headers().clone();
+            let mut len = resp.content_length();
+            let stream: BodyStream = Box::pin(
+                resp.bytes_stream()
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+            );
+            let compressed = auto_decompress
+                && headers
+                    .get(http::header::CONTENT_ENCODING)
+                    .is_some_and(|v| decompress::is_supported_encoding(v.as_bytes()));
+            let stream = if compressed {
+                // Qt removes the Content-Length of a transparently decompressed
+                // HTTP/1 reply, not of an HTTP/2 one (QTBUG-73364).
+                if version != http::Version::HTTP_2 {
+                    headers.remove(http::header::CONTENT_LENGTH);
+                }
+                len = None;
+                decompressing_stream(stream, Decompressor::new(threshold))
+            } else {
+                stream
+            };
             let mut out = http::Response::new(Body::from_stream(stream, len));
             *out.status_mut() = status;
             *out.version_mut() = version;
@@ -128,4 +169,44 @@ impl Transport for HttpTransport {
             Ok(out)
         })
     }
+}
+
+/// Decodes a compressed body stream as it arrives.
+fn decompressing_stream(inner: BodyStream, decompressor: Decompressor) -> BodyStream {
+    struct State {
+        inner: BodyStream,
+        decompressor: Decompressor,
+        pending: VecDeque<Bytes>,
+        failed: bool,
+    }
+    let state = State {
+        inner,
+        decompressor,
+        pending: VecDeque::new(),
+        failed: false,
+    };
+    Box::pin(futures_util::stream::unfold(state, |mut st| async move {
+        loop {
+            if let Some(piece) = st.pending.pop_front() {
+                return Some((Ok(piece), st));
+            }
+            if st.failed {
+                return None;
+            }
+            match st.inner.next().await {
+                Some(Ok(chunk)) => match st.decompressor.feed(&chunk) {
+                    Ok(pieces) => st.pending.extend(pieces),
+                    Err(e) => {
+                        st.failed = true;
+                        return Some((Err(e.into_io()), st));
+                    }
+                },
+                Some(Err(e)) => {
+                    st.failed = true;
+                    return Some((Err(e), st));
+                }
+                None => return None,
+            }
+        }
+    }))
 }

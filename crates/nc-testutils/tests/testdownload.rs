@@ -355,3 +355,49 @@ fn test_http2_resend() {
             .contains(server_message)
     );
 }
+
+/// rust_only: `setNetworkLimits` paces the transfers through the bandwidth
+/// manager (absolute limits in bytes per second, quota handed out every
+/// second), and a negative (relative) limit is no rate limit in v34.0.5.
+#[test]
+fn rust_only_network_limits_are_enforced() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    // Download: 250 000 bytes at 100 000 B/s, the quota coming at 1 s, 2 s, 3 s.
+    fake_folder
+        .remote_modifier()
+        .insert("A/down", 250_000, b'D');
+    fake_folder.sync_engine().set_network_limits(0, 100_000);
+    let start = std::time::Instant::now();
+    assert!(fake_folder.sync_once());
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_millis(2900), "{elapsed:?}");
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Upload: 150 000 bytes at 100 000 B/s.
+    fake_folder.local_modifier().insert("A/up", 150_000, b'U');
+    fake_folder.sync_engine().set_network_limits(100_000, 0);
+    let start = std::time::Instant::now();
+    assert!(fake_folder.sync_once());
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_millis(1900), "{elapsed:?}");
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Relative (negative) limits do not slow the transfers down.
+    fake_folder
+        .remote_modifier()
+        .insert("A/down2", 250_000, b'E');
+    fake_folder.sync_engine().set_network_limits(-50, -50);
+    let start = std::time::Instant::now();
+    assert!(fake_folder.sync_once());
+    assert!(start.elapsed() < Duration::from_millis(900));
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}

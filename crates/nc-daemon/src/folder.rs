@@ -189,6 +189,8 @@ pub struct Folder {
     sync_result: SyncResult,
     engine: Option<SyncEngine>,
     engine_abort: Option<EngineAbortHandle>,
+    /// The engine's limits, changeable while it syncs.
+    engine_limits: Option<Arc<nc_sync::propagator::NetworkLimits>>,
     touched_files: Rc<RefCell<TouchedFiles>>,
     excluded_files: Rc<RefCell<ExcludedFiles>>,
     ignore_hidden: Rc<Cell<bool>>,
@@ -248,6 +250,7 @@ impl Folder {
             sync_result,
             engine: None,
             engine_abort: None,
+            engine_limits: None,
             touched_files: Rc::new(RefCell::new(TouchedFiles::new())),
             excluded_files: Rc::new(RefCell::new(ExcludedFiles::new(&definition.local_path))),
             ignore_hidden: Rc::new(Cell::new(definition.ignore_hidden_files)),
@@ -295,6 +298,7 @@ impl Folder {
         if !engine.excluded_files().reload_exclude_files() {
             log::warn!(target: LOG, "Could not read system exclude file");
         }
+        folder.engine_limits = Some(engine.network_limits());
         folder.touched_files = engine.touched_files();
         folder.excluded_files = engine.excluded_files_handle();
         folder.connect_engine(&mut engine);
@@ -572,12 +576,12 @@ impl Folder {
         self.set_dirty_network_limits();
     }
 
-    /// `setDirtyNetworkLimits()`. The limits of a running engine cannot be
-    /// changed (it is away); they apply from the next sync.
+    /// `setDirtyNetworkLimits()`: a running sync picks the new limits up
+    /// within 10 s (the bandwidth manager's switching timer).
     pub fn set_dirty_network_limits(&mut self) {
         let (up, down) = self.network_limits.engine_limits();
-        if let Some(e) = self.engine.as_mut() {
-            e.set_network_limits(up, down);
+        if let Some(l) = &self.engine_limits {
+            l.set(up, down);
         }
     }
 

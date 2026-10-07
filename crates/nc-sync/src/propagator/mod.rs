@@ -27,8 +27,13 @@
 //! handled. Queued invocations (`QMetaObject::invokeMethod(...,
 //! Qt::QueuedConnection)`) go through a posted-event queue.
 
+pub mod bandwidth;
 mod download;
-pub use download::create_download_tmp_file_name;
+pub use bandwidth::{BandwidthManager, NetworkLimits};
+pub use download::{
+    CUSTOM_DECOMPRESSED_SAFETY_CHECK_THRESHOLD, GetFileDevice, GetFileJob, GetFileResult,
+    create_download_tmp_file_name,
+};
 mod local;
 pub use local::is_path_inside_deleted_dir;
 mod remote;
@@ -424,8 +429,8 @@ pub(crate) struct Shared {
     pub chunk_size: Cell<i64>,
     /// Map original path (as in the DB) to target final path
     pub renamed_directories: RefCell<BTreeMap<String, String>>,
-    pub download_limit: Cell<i32>,
-    pub upload_limit: Cell<i32>,
+    /// `_bandwidthManager`, which also holds `_uploadLimit` / `_downloadLimit`.
+    pub bandwidth: Arc<bandwidth::BandwidthManager>,
     schedule_requested: Cell<bool>,
     wake: tokio::sync::Notify,
     /// Cancelled by any abort (`QNetworkReply::abort()` on asynchronous abort).
@@ -544,9 +549,8 @@ impl Shared {
 
     /// `maximumActiveTransferJob()`.
     pub fn maximum_active_transfer_job(&self) -> usize {
-        if self.download_limit.get() != 0
-            || self.upload_limit.get() != 0
-            || self.options.parallel_network_jobs == 0
+        let limits = self.bandwidth.limits();
+        if limits.download() != 0 || limits.upload() != 0 || self.options.parallel_network_jobs == 0
         {
             // disable parallelism when there is a network limit.
             return 1;
@@ -844,8 +848,9 @@ impl Propagator {
             folder_quota: RefCell::new(HashMap::new()),
             chunk_size: Cell::new(chunk_size),
             renamed_directories: RefCell::new(BTreeMap::new()),
-            download_limit: Cell::new(0),
-            upload_limit: Cell::new(0),
+            bandwidth: Arc::new(bandwidth::BandwidthManager::new(Arc::new(
+                NetworkLimits::default(),
+            ))),
             schedule_requested: Cell::new(false),
             wake: tokio::sync::Notify::new(),
             soft_abort,
@@ -871,9 +876,20 @@ impl Propagator {
         self.shared.another_sync_needed.get()
     }
 
+    /// Sets `_uploadLimit` / `_downloadLimit` (bytes per second, 0: none).
+    /// Like the first, queued `switchingTimerExpired()` of upstream's
+    /// bandwidth manager, the limits apply to the jobs started next.
     pub fn set_network_limits(&self, upload: i32, download: i32) {
-        self.shared.upload_limit.set(upload);
-        self.shared.download_limit.set(download);
+        self.shared.bandwidth.limits().set(upload, download);
+        self.shared.bandwidth.switching_timer_expired();
+    }
+
+    /// Makes the propagator follow `limits` (shared with the sync engine,
+    /// which may change them during the propagation; the bandwidth manager
+    /// picks a change up within its 10 s switching interval).
+    pub fn share_network_limits(&self, limits: Arc<NetworkLimits>) {
+        self.shared.bandwidth.set_limits(limits);
+        self.shared.bandwidth.switching_timer_expired();
     }
 
     /// `abort()`: an asynchronous abort of all running jobs.
@@ -1340,6 +1356,10 @@ impl Propagator {
         if let Some(cb) = self.callbacks.event.take() {
             *self.shared.event_sink.borrow_mut() = Some(cb);
         }
+        // The bandwidth manager's timers (started with the propagator upstream).
+        let bandwidth = self.shared.bandwidth.clone();
+        let bandwidth_timers = bandwidth.run_timers();
+        tokio::pin!(bandwidth_timers);
         loop {
             self.drain_events();
             while let Some(ev) = self.posted.pop_front() {
@@ -1398,6 +1418,7 @@ impl Propagator {
                     }
                 }
                 _ = shared.wake.notified() => {}
+                _ = &mut bandwidth_timers => {}
                 _ = abort_timeout => {
                     // abortTimeout: abort synchronously and finish
                     shared.abort_timed_out.set(true);
