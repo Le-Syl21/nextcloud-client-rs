@@ -30,6 +30,7 @@ httpdate = "1.0.3"
 fastrand = "2.5.0"
 nc-sync = { path = "crates/nc-sync" }
 nc-testutils = { path = "crates/nc-testutils" }
+nc-daemon = { path = "crates/nc-daemon" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "stream", "cookies", "gzip", "deflate", "system-proxy"] }
 tokio = { version = "1.53.2", features = ["rt", "time", "macros", "sync", "fs", "io-util"] }
 tokio-util = "0.7.19"

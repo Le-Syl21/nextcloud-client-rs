@@ -1133,6 +1133,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-daemon"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "nc-dav",
+ "nc-journal",
+ "nc-sync",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "nc-dav"
 version = "0.0.0"
 dependencies = [
