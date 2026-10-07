@@ -59,6 +59,16 @@ Build note: `[profile.dev.package."*"] opt-level = 3` optimises the
 dependencies (checksums, SQLite, TLS) in debug builds; the big-file chunking
 tests went from minutes to seconds. The first debug build takes longer.
 
+## Phase 2 (in the tree)
+
+All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| inotify watcher (`folderwatcher_linux.cpp`) | **inotify** (no default features), read through tokio `AsyncFd` (tokio `net`) | 0.11.5 | `inotify_init1` and `inotify_add_watch` / `inotify_rm_watch` with upstream's exact mask (`IN_CLOSE_WRITE \| IN_ATTRIB \| IN_MOVE \| IN_CREATE \| IN_DELETE \| IN_DELETE_SELF \| IN_MOVE_SELF \| IN_UNMOUNT \| IN_ONLYDIR`). The `read(2)` loop (2048-byte buffer doubled on `EINVAL`) and the `inotify_event` decoding are ported (over `rustix::io::read`) rather than the crate's `EventStream`, so `testinotifywatcher` can feed a pipe like upstream. Divergence: `IN_Q_OVERFLOW` sends `LostChanges` (upstream's Linux watcher ignores it). `notify` 9.0.0 is still an RC and hides the raw mask. |
+| `FolderWatcher` (`folderwatcher.cpp`): change aggregation, lock-file debouncing, notification and permission self-tests | ported | — | Signals become events on a tokio mpsc channel; `QTimer`s are `spawn_local` tasks (single-threaded like Qt). |
+| Lock file detection (`FileSystem::filePathLockFilePatternMatch`, `lockFileTargetFilePath`, `src/libsync/filesystem.cpp`) | ported, `Adobe` name patterns with **regex** | 1.13.1 | Upstream-specific rules (Office/LibreOffice prefixes, AutoCAD pairs, Adobe sibling lookup, Affinity suffix). Lives in `nc-daemon` until the sync engine needs it. |
+
 ## Planned (later phases), from the study
 
 All of these are to be re-checked for the latest version when they are added
@@ -66,7 +76,6 @@ All of these are to be re-checked for the latest version when they are added
 
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
-| inotify watcher (`folderwatcher_linux.cpp`) | **inotify** | 0.11.5 | Exact upstream mask and `IN_Q_OVERFLOW` → full local discovery. `notify` 9.0.0 is still an RC and hides the raw mask. |
 | notify_push websocket (`pushnotifications.cpp`) | **tokio-tungstenite** | 0.30.0 | — |
 | `nextcloud.cfg` takeover / hand-back (QSettings ini) | **ini-preserve** (our crate) | 0.1.3 | Format-preserving, needed to write the official client's config back. `rust-ini` 0.21.3 loses formatting. |
 | Credentials | **keyring** | 4.2.0 | Plus systemd `LoadCredential` for the root daemon. |
