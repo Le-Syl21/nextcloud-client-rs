@@ -476,6 +476,24 @@ async fn sync_main(
                 eprintln!("Exclude list file supplied via --exclude does not exist: {ex}");
                 return ExitCode::FAILURE;
             }
+            // Upstream keys an exclude file by its own directory unless it is
+            // named sync-exclude.lst (then by the sync folder), and only
+            // looks up keys inside the sync folder: any other file outside
+            // the folder is loaded but never matches. Kept as is (ISO), with
+            // a warning upstream does not print.
+            let name = ex.rsplit('/').next().unwrap_or(ex);
+            let dir = std::fs::canonicalize(ex)
+                .ok()
+                .and_then(|p| p.parent().map(|d| format!("{}/", d.to_string_lossy())));
+            if !name.eq_ignore_ascii_case("sync-exclude.lst")
+                && !dir.is_some_and(|d| d.starts_with(&source_dir))
+            {
+                log::warn!(
+                    "The exclude list {ex} is outside the sync folder and not named \
+                     sync-exclude.lst: like nextcloudcmd, its patterns will not apply. \
+                     Name it sync-exclude.lst to apply it to the whole folder."
+                );
+            }
             engine.excluded_files().add_exclude_file_path(ex);
         }
         if !has_user_exclude_file || std::path::Path::new(&system_exclude).exists() {
