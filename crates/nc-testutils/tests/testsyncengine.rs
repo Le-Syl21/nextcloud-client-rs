@@ -566,3 +566,1015 @@ fn test_insufficient_remote_storage() {
     assert_eq!(counters.lock().unwrap().1, 6);
     assert_eq!(counters.lock().unwrap().0, 3);
 }
+
+// Checks whether downloads with bad checksums are accepted
+#[test]
+fn test_checksum_validation() {
+    use std::sync::{Arc, Mutex};
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+
+    #[derive(Default)]
+    struct Values {
+        checksum_value: Option<Vec<u8>>,
+        checksum_value_recalculated: Vec<u8>,
+        content_md5_value: Option<Vec<u8>>,
+        is_checksum_recalculate_supported: bool,
+    }
+    let values = Arc::new(Mutex::new(Values::default()));
+    {
+        let values = values.clone();
+        fake_folder.set_server_override(move |req, state| {
+            let v = values.lock().unwrap();
+            let file = nc_testutils::server::file_path_from_url(req.uri()).unwrap_or_default();
+            if req.method() == http::Method::GET {
+                let mut reply = nc_testutils::server::get_reply(&state.remote_root, &file);
+                if let Some(c) = &v.checksum_value {
+                    reply
+                        .headers_mut()
+                        .insert("OC-Checksum", http::HeaderValue::from_bytes(c).unwrap());
+                }
+                if let Some(c) = &v.content_md5_value {
+                    reply
+                        .headers_mut()
+                        .insert("Content-MD5", http::HeaderValue::from_bytes(c).unwrap());
+                }
+                return Some(reply.into());
+            } else if req.headers().contains_key("X-Recalculate-Hash") {
+                if !v.is_checksum_recalculate_supported {
+                    return Some(
+                        nc_testutils::server::error_reply(402, bytes::Bytes::new()).into(),
+                    );
+                }
+                let mut reply = nc_testutils::server::get_reply(&state.remote_root, &file);
+                reply.headers_mut().insert(
+                    "OC-Checksum",
+                    http::HeaderValue::from_bytes(&v.checksum_value_recalculated).unwrap(),
+                );
+                return Some(reply.into());
+            }
+            None
+        });
+    }
+    let set = |f: &dyn Fn(&mut Values)| f(&mut values.lock().unwrap());
+
+    // Basic case
+    fake_folder.remote_modifier().create("A/a3", 16, b'A');
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Bad OC-Checksum
+    set(&|v| v.checksum_value = Some(b"SHA1:bad".to_vec()));
+    fake_folder.remote_modifier().create("A/a4", 16, b'A');
+    assert!(!fake_folder.sync_once());
+
+    let matched_sha1_checksum = b"SHA1:19b1928d58a2030d08023f3d7054516dbc186f20".to_vec();
+    let mismatched_sha1_checksum =
+        matched_sha1_checksum[..matched_sha1_checksum.len() - 1].to_vec();
+
+    // Good OC-Checksum
+    {
+        let m = matched_sha1_checksum.clone(); // printf 'A%.0s' {1..16} | sha1sum -
+        set(&move |v| v.checksum_value = Some(m.clone()));
+    }
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    set(&|v| v.checksum_value = None);
+
+    // Bad Content-MD5
+    set(&|v| v.content_md5_value = Some(b"bad".to_vec()));
+    fake_folder.remote_modifier().create("A/a5", 16, b'A');
+    assert!(!fake_folder.sync_once());
+
+    // Good Content-MD5
+    set(&|v| v.content_md5_value = Some(b"d8a73157ce10cd94a91c2079fc9a92c8".to_vec())); // printf 'A%.0s' {1..16} | md5sum -
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Invalid OC-Checksum is ignored
+    set(&|v| v.checksum_value = Some(b"garbage".to_vec()));
+    // contentMd5Value is still good
+    fake_folder.remote_modifier().create("A/a6", 16, b'A');
+    assert!(fake_folder.sync_once());
+    set(&|v| v.content_md5_value = Some(b"bad".to_vec()));
+    fake_folder.remote_modifier().create("A/a7", 16, b'A');
+    assert!(!fake_folder.sync_once());
+    set(&|v| v.content_md5_value = Some(Vec::new()));
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // OC-Checksum contains Unsupported checksums
+    set(&|v| v.checksum_value = Some(b"Unsupported:XXXX SHA1:invalid Invalid:XxX".to_vec()));
+    fake_folder.remote_modifier().create("A/a8", 16, b'A');
+    assert!(!fake_folder.sync_once()); // Since the supported SHA1 checksum is invalid, no download
+    set(&|v| {
+        v.checksum_value = Some(
+            b"Unsupported:XXXX SHA1:19b1928d58a2030d08023f3d7054516dbc186f20 Invalid:XxX".to_vec(),
+        )
+    });
+    assert!(fake_folder.sync_once()); // The supported SHA1 checksum is valid now, so the file are downloaded
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Begin Test mismatch recalculation
+    let prev_server_version = fake_folder.account().server_version();
+    fake_folder.account().set_server_version("24.0.0");
+
+    // Mismatched OC-Checksum and X-Recalculate-Hash is not supported -> sync must fail
+    {
+        let (mm, m) = (
+            mismatched_sha1_checksum.clone(),
+            matched_sha1_checksum.clone(),
+        );
+        set(&move |v| {
+            v.is_checksum_recalculate_supported = false;
+            v.checksum_value = Some(mm.clone());
+            v.checksum_value_recalculated = m.clone();
+        });
+    }
+    fake_folder.remote_modifier().create("A/a9", 16, b'A');
+    assert!(!fake_folder.sync_once());
+
+    // Mismatched OC-Checksum and X-Recalculate-Hash is supported, but, recalculated checksum is again mismatched -> sync must fail
+    {
+        let mm = mismatched_sha1_checksum.clone();
+        set(&move |v| {
+            v.is_checksum_recalculate_supported = true;
+            v.checksum_value = Some(mm.clone());
+            v.checksum_value_recalculated = mm.clone();
+        });
+    }
+    assert!(!fake_folder.sync_once());
+
+    // Mismatched OC-Checksum and X-Recalculate-Hash is supported, and, recalculated checksum is a match -> sync must succeed
+    {
+        let (mm, m) = (
+            mismatched_sha1_checksum.clone(),
+            matched_sha1_checksum.clone(),
+        );
+        set(&move |v| {
+            v.is_checksum_recalculate_supported = true;
+            v.checksum_value = Some(mm.clone());
+            v.checksum_value_recalculated = m.clone();
+        });
+    }
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    set(&|v| v.checksum_value = None);
+
+    fake_folder
+        .account()
+        .set_server_version(&prev_server_version);
+    // End Test mismatch recalculation
+}
+
+// Tests the behavior of invalid filename detection
+#[test]
+fn test_invalid_filename_regex() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+
+    // For current servers, no characters are forbidden
+    fake_folder.account().set_server_version("10.0.0");
+    fake_folder
+        .local_modifier()
+        .insert("A/\\:?*\"<>|.txt", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // For legacy servers, some characters were forbidden by the client
+    fake_folder.account().set_server_version("8.0.0");
+    fake_folder
+        .local_modifier()
+        .insert("B/\\:?*\"<>|.txt", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("B/\\:?*\"<>|.txt")
+            .is_none()
+    );
+
+    // We can override that by setting the capability
+    fake_folder.set_capabilities(serde_json::json!({ "dav": { "invalidFilenameRegex": "" } }));
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Check that new servers also accept the capability
+    fake_folder.account().set_server_version("10.0.0");
+    fake_folder
+        .set_capabilities(serde_json::json!({ "dav": { "invalidFilenameRegex": "my[fgh]ile" } }));
+    fake_folder
+        .local_modifier()
+        .insert("C/myfile.txt", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("C/myfile.txt")
+            .is_none()
+    );
+}
+
+#[test]
+fn test_discovery_hidden_file() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // We can't depend on currentLocalState for hidden files since
+    // it should rightfully skip things like download temporaries
+    let local_file_exists = |f: &FakeFolder, name: &str| {
+        std::path::Path::new(&format!("{}{}", f.local_path(), name)).exists()
+    };
+
+    fake_folder.sync_engine().set_ignore_hidden_files(true);
+    fake_folder.remote_modifier().insert("A/.hidden", 64, b'W');
+    fake_folder.local_modifier().insert("B/.hidden", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert!(!local_file_exists(&fake_folder, "A/.hidden"));
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("B/.hidden")
+            .is_none()
+    );
+
+    fake_folder.sync_engine().set_ignore_hidden_files(false);
+    fake_folder
+        .sync_journal()
+        .force_remote_discovery_next_sync();
+    assert!(fake_folder.sync_once());
+    assert!(local_file_exists(&fake_folder, "A/.hidden"));
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("B/.hidden")
+            .is_some()
+    );
+}
+
+/// Adapted: only the UTF-8 locale part. The port always uses UTF-8 file
+/// names (no `QTextCodec::setCodecForLocale`).
+#[test]
+fn test_no_local_encoding() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // Utf8 locale can sync both
+    fake_folder.remote_modifier().insert("A/tößt", 64, b'W');
+    fake_folder.remote_modifier().insert("A/t𠜎t", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert!(fake_folder.current_local_state().find("A/tößt").is_some());
+    assert!(fake_folder.current_local_state().find("A/t𠜎t").is_some());
+}
+
+// Aborting has had bugs when there are parallel upload jobs
+#[test]
+fn test_upload_v1_multiabort() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    let mut options = nc_sync::SyncOptions::default();
+    options.initial_chunk_size = 10;
+    options.set_max_chunk_size(10);
+    options.set_min_chunk_size(10);
+    options.minimum_file_age_for_upload = std::time::Duration::ZERO;
+    fake_folder.sync_engine().set_sync_options(options);
+
+    let n_put = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let n = n_put.clone();
+        fake_folder.set_server_override(move |req, _| {
+            if req.method() == http::Method::PUT {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Some(nc_testutils::FakeReply::Hang);
+            }
+            None
+        });
+    }
+
+    fake_folder.local_modifier().insert("file", 100, b'W');
+    assert!(!fake_folder.sync_once_aborting_after(std::time::Duration::from_millis(100)));
+
+    assert_eq!(n_put.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn test_propagate_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    // QFileDevice::Permission(0x7704): owner/user rwx, other r
+    let perm = 0o704;
+    let set =
+        |p: String| std::fs::set_permissions(p, std::fs::Permissions::from_mode(perm)).unwrap();
+    set(format!("{}A/a1", fake_folder.local_path()));
+    set(format!("{}A/a2", fake_folder.local_path()));
+    fake_folder.sync_once(); // get the metadata-only change out of the way
+    fake_folder.remote_modifier().append_byte("A/a1");
+    fake_folder.remote_modifier().append_byte("A/a2");
+    fake_folder.local_modifier().append_byte("A/a2");
+    fake_folder.local_modifier().append_byte("A/a2");
+    fake_folder.sync_once(); // perms should be preserved
+    let mode = |p: String| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(format!("{}A/a1", fake_folder.local_path())), perm);
+    assert_eq!(mode(format!("{}A/a2", fake_folder.local_path())), perm);
+
+    let paths = fake_folder.sync_journal().conflict_record_paths();
+    let conflict_name = fake_folder.sync_journal().conflict_record(&paths[0]).path;
+    let conflict_name = String::from_utf8(conflict_name).unwrap();
+    assert!(conflict_name.contains("A/a2"));
+    assert_eq!(
+        mode(format!("{}{}", fake_folder.local_path(), conflict_name)),
+        perm
+    );
+}
+
+#[test]
+fn test_empty_local_but_has_remote() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.remote_modifier().mkdir("foo");
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    assert!(fake_folder.current_local_state().find("foo").is_some());
+}
+
+// Check that server mtime is set on directories on initial propagation
+#[test]
+fn test_directory_initial_mtime() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.remote_modifier().mkdir("foo");
+    fake_folder.remote_modifier().insert("foo/bar", 64, b'W');
+    let datetime = nc_testutils::from_secs(nc_sync::utility::current_secs_since_epoch()); // wipe ms
+    fake_folder
+        .remote_modifier()
+        .find_mut("foo")
+        .unwrap()
+        .last_modified = datetime;
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    let mtime = std::fs::metadata(format!("{}foo", fake_folder.local_path()))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(mtime, datetime);
+}
+
+// A local file should not be modified after upload to server if nothing has changed.
+#[test]
+fn test_local_file_initial_mtime() {
+    use std::os::unix::fs::MetadataExt;
+    let foo_folder = "foo/";
+    let bar_file = "foo/bar";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.local_modifier().mkdir(foo_folder);
+    fake_folder.local_modifier().insert(bar_file, 64, b'W');
+
+    let local_file = fake_folder.local_modifier().find(bar_file);
+    let ctime = |p: &std::path::Path| {
+        let m = std::fs::metadata(p).unwrap();
+        (m.ctime(), m.ctime_nsec())
+    };
+    let expected_mtime = ctime(&local_file);
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    let current_mtime = ctime(&local_file);
+    assert_eq!(current_mtime, expected_mtime);
+}
+
+fn remote_move_failed_local_move_rolled_back(error_code: u16) {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    // create a big shared folder with some files
+    fake_folder.remote_modifier().mkdir("big_shared_folder");
+    fake_folder
+        .remote_modifier()
+        .mkdir("big_shared_folder/shared_files");
+    fake_folder.remote_modifier().insert(
+        "big_shared_folder/shared_files/big_shared_file_A.data",
+        1000,
+        b'W',
+    );
+    fake_folder.remote_modifier().insert(
+        "big_shared_folder/shared_files/big_shared_file_B.data",
+        1000,
+        b'W',
+    );
+
+    // make sure big shared folder is synced
+    assert!(fake_folder.sync_once());
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("big_shared_folder/shared_files/big_shared_file_A.data")
+            .is_some()
+    );
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("big_shared_folder/shared_files/big_shared_file_B.data")
+            .is_some()
+    );
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // try to move from a big shared folder to your own folder
+    fake_folder.local_modifier().mkdir("own_folder");
+    fake_folder.local_modifier().rename(
+        "big_shared_folder/shared_files/big_shared_file_A.data",
+        "own_folder/big_shared_file_A.data",
+    );
+    fake_folder.local_modifier().rename(
+        "big_shared_folder/shared_files/big_shared_file_B.data",
+        "own_folder/big_shared_file_B.data",
+    );
+
+    // emulate server MOVE error
+    fake_folder.set_server_override(move |req, _| {
+        if req.method().as_str() == "MOVE" {
+            return Some(nc_testutils::server::error_reply(error_code, bytes::Bytes::new()).into());
+        }
+        None
+    });
+
+    // make sure the first sync fails and files get restored to original folder
+    assert!(!fake_folder.sync_once());
+
+    assert!(fake_folder.sync_once());
+
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("big_shared_folder/shared_files/big_shared_file_A.data")
+            .is_some()
+    );
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("big_shared_folder/shared_files/big_shared_file_B.data")
+            .is_some()
+    );
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("own_folder/big_shared_file_A.data")
+            .is_none()
+    );
+    assert!(
+        fake_folder
+            .current_local_state()
+            .find("own_folder/big_shared_file_B.data")
+            .is_none()
+    );
+
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_remote_move_failed_insufficient_storage_local_move_rolled_back() {
+    remote_move_failed_local_move_rolled_back(507);
+}
+
+#[test]
+fn test_remote_move_failed_forbidden_local_move_rolled_back() {
+    remote_move_failed_local_move_rolled_back(403);
+}
+
+#[test]
+fn test_folder_with_files_in_error() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder.set_server_override(|req, _| {
+        if req.method() == http::Method::GET {
+            let file_name = nc_testutils::server::file_path_from_url(req.uri()).unwrap_or_default();
+            if file_name == "aaa/subfolder/foo" {
+                return Some(nc_testutils::server::error_reply(403, bytes::Bytes::new()).into());
+            }
+        }
+        None
+    });
+
+    fake_folder.remote_modifier().mkdir("aaa");
+    fake_folder.remote_modifier().mkdir("aaa/subfolder");
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/bar", 64, b'W');
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/foo", 64, b'W');
+    assert!(!fake_folder.sync_once());
+
+    assert!(!fake_folder.sync_once());
+}
+
+const INVALID_MTIME: i64 = 0;
+const CURRENT_MTIME: i64 = 1646057277;
+
+#[test]
+fn test_invalid_mtime_recovery_at_start() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    let t = nc_testutils::from_secs;
+
+    fake_folder.remote_modifier().insert("foo", 64, b'W');
+    fake_folder.remote_modifier().insert("bar", 64, b'W');
+    fake_folder.remote_modifier().mkdir("subfolder");
+    fake_folder
+        .remote_modifier()
+        .insert("subfolder/foo", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("subfolder/bar", 64, b'W');
+    fake_folder.remote_modifier().mkdir("aaa");
+    fake_folder.remote_modifier().mkdir("aaa/subfolder");
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/foo", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .set_mod_time("aaa/subfolder/foo", t(INVALID_MTIME));
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/bar", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .set_mod_time("aaa/subfolder/bar", t(INVALID_MTIME));
+
+    assert!(!fake_folder.sync_once());
+
+    assert!(!fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag("aaa/subfolder/foo", t(CURRENT_MTIME));
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag("aaa/subfolder/bar", t(CURRENT_MTIME));
+
+    assert!(fake_folder.sync_once());
+
+    assert!(fake_folder.sync_once());
+
+    let expected_state = fake_folder.current_local_state();
+    assert_eq!(fake_folder.current_remote_state(), expected_state);
+}
+
+#[test]
+fn test_invalid_mtime_recovery() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    let t = nc_testutils::from_secs;
+
+    fake_folder.remote_modifier().insert("foo", 64, b'W');
+    fake_folder.remote_modifier().insert("bar", 64, b'W');
+    fake_folder.remote_modifier().mkdir("subfolder");
+    fake_folder
+        .remote_modifier()
+        .insert("subfolder/foo", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("subfolder/bar", 64, b'W');
+    fake_folder.remote_modifier().mkdir("aaa");
+    fake_folder.remote_modifier().mkdir("aaa/subfolder");
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/foo", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("aaa/subfolder/bar", 64, b'W');
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .set_mod_time("aaa/subfolder/foo", t(INVALID_MTIME));
+    fake_folder
+        .remote_modifier()
+        .set_mod_time("aaa/subfolder/bar", t(INVALID_MTIME));
+
+    assert!(!fake_folder.sync_once());
+
+    assert!(!fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag("aaa/subfolder/foo", t(CURRENT_MTIME));
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag("aaa/subfolder/bar", t(CURRENT_MTIME));
+
+    assert!(fake_folder.sync_once());
+
+    assert!(fake_folder.sync_once());
+
+    let expected_state = fake_folder.current_local_state();
+    assert_eq!(fake_folder.current_remote_state(), expected_state);
+}
+
+#[test]
+fn test_local_invalid_mtime_correction() {
+    let t = nc_testutils::from_secs;
+    let invalid_mtime = t(0);
+    let recent_mtime = t(1743004783); // 2025-03-26T16:59:43+0100
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    fake_folder.local_modifier().insert("invalid", 64, b'W');
+    fake_folder
+        .local_modifier()
+        .set_mod_time("invalid", invalid_mtime);
+    fake_folder.local_modifier().insert("recent", 64, b'W');
+    fake_folder
+        .local_modifier()
+        .set_mod_time("recent", recent_mtime);
+
+    assert!(fake_folder.sync_once());
+
+    // "invalid" file had a mtime of 0, so it's been updated to the current time during testing
+    let current_mtime = fake_folder
+        .current_local_state()
+        .find("invalid")
+        .unwrap()
+        .last_modified;
+    assert!(current_mtime > recent_mtime);
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("invalid")
+            .unwrap()
+            .last_modified
+            > recent_mtime
+    );
+
+    // "recent" file had a mtime of RECENT_MTIME, so it shouldn't have been changed
+    assert_eq!(
+        fake_folder
+            .current_local_state()
+            .find("recent")
+            .unwrap()
+            .last_modified,
+        recent_mtime
+    );
+    assert_eq!(
+        fake_folder
+            .current_remote_state()
+            .find("recent")
+            .unwrap()
+            .last_modified,
+        recent_mtime
+    );
+
+    assert!(fake_folder.sync_once());
+
+    // verify that the mtime of "invalid" hasn't changed since the last sync that fixed it
+    assert_eq!(
+        fake_folder
+            .current_local_state()
+            .find("invalid")
+            .unwrap()
+            .last_modified,
+        current_mtime
+    );
+
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_server_updating_mtime_should_not_create_conflicts() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    use nc_testutils::print_db_data;
+    let test_file = "test.txt";
+    let t = nc_testutils::from_secs;
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder.remote_modifier().insert(test_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag(test_file, t(CURRENT_MTIME - 2));
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+    let local_state = fake_folder.current_local_state();
+    assert_eq!(local_state, fake_folder.current_remote_state());
+    assert_eq!(
+        print_db_data(&fake_folder.db_state()),
+        print_db_data(&fake_folder.current_remote_state())
+    );
+    let file_first_sync = local_state.find(test_file).expect("file");
+    assert_eq!(file_first_sync.last_modified, t(CURRENT_MTIME - 2));
+
+    fake_folder
+        .remote_modifier()
+        .set_mod_time_keep_etag(test_file, t(CURRENT_MTIME - 1));
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::FilesystemOnly, []);
+    assert!(fake_folder.sync_once());
+    let local_state = fake_folder.current_local_state();
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    assert_eq!(
+        print_db_data(&fake_folder.db_state()),
+        print_db_data(&fake_folder.current_remote_state())
+    );
+    let file_second_sync = local_state.find(test_file).expect("file");
+    assert_eq!(file_second_sync.last_modified, t(CURRENT_MTIME - 1));
+
+    fake_folder
+        .remote_modifier()
+        .set_mod_time(test_file, t(CURRENT_MTIME));
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::FilesystemOnly, []);
+    assert!(fake_folder.sync_once());
+    let local_state = fake_folder.current_local_state();
+    assert_eq!(local_state, fake_folder.current_remote_state());
+    assert_eq!(
+        print_db_data(&fake_folder.db_state()),
+        print_db_data(&fake_folder.current_remote_state())
+    );
+    let file_third_sync = local_state.find(test_file).expect("file");
+    assert_eq!(file_third_sync.last_modified, t(CURRENT_MTIME));
+}
+
+fn folder_removal_with_case_clash(move_to_trash_enabled: bool) {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    let mut sync_options = fake_folder.sync_engine().sync_options().clone();
+    sync_options.move_files_to_trash = move_to_trash_enabled;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    fake_folder.remote_modifier().mkdir("A");
+    fake_folder.remote_modifier().mkdir("toDelete");
+    fake_folder.remote_modifier().insert("A/file", 64, b'W');
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    fake_folder.remote_modifier().insert("A/FILE", 64, b'W');
+    assert!(fake_folder.sync_once());
+
+    fake_folder.remote_modifier().mkdir("a");
+    fake_folder.remote_modifier().remove("toDelete");
+
+    assert!(fake_folder.sync_once());
+    let folder_a = fake_folder.current_local_state().find("toDelete").cloned();
+    assert!(folder_a.is_none());
+}
+
+#[test]
+fn test_folder_removal_with_case_clash() {
+    // _data rows "move to trash" and "delete"
+    folder_removal_with_case_clash(true);
+    folder_removal_with_case_clash(false);
+}
+
+// On Linux there is no case clash (case-sensitive file system).
+const SHOULD_HAVE_CASE_CLASH_CONFLICT: bool = false;
+
+#[test]
+fn test_server_case_clash_create_conflict() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "test";
+    let test_upper_case_file = "TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder
+        .remote_modifier()
+        .insert("otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert_eq!(has_conflict, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+#[test]
+fn test_server_sub_folder_case_clash_create_conflict() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "a/b/test";
+    let test_upper_case_file = "a/b/TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder.remote_modifier().mkdir("a");
+    fake_folder.remote_modifier().mkdir("a/b");
+    fake_folder
+        .remote_modifier()
+        .insert("a/b/otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert_eq!(has_conflict, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+#[test]
+fn test_server_case_clash_create_conflict_on_move() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "test";
+    let test_upper_case_file = "TEST2";
+    let test_upper_case_file_after_move = "TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder
+        .remote_modifier()
+        .insert("otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(conflicts.len(), 0);
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert!(!has_conflict);
+
+    fake_folder
+        .remote_modifier()
+        .rename(test_upper_case_file, test_upper_case_file_after_move);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict_after_move = expect_conflict(
+        &fake_folder.current_local_state(),
+        test_upper_case_file_after_move,
+    );
+    assert_eq!(has_conflict_after_move, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
