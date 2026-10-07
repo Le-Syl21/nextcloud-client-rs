@@ -14,3 +14,9 @@ path = ["crates/*/tests/fixtures/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = ["2014 ownCloud GmbH", "2020 Nextcloud GmbH and Nextcloud contributors"]
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = ["crates/nc-journal/data/sync-exclude.lst"]
+precedence = "override"
+SPDX-FileCopyrightText = ["2020 Nextcloud GmbH and Nextcloud contributors", "2012 ownCloud GmbH"]
+SPDX-License-Identifier = "GPL-2.0-or-later"
