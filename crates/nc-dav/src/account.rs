@@ -4,18 +4,22 @@
 //
 // Port of the parts of upstream `src/libsync/account.cpp` and
 // `src/libsync/creds/httpcredentials.cpp` (nextcloud/desktop v34.0.5) the sync
-// engine and `nextcloudcmd` need.
+// engine and `nextcloudcmd` need, and of the push notifications ownership of
+// `account.cpp` (`trySetupPushNotifications` and its reconnect timer).
 
 //! The account: server URL, credentials, user, server version and
 //! capabilities, plus the transport every request goes through.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
 use base64::Engine as _;
 use http::{HeaderMap, HeaderValue, Method};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
-use crate::capabilities::Capabilities;
+use crate::capabilities::{Capabilities, PushNotificationTypes};
+use crate::http_client::HttpClientOptions;
+use crate::push_notifications::{PushNotifications, PushNotificationsEvent};
 use crate::transport::{Body, Request, Response, Transport, TransportError};
 
 /// Characters `QUrl` percent-encodes in a path when sending it.
@@ -256,6 +260,110 @@ const MOUNT_ROOT_PROPERTY_SUPPORTED: i32 = make_server_version(28, 0, 3);
 /// `checksumRecalculateRequestServerVersionMinSupportedMajor`.
 const CHECKSUM_RECALCULATE_MIN_MAJOR: i32 = 24;
 
+/// `pushNotificationsReconnectInterval`: the default interval of
+/// `_pushNotificationsReconnectTimer`.
+pub const PUSH_NOTIFICATIONS_RECONNECT_INTERVAL: Duration = Duration::from_secs(2 * 60);
+
+/// Logging category `nextcloud.sync.account`.
+const LOG: &str = "nextcloud.sync.account";
+
+/// `isPushNotificationsWebSocketUrlAllowed`: `wss` always, `ws` only for an
+/// `http` account (no credentials in clear text for an `https` account).
+pub fn is_push_notifications_web_socket_url_allowed(
+    account_url: &ServerUrl,
+    web_socket_url: &str,
+) -> bool {
+    let web_socket_scheme = web_socket_url
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if web_socket_scheme.eq_ignore_ascii_case("wss") {
+        return true;
+    }
+
+    web_socket_scheme.eq_ignore_ascii_case("ws") && account_url.scheme.eq_ignore_ascii_case("http")
+}
+
+/// The push notification signals of upstream `Account`, plus every signal
+/// of its `PushNotifications` object, in emission order (see
+/// [`Account::subscribe_push_notifications_events`]).
+#[derive(Clone, Debug)]
+pub enum AccountPushEvent {
+    /// `pushNotificationsReady(AccountPtr)`.
+    PushNotificationsReady { account: Weak<Account> },
+    /// `pushNotificationsDisabled(AccountPtr)`.
+    PushNotificationsDisabled { account: Weak<Account> },
+    /// A signal of [`Account::push_notifications`], forwarded after the
+    /// account handled it.
+    PushNotification(PushNotificationsEvent),
+}
+
+/// Room for events not yet read by a slow receiver.
+const PUSH_EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// The push notifications part of `Account`.
+#[derive(Debug)]
+struct PushState {
+    /// `sharedFromThis()`; `None` until [`Account::enable_push_notifications`].
+    this: Option<Weak<Account>>,
+    /// The options of the account's HTTP client, shared by the websocket.
+    options: HttpClientOptions,
+    /// `_pushNotifications`.
+    push_notifications: Option<PushNotifications>,
+    /// Identifies `push_notifications`, so that a deleted object's late
+    /// signals are ignored (upstream disconnects them by deleting it).
+    push_notifications_generation: u64,
+    /// `_pushNotificationsReconnectTimer.interval()`.
+    reconnect_interval: Duration,
+    /// `_pushNotificationsReconnectTimer` when active: its id and task.
+    reconnect_timer: Option<(u64, tokio::task::AbortHandle)>,
+    reconnect_timer_generation: u64,
+}
+
+impl Default for PushState {
+    fn default() -> Self {
+        Self {
+            this: None,
+            options: HttpClientOptions::default(),
+            push_notifications: None,
+            push_notifications_generation: 0,
+            reconnect_interval: PUSH_NOTIFICATIONS_RECONNECT_INTERVAL,
+            reconnect_timer: None,
+            reconnect_timer_generation: 0,
+        }
+    }
+}
+
+impl PushState {
+    fn stop_reconnect_timer(&mut self) {
+        if let Some((_, timer)) = self.reconnect_timer.take() {
+            timer.abort();
+        }
+    }
+
+    /// `_pushNotificationsReconnectTimer.start()`: its timeout calls
+    /// `trySetupPushNotifications()`.
+    fn start_reconnect_timer(&mut self) {
+        self.stop_reconnect_timer();
+        let Some(this) = self.this.clone() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.reconnect_timer_generation += 1;
+        let generation = self.reconnect_timer_generation;
+        let interval = self.reconnect_interval;
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(interval).await;
+            if let Some(account) = this.upgrade() {
+                account.on_push_notifications_reconnect_timer_timeout(generation);
+            }
+        });
+        self.reconnect_timer = Some((generation, task.abort_handle()));
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     credentials: Credentials,
@@ -271,6 +379,18 @@ pub struct Account {
     transport: Arc<dyn Transport>,
     user_agent: String,
     state: Mutex<State>,
+    push: Mutex<PushState>,
+    push_events: tokio::sync::broadcast::Sender<AccountPushEvent>,
+}
+
+impl Drop for Account {
+    fn drop(&mut self) {
+        let push = self.push.get_mut().unwrap_or_else(|e| e.into_inner());
+        push.stop_reconnect_timer();
+        if let Some(push_notifications) = push.push_notifications.take() {
+            push_notifications.close();
+        }
+    }
 }
 
 impl std::fmt::Debug for Account {
@@ -303,7 +423,13 @@ impl Account {
                 credentials,
                 ..State::default()
             }),
+            push: Mutex::new(PushState::default()),
+            push_events: tokio::sync::broadcast::channel(PUSH_EVENT_CHANNEL_CAPACITY).0,
         }
+    }
+
+    fn push(&self) -> MutexGuard<'_, PushState> {
+        self.push.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -318,8 +444,10 @@ impl Account {
         &self.transport
     }
 
+    /// `setCredentials()`: also (re)starts the push notifications.
     pub fn set_credentials(&self, credentials: Credentials) {
         self.state().credentials = credentials;
+        self.try_setup_push_notifications();
     }
 
     pub fn credentials(&self) -> Credentials {
@@ -385,8 +513,174 @@ impl Account {
         self.state().capabilities.clone()
     }
 
+    /// `setCapabilities()`: also (re)starts the push notifications.
     pub fn set_capabilities(&self, caps: Capabilities) {
         self.state().capabilities = caps;
+        self.try_setup_push_notifications();
+    }
+
+    /// Lets this account own a push notifications object, like every
+    /// upstream `Account` (Rust-only switch: the one-shot `ncsync` does not
+    /// call it, the daemon does). `options` are those of the account's
+    /// [`crate::HttpTransport`]. Calls [`Self::try_setup_push_notifications`]
+    /// at once, and so do [`Self::set_capabilities`] and
+    /// [`Self::set_credentials`] from now on.
+    ///
+    /// Must be called inside a Tokio runtime (the websocket runs in a task).
+    pub fn enable_push_notifications(self: &Arc<Self>, options: HttpClientOptions) {
+        {
+            let mut push = self.push();
+            push.this = Some(Arc::downgrade(self));
+            push.options = options;
+        }
+        self.try_setup_push_notifications();
+    }
+
+    /// `trySetupPushNotifications()`: creates the push notifications object
+    /// if the server offers `notify_push` (rejecting a plain `ws://` endpoint
+    /// for an `https` account) and (re)connects it.
+    ///
+    /// The account's connections to the object's signals are made at its
+    /// creation, so they run before any other receiver: `ready` stops the
+    /// reconnect timer and emits [`AccountPushEvent::PushNotificationsReady`];
+    /// `connectionLost` and `authenticationFailed` emit
+    /// [`AccountPushEvent::PushNotificationsDisabled`] when the object is not
+    /// ready, and start the reconnect timer (2 minutes) if it is not running.
+    pub fn try_setup_push_notifications(&self) {
+        let mut push = self.push();
+        let Some(this) = push.this.clone() else {
+            return;
+        };
+
+        // Stop the timer to prevent parallel setup attempts
+        push.stop_reconnect_timer();
+
+        let capabilities = self.capabilities();
+        if capabilities.available_push_notifications() == PushNotificationTypes::NONE {
+            return;
+        }
+        let web_socket_url = capabilities.push_notifications_web_socket_url();
+        if !is_push_notifications_web_socket_url_allowed(&self.url, &web_socket_url) {
+            log::warn!(
+                target: LOG,
+                "Reject insecure push notifications websocket endpoint {web_socket_url} for account {}",
+                self.url.to_credential_free_string()
+            );
+            if let Some(push_notifications) = push.push_notifications.take() {
+                push_notifications.close();
+            }
+            drop(push);
+            let _ = self
+                .push_events
+                .send(AccountPushEvent::PushNotificationsDisabled { account: this });
+            return;
+        }
+
+        log::info!(target: LOG, "Try to setup push notifications");
+
+        if push.push_notifications.is_none() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                log::warn!(target: LOG, "No async runtime: push notifications are not set up");
+                return;
+            }
+            push.push_notifications_generation += 1;
+            let generation = push.push_notifications_generation;
+            let account = this.clone();
+            let hook = Box::new(move |event: &PushNotificationsEvent| {
+                if let Some(account) = account.upgrade() {
+                    account.on_push_notifications_event(generation, event);
+                }
+            });
+            push.push_notifications = Some(PushNotifications::with_hook(
+                this,
+                push.options.clone(),
+                Some(hook),
+            ));
+        }
+        // If push notifications already running it is no problem to call setup again
+        if let Some(push_notifications) = &push.push_notifications {
+            push_notifications.setup();
+        }
+    }
+
+    /// The connections of `trySetupPushNotifications()` to the object's
+    /// signals, then the forwarding to [`AccountPushEvent::PushNotification`].
+    fn on_push_notifications_event(&self, generation: u64, event: &PushNotificationsEvent) {
+        let mut push = self.push();
+        if push.push_notifications_generation != generation || push.push_notifications.is_none() {
+            return;
+        }
+        let this = push.this.clone().unwrap_or_default();
+        let mut account_event = None;
+        match event {
+            PushNotificationsEvent::Ready => {
+                push.stop_reconnect_timer();
+                account_event = Some(AccountPushEvent::PushNotificationsReady { account: this });
+            }
+            PushNotificationsEvent::ConnectionLost
+            | PushNotificationsEvent::AuthenticationFailed => {
+                log::info!(
+                    target: LOG,
+                    "Disable push notifications object because authentication failed or connection lost"
+                );
+                if push
+                    .push_notifications
+                    .as_ref()
+                    .is_some_and(|p| !p.is_ready())
+                {
+                    account_event =
+                        Some(AccountPushEvent::PushNotificationsDisabled { account: this });
+                }
+                if push.reconnect_timer.is_none() {
+                    push.start_reconnect_timer();
+                }
+            }
+            _ => {}
+        }
+        drop(push);
+        if let Some(account_event) = account_event {
+            let _ = self.push_events.send(account_event);
+        }
+        let _ = self
+            .push_events
+            .send(AccountPushEvent::PushNotification(event.clone()));
+    }
+
+    fn on_push_notifications_reconnect_timer_timeout(&self, generation: u64) {
+        {
+            let mut push = self.push();
+            match push.reconnect_timer {
+                Some((g, _)) if g == generation => push.reconnect_timer = None,
+                _ => return,
+            }
+        }
+        self.try_setup_push_notifications();
+    }
+
+    /// `pushNotifications()`: the push notifications object, if any.
+    pub fn push_notifications(&self) -> Option<PushNotifications> {
+        self.push().push_notifications.clone()
+    }
+
+    /// `setPushNotificationsReconnectInterval()`. Like `QTimer::setInterval`,
+    /// a running timer restarts with the new interval.
+    pub fn set_push_notifications_reconnect_interval(&self, interval: Duration) {
+        let mut push = self.push();
+        push.reconnect_interval = interval;
+        if push.reconnect_timer.is_some() {
+            push.start_reconnect_timer();
+        }
+    }
+
+    /// Connects to `pushNotificationsReady` / `pushNotificationsDisabled`
+    /// and to the signals of the push notifications object (whichever object
+    /// the account owns at the time): the receiver gets every
+    /// [`AccountPushEvent`] emitted from now on, in order. This is what
+    /// `FolderMan::slotSetupPushNotifications` connects to.
+    pub fn subscribe_push_notifications_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<AccountPushEvent> {
+        self.push_events.subscribe()
     }
 
     /// `davPath()`: `/remote.php/dav/files/<user>/`.

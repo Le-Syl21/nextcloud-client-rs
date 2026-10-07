@@ -18,14 +18,16 @@ pub mod account;
 pub mod capabilities;
 pub mod http_client;
 pub mod jobs;
+pub mod push_notifications;
 pub mod reply;
 pub mod transport;
 pub mod xml;
 
-pub use account::{Account, Credentials, ServerUrl};
+pub use account::{Account, AccountPushEvent, Credentials, ServerUrl};
 pub use capabilities::Capabilities;
 pub use http_client::{HttpClientOptions, HttpTransport};
 pub use jobs::{HttpError, JobOptions, Target};
+pub use push_notifications::{PushNotifications, PushNotificationsEvent};
 pub use reply::{NetworkError, Reply, ReplyOverride};
 pub use transport::{
     Body, BodyStream, BoxFuture, Bytes, Request, Response, Transport, TransportError, method,

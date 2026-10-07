@@ -68,6 +68,10 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | inotify watcher (`folderwatcher_linux.cpp`) | **inotify** (no default features), read through tokio `AsyncFd` (tokio `net`) | 0.11.5 | `inotify_init1` and `inotify_add_watch` / `inotify_rm_watch` with upstream's exact mask (`IN_CLOSE_WRITE \| IN_ATTRIB \| IN_MOVE \| IN_CREATE \| IN_DELETE \| IN_DELETE_SELF \| IN_MOVE_SELF \| IN_UNMOUNT \| IN_ONLYDIR`). The `read(2)` loop (2048-byte buffer doubled on `EINVAL`) and the `inotify_event` decoding are ported (over `rustix::io::read`) rather than the crate's `EventStream`, so `testinotifywatcher` can feed a pipe like upstream. Divergence: `IN_Q_OVERFLOW` sends `LostChanges` (upstream's Linux watcher ignores it). `notify` 9.0.0 is still an RC and hides the raw mask. |
 | `FolderWatcher` (`folderwatcher.cpp`): change aggregation, lock-file debouncing, notification and permission self-tests | ported | — | Signals become events on a tokio mpsc channel; `QTimer`s are `spawn_local` tasks (single-threaded like Qt). |
 | Lock file detection (`FileSystem::filePathLockFilePatternMatch`, `lockFileTargetFilePath`, `src/libsync/filesystem.cpp`) | ported, `Adobe` name patterns with **regex** | 1.13.1 | Upstream-specific rules (Office/LibreOffice prefixes, AutoCAD pairs, Adobe sibling lookup, Affinity suffix). Lives in `nc-daemon` until the sync engine needs it. |
+| notify_push websocket (`pushnotifications.cpp`, `QWebSocket`) | **tokio-tungstenite** (`handshake` only, no default features) | 0.30.0 (tungstenite 0.30.0) | Websocket framing, the HTTP upgrade, ping/pong and the closing handshake. The client logic (authentication, messages, the ping, ping-timeout and reconnect timers, the error/SSL-error split, the account's reconnect timer and `isPushNotificationsWebSocketUrlAllowed`) is ported in `push_notifications.rs` and `account.rs`. The TCP connection, the TLS layer and the proxy tunnel are set up by the port (below) so that they follow the HTTP client's options. |
+| TLS of `wss://` | **tokio-rustls** (defaults: aws-lc-rs, TLS 1.2) + **rustls-platform-verifier** | 0.26.6 (rustls 0.23), 0.7.1 | Built like reqwest's rustls client in `HttpTransport`: the process default crypto provider or aws-lc-rs, TLS 1.2 and 1.3, the platform verifier, and an accept-all verifier with `--trust` (`trust_invalid_certificates`). A rejected certificate is upstream's `sslErrors` (`authenticationFailed`), any other TLS failure its `errorOccurred` (`connectionLost`). |
+| Proxy for the websocket | ported (HTTP `CONNECT` tunnel, Basic proxy credentials) | — | tokio-tungstenite has no proxy support. The explicit proxy option (`--httpproxy`) is honoured; the system/environment proxies that reqwest's `system-proxy` feature reads (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are not, nor are SOCKS proxies (the websocket then fails with `connectionLost`). |
+| Self-signed certificate of the `wss` fake server (tests only) | **rcgen** (`crypto`, `aws_lc_rs`; no default features) | 0.14.10 | Dev-dependency of `nc-dav`. |
 
 ## Planned (later phases), from the study
 
@@ -76,7 +80,6 @@ All of these are to be re-checked for the latest version when they are added
 
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
-| notify_push websocket (`pushnotifications.cpp`) | **tokio-tungstenite** | 0.30.0 | — |
 | `nextcloud.cfg` takeover / hand-back (QSettings ini) | **ini-preserve** (our crate) | 0.1.3 | Format-preserving, needed to write the official client's config back. `rust-ini` 0.21.3 loses formatting. |
 | Credentials | **keyring** | 4.2.0 | Plus systemd `LoadCredential` for the root daemon. |
 | systemd `Type=notify` and watchdog | **sd-notify** | 0.5.0 | — |

@@ -17,8 +17,8 @@ a `_data` function is counted with its test function, whose data rows all
 run inside the one Rust test. Tests marked *derived* or *rust_only* are
 additions without an upstream counterpart.
 
-Not counted here: test files of later phases not ported yet (folder manager,
-sync file status tracker, push notifications, ...), GUI tests, and the
+Not counted here: test files of later phases not ported yet (sync file
+status tracker, ...), GUI tests, and the
 virtual files / end-to-end encryption test files (out of scope).
 
 ## Summary
@@ -56,7 +56,8 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testasyncop.cpp | 2 | 1 | 0 | 1 |
 | test/testinotifywatcher.cpp | 4 | 3 | 0 | 1 |
 | test/testfolderwatcher.cpp | 15 | 14 | 0 | 1 |
-| **Total** | **363** | **294** | **3** | **66** |
+| test/testpushnotifications.cpp | 15 | 14 | 0 | 1 |
+| **Total** | **378** | **308** | **3** | **67** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -643,3 +644,50 @@ notifications), `derived_set_permissions_test`. The lock file helpers ported
 from `src/libsync/filesystem.cpp` have unit tests in
 `crates/nc-daemon/src/folder_watcher/lock_file.rs` (*derived*; upstream
 covers them in `testlockfile.cpp`, not ported yet).
+## test/testpushnotifications.cpp → `crates/nc-dav/tests/testpushnotifications.rs`
+
+Helpers `verifyCalledOnceWithAccount` and `failThreeAuthenticationAttempts`
+are ported as `verify_called_once_with_account` and
+`fail_three_authentication_attempts`. `QSignalSpy` is `SignalSpy` on the
+broadcast channels of `PushNotifications::subscribe()` and
+`Account::subscribe_push_notifications_events()`. The tests run on a
+current-thread runtime, like the Qt event loop.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger settings and `QStandardPaths` test mode) |
+| testTryReconnect_capabilitesReportPushNotificationsAvailable_reconnectForEver | test_try_reconnect_capabilites_report_push_notifications_available_reconnect_for_ever | ported |
+| testSetup_correctCredentials_authenticateAndEmitReady | test_setup_correct_credentials_authenticate_and_emit_ready | ported (the spies made in `beforeAuthentication` are handed to `afterAuthentication` instead of captured) |
+| testSetup_httpsAccountWithPlaintextWebSocket_doesNotSendCredentials | test_setup_https_account_with_plaintext_web_socket_does_not_send_credentials | ported (waits 200 ms before the last check, so that a wrongly opened websocket would have time to send credentials) |
+| testOnWebSocketTextMessageReceived_notifyFileMessage_emitFilesChanged | test_on_web_socket_text_message_received_notify_file_message_emit_files_changed | ported |
+| testOnWebSocketTextMessageReceived_notifyFileIdMessage_emitFilesChanged | test_on_web_socket_text_message_received_notify_file_id_message_emit_files_changed | ported |
+| testOnWebSocketTextMessageReceived_notifyActivityMessage_emitNotification | test_on_web_socket_text_message_received_notify_activity_message_emit_notification | ported |
+| testOnWebSocketTextMessageReceived_notifyNotificationMessage_emitNotification | test_on_web_socket_text_message_received_notify_notification_message_emit_notification | ported |
+| testOnWebSocketTextMessageReceived_invalidCredentialsMessage_reconnectWebSocket | test_on_web_socket_text_message_received_invalid_credentials_message_reconnect_web_socket | ported |
+| testOnWebSocketError_connectionLost_emitConnectionLost | test_on_web_socket_error_connection_lost_emit_connection_lost | ported |
+| testSetup_maxConnectionAttemptsReached_disablePushNotifications | test_setup_max_connection_attempts_reached_disable_push_notifications | ported |
+| testOnWebSocketSslError_sslError_disablePushNotifications | test_on_web_socket_ssl_error_ssl_error_disable_push_notifications | adapted (upstream emits `sslErrors` by hand on the client's `QWebSocket`; here a real `wss` fake server with a self-signed certificate fails the certificate check, so no authentication message is awaited first) |
+| testAccount_web_socket_connectionLost_emitNotificationsDisabled | test_account_web_socket_connection_lost_emit_notifications_disabled | ported |
+| testAccount_web_socket_authenticationFailed_emitNotificationsDisabled | test_account_web_socket_authentication_failed_emit_notifications_disabled | ported |
+| testPingTimeout_pingTimedOut_reconnect | test_ping_timeout_ping_timed_out_reconnect | ported |
+| — | rust_only_wss_with_trust_invalid_certificates_authenticates | rust_only (`--trust` applies to `wss`) |
+| — | rust_only_account_forwards_signals_in_order | rust_only (`pushNotificationsReady` before the first `filesChanged` on the account channel) |
+
+Derived unit test: `push_notifications::tests::derived_file_id_to_integer`
+(`QJsonValue::toInteger()` on the `notify_file_id` array).
+
+## test/pushnotificationstestutils.{h,cpp} → `crates/nc-dav/tests/pushnotificationstestutils/mod.rs` (helpers, no test functions)
+
+* `FakeWebSocketServer` is a real websocket server (tokio-tungstenite) on
+  127.0.0.1, on an ephemeral port instead of the fixed 12345 so that the
+  tests can run in parallel; `create_account()` points the account at it.
+  `new_secure()` adds a `wss://localhost` variant with a self-signed
+  certificate (rcgen), for the certificate tests.
+* `waitForTextMessages()`: `QWebSocket` delivers the user name and password
+  (sent back to back) in one read, so one `QSignalSpy::wait()` sees both;
+  here, after the first message, the others are collected until none
+  arrives for 100 ms.
+* `socketForTextMessage()` returns a `ServerSocket` handle whose
+  `send_text_message()` and `abort()` (TCP closed without a closing
+  handshake) act on the server-side connection.
+* `CredentialsStub`: n/a, `nc_dav::Credentials` is plain data.
