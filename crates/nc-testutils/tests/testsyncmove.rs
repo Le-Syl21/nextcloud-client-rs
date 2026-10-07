@@ -604,7 +604,6 @@ fn test_duplicate_file_id() {
 }
 
 #[test]
-#[ignore = "pending: CML (local-new dir) gets the local dir mtime in the db, the fake MKCOL the default now-7d"]
 fn test_move_propagation() {
     let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
 

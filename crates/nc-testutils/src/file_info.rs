@@ -597,13 +597,72 @@ fn add_files_db_data(dest: &mut Vec<String>, fi: &FileInfo) {
     }
 }
 
-/// `printDbData`.
+/// `printDbData`: the description of the tree, through `QTest::toString`,
+/// like upstream's `char *`.
+///
+/// `QTest::toString(QString)` is `QTest::toPrettyUnicode`, which escapes and
+/// TRUNCATES its output to 256 bytes: upstream's
+/// `QCOMPARE(printDbData(a), printDbData(b))` only compares the beginning of
+/// the trees (about the first 245 characters). This was confirmed by running
+/// the upstream test binary (testMovePropagation passes upstream although
+/// the journal and the server differ further down the string). The
+/// truncation is reproduced so that the ported assertions check exactly what
+/// upstream checks; [`print_db_data_full`] has the whole text.
 pub fn print_db_data(fi: &FileInfo) -> String {
+    qtest_to_pretty_unicode(&print_db_data_full(fi))
+}
+
+/// The untruncated text of `printDbData` (before `QTest::toString`).
+pub fn print_db_data_full(fi: &FileInfo) -> String {
     let mut files = Vec::new();
     for child in fi.children.values() {
         add_files_db_data(&mut files, child);
     }
     format!("FileInfo with {} files({})", files.len(), files.join(", "))
+}
+
+/// `QTest::toPrettyUnicode` (qtestcase.cpp, Qt 6): quoted, escaped, cut to
+/// `PrettyUnicodeMaxOutputSize` (256) bytes with a trailing `...`. Checked
+/// against the output of the upstream test binary (Qt 6.10.2): 245
+/// characters of text are kept.
+pub fn qtest_to_pretty_unicode(s: &str) -> String {
+    const MAX_OUTPUT: usize = 256;
+    // sizeof(R"(\uXXXX"...)"): an escape sequence, the closing quote, the
+    // three dots and the NUL.
+    const MAX_INCREMENT: usize = 11;
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::from("\"");
+    let mut trimmed = false;
+    for u in s.encode_utf16() {
+        if out.len() > MAX_OUTPUT - MAX_INCREMENT {
+            trimmed = true;
+            break;
+        }
+        if (0x20..0x7f).contains(&u) && u != u16::from(b'\\') && u != u16::from(b'"') {
+            out.push(char::from(u as u8));
+            continue;
+        }
+        out.push('\\');
+        match u {
+            0x22 | 0x5c => out.push(char::from(u as u8)),
+            0x8 => out.push('b'),
+            0xc => out.push('f'),
+            0xa => out.push('n'),
+            0xd => out.push('r'),
+            0x9 => out.push('t'),
+            _ => {
+                out.push('u');
+                for shift in [12, 8, 4, 0] {
+                    out.push(char::from(HEX[usize::from((u >> shift) & 0xf)]));
+                }
+            }
+        }
+    }
+    out.push('"');
+    if trimmed {
+        out.push_str("...");
+    }
+    out
 }
 
 /// `findConflict`: the conflict copy of `filename` in `dir`, if any.
@@ -629,6 +688,17 @@ pub fn find_conflict<'a>(dir: &'a FileInfo, filename: &str) -> Option<&'a FileIn
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn derived_qtest_to_pretty_unicode() {
+        use super::qtest_to_pretty_unicode as p;
+        assert_eq!(p("ab"), "\"ab\"");
+        assert_eq!(p("a\"b\\\n\u{e9}"), "\"a\\\"b\\\\\\n\\u00E9\"");
+        let long = "x".repeat(300);
+        let out = p(&long);
+        assert_eq!(out, format!("\"{}\"...", "x".repeat(245)));
+        assert_eq!(out.len(), 250);
+    }
+
     use super::*;
 
     #[test]

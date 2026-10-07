@@ -38,7 +38,7 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testsyncfileitem.cpp | 3 | 1 | 0 | 2 |
 | test/testnextcloudpropagator.cpp | 7 | 6 | 0 | 1 |
 | test/testsyncengine.cpp | 57 | 49 | 0 | 8 |
-| test/testsyncmove.cpp | 30 | 28 | 1 | 1 |
+| test/testsyncmove.cpp | 30 | 29 | 0 | 1 |
 | test/testsyncconflict.cpp | 15 | 14 | 0 | 1 |
 | test/testremotediscovery.cpp | 7 | 6 | 0 | 1 |
 | test/testsyncdelete.cpp | 3 | 2 | 0 | 1 |
@@ -61,15 +61,14 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testforcesyncnow.cpp | 3 | 2 | 0 | 1 |
 | test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
 | test/testaccount.cpp | 5 | 2 | 0 | 3 |
-| **Total** | **403** | **319** | **1** | **83** |
+| **Total** | **403** | **320** | **0** | **83** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
 testlocaldiscovery, testremotediscovery, testpermissions,
 testallfilesdeleted, testblacklist, testdownload, testuploadreset,
 testselectivesync, testdatabaseerror, testlockedfiles, testlongpath,
-testsyncdelete) is ported. One function is pending
-(testsyncmove/testMovePropagation, a single assertion). The two
+testsyncdelete) is ported, none pending. The two
 `HAVE_QHTTPSERVER` tests of testnextcloudpropagator are ported in Phase 2
 (decompression safety check, direct download URLs).
 
@@ -373,7 +372,7 @@ failure (`LsColError::partial`); subfolders and success only on `Ok`.
 | testLocalMoveDetection | test_local_move_detection | ported |
 | testLocalExternalStorageRenameDetection | test_local_external_storage_rename_detection | ported |
 | testDuplicateFileId (+_data: first ordering, second ordering) | test_duplicate_file_id | ported |
-| testMovePropagation | test_move_propagation | pending (one assertion: after the folder rename/rename conflict, the journal keeps the local mtime of the re-uploaded folder `CML` while the fake MKCOL gives it the default now−7 days. Reading upstream discovery, MKCOL propagation and the harness, upstream should do the same; needs a run of the upstream test binary to settle) |
+| testMovePropagation | test_move_propagation | ported (settled by running the upstream test binary: upstream's `QCOMPARE(printDbData(...), printDbData(...))` goes through `QTest::toString`, which truncates to 245 characters, so only the start of the trees is compared; the journal of upstream has the same local mtime for the re-uploaded folder `CML` as ours. `print_db_data` reproduces the truncation, see `nc-testutils/src/file_info.rs`) |
 | testRenameCaseOnly | test_rename_case_only | ported |
 | testMoveAndTypeChange | test_move_and_type_change | ported (the `QCOMPARE` is commented out upstream too, "BUG") |
 | testInvertFolderHierarchy | test_invert_folder_hierarchy | ported |
