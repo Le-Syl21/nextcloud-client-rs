@@ -407,7 +407,10 @@ enum Posted {
     },
 }
 
-enum LocalListingResult {
+/// What `DiscoverySingleLocalDirectoryJob` reports: `finished`,
+/// `finishedFatalError` or `finishedNonFatalError`.
+#[derive(Clone, Debug)]
+pub enum LocalListingResult {
     Finished(Vec<LocalInfo>),
     FatalError(String),
     NonFatalError(String),
@@ -1148,82 +1151,25 @@ impl DiscoveryPhase {
         id: JobId,
         local_path_in: &str,
     ) -> LocalListingResult {
-        let mut local_path = local_path_in.to_owned();
-        if local_path.ends_with('/') {
-            local_path.pop();
-        }
-        let entries = match filesystem::csync_vio_local_readdir(
-            &local_path,
+        let (result, undecodable_names) = discovery_single_local_directory_job(
+            local_path_in,
             self.file_system_reliable_permissions,
-        ) {
-            Ok(e) => e,
-            Err(filesystem::OpendirError::AccessDenied) => {
-                return LocalListingResult::NonFatalError(
-                    "Directory not accessible on client, permission denied".to_owned(),
-                );
+        );
+        for name in undecodable_names {
+            // childIgnored(true) is applied by the caller through the item.
+            let item = new_item();
+            {
+                let mut i = item.borrow_mut();
+                i.file = format!("{}{}", local_path_in, String::from_utf8_lossy(&name));
+                i.instruction = Instruction::Ignore;
+                i.status = Status::NormalError;
+                i.error_string = "Filename encoding is not valid".to_owned();
             }
-            Err(filesystem::OpendirError::NotFound) => {
-                return LocalListingResult::FatalError(format!(
-                    "Directory not found: {local_path}"
-                ));
-            }
-            Err(filesystem::OpendirError::NotADirectory) => {
-                return LocalListingResult::Finished(Vec::new());
-            }
-            Err(filesystem::OpendirError::Other) => {
-                return LocalListingResult::FatalError(format!(
-                    "Error while opening directory {local_path}"
-                ));
-            }
-        };
-        let mut results = Vec::new();
-        for dirent in entries {
-            if dirent.item_type == ItemType::Skip {
-                continue;
-            }
-            let name = match String::from_utf8(dirent.name.clone()) {
-                Ok(n) => n,
-                Err(_) => {
-                    // childIgnored(true) is applied by the caller through the item.
-                    let item = new_item();
-                    {
-                        let mut i = item.borrow_mut();
-                        i.file =
-                            format!("{}{}", local_path_in, String::from_utf8_lossy(&dirent.name));
-                        i.instruction = Instruction::Ignore;
-                        i.status = Status::NormalError;
-                        i.error_string = "Filename encoding is not valid".to_owned();
-                    }
-                    // childIgnored(true)
-                    self.job_mut(id).child_ignored = true;
-                    self.emit_item_discovered(&item);
-                    continue;
-                }
-            };
-            results.push(LocalInfo {
-                valid: true,
-                name,
-                case_clash_conflicting_name: String::new(),
-                modtime: dirent.modtime,
-                size: dirent.size,
-                inode: dirent.inode,
-                is_directory: matches!(
-                    dirent.item_type,
-                    ItemType::Directory | ItemType::VirtualDirectory
-                ),
-                is_hidden: dirent.is_hidden,
-                is_sym_link: dirent.item_type == ItemType::SoftLink,
-                is_virtual_file: matches!(
-                    dirent.item_type,
-                    ItemType::VirtualFile | ItemType::VirtualFileDownload
-                ),
-                is_metadata_missing: dirent.is_metadata_missing,
-                is_permissions_invalid: dirent.is_permissions_invalid,
-                item_type: dirent.item_type,
-                is_locked: false,
-            });
+            // childIgnored(true)
+            self.job_mut(id).child_ignored = true;
+            self.emit_item_discovered(&item);
         }
-        LocalListingResult::Finished(results)
+        result
     }
 
     /// The handlers connected to the local job in `startAsyncLocalQuery`.
@@ -3934,4 +3880,89 @@ async fn discovery_single_directory(
         }
     }
     out
+}
+
+/// `DiscoverySingleLocalDirectoryJob::run`: lists `local_path_in`. Also
+/// returns the names that are not valid UTF-8, for which upstream emits an
+/// ignored `itemDiscovered` (and `childIgnored`).
+pub fn discovery_single_local_directory_job(
+    local_path_in: &str,
+    file_system_reliable_permissions: bool,
+) -> (LocalListingResult, Vec<Vec<u8>>) {
+    let mut local_path = local_path_in.to_owned();
+    if local_path.ends_with('/') {
+        local_path.pop();
+    }
+    let entries =
+        match filesystem::csync_vio_local_readdir(&local_path, file_system_reliable_permissions) {
+            Ok(e) => e,
+            Err(filesystem::OpendirError::AccessDenied) => {
+                return (
+                    LocalListingResult::NonFatalError(
+                        "Directory not accessible on client, permission denied".to_owned(),
+                    ),
+                    Vec::new(),
+                );
+            }
+            Err(filesystem::OpendirError::NotFound) => {
+                return (
+                    LocalListingResult::FatalError(format!("Directory not found: {local_path}")),
+                    Vec::new(),
+                );
+            }
+            Err(filesystem::OpendirError::NotADirectory) => {
+                return (LocalListingResult::Finished(Vec::new()), Vec::new());
+            }
+            Err(filesystem::OpendirError::Other) => {
+                return (
+                    LocalListingResult::FatalError(format!(
+                        "Error while opening directory {local_path}"
+                    )),
+                    Vec::new(),
+                );
+            }
+        };
+    let mut results = Vec::new();
+    let mut undecodable_names = Vec::new();
+    for dirent in entries {
+        if dirent.item_type == ItemType::Skip {
+            continue;
+        }
+        let name = match String::from_utf8(dirent.name.clone()) {
+            Ok(n) => n,
+            Err(_) => {
+                undecodable_names.push(dirent.name);
+                continue;
+            }
+        };
+        let mut info = LocalInfo {
+            valid: true,
+            name,
+            case_clash_conflicting_name: String::new(),
+            modtime: dirent.modtime,
+            size: dirent.size,
+            inode: dirent.inode,
+            is_directory: matches!(
+                dirent.item_type,
+                ItemType::Directory | ItemType::VirtualDirectory
+            ),
+            is_hidden: dirent.is_hidden,
+            is_sym_link: dirent.item_type == ItemType::SoftLink,
+            is_virtual_file: matches!(
+                dirent.item_type,
+                ItemType::VirtualFile | ItemType::VirtualFileDownload
+            ),
+            is_metadata_missing: dirent.is_metadata_missing,
+            is_permissions_invalid: dirent.is_permissions_invalid,
+            item_type: dirent.item_type,
+            is_locked: false,
+        };
+        // Access lock state on the worker thread so a blocking open cannot freeze the GUI #10464
+        if !info.is_sym_link && !info.is_virtual_file && !info.is_directory {
+            let absolute_local_path = format!("{local_path}/{}", info.name);
+            info.is_locked = filesystem::is_file_locked(&absolute_local_path);
+        }
+        results.push(info);
+    }
+    (LocalListingResult::Finished(results), undecodable_names)
 }
