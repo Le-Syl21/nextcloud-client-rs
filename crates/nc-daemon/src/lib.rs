@@ -21,6 +21,7 @@ pub mod folder_watcher;
 pub mod manage;
 pub mod network_limits;
 pub mod settings;
+pub mod startup;
 pub mod sync_result;
 pub mod takeover;
 pub mod timer;

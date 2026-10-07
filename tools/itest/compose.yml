@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# Throw-away Nextcloud for the nextcloud-client-rs integration test.
+# Throw-away Nextcloud for the nextcloud-client-rs integration tests, with
+# redis and notify_push (Client Push) behind a small reverse proxy.
 # Separate project, network, volume and a loopback-only port; never shares
 # anything with the production Nextcloud of this machine.
+#
+#   127.0.0.1:18080  ->  proxy (in nc's network namespace)
+#                    ->  /       nc   (apache, sqlite)
+#                               ->  /push/  push (notify_push, from the app)
 name: ncrs-itest
 services:
   nc:
@@ -15,13 +20,53 @@ services:
       SQLITE_DATABASE: ncrs
       NEXTCLOUD_ADMIN_USER: admin
       NEXTCLOUD_ADMIN_PASSWORD: ncrs-itest-admin-pw
-      NEXTCLOUD_TRUSTED_DOMAINS: "127.0.0.1 localhost"
+      NEXTCLOUD_TRUSTED_DOMAINS: "127.0.0.1 localhost nc"
+      REDIS_HOST: redis
+    # The proxy shares this container's network namespace (so that the
+    # server itself reaches http://127.0.0.1:18080, which notify_push:setup
+    # checks): the published port is the proxy's.
     ports:
-      - "127.0.0.1:18080:80"
+      - "127.0.0.1:18080:18080"
     volumes:
       - ncrs-itest-data:/var/www/html
     networks:
       - ncrs-itest-net
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+    container_name: ncrs-itest-redis
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    networks:
+      - ncrs-itest-net
+  push:
+    # The notify_push binary shipped with the app (installed by run.sh),
+    # reading the database and redis settings from config.php.
+    image: alpine:latest
+    container_name: ncrs-itest-push
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    profiles: ["push"]
+    environment:
+      NEXTCLOUD_URL: http://nc
+      PORT: "7867"
+      LOG: notify_push=debug
+    volumes:
+      - ncrs-itest-data:/var/www/html
+    command: ["/var/www/html/custom_apps/notify_push/bin/x86_64/notify_push", "/var/www/html/config/config.php"]
+    networks:
+      - ncrs-itest-net
+  proxy:
+    image: nginx:alpine
+    container_name: ncrs-itest-proxy
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    network_mode: "service:nc"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - nc
 volumes:
   ncrs-itest-data:
     name: ncrs-itest-data

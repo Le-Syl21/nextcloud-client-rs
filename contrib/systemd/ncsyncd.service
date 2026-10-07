@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# User service: ~/.config/systemd/user/ncsyncd.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ncsyncd
+# Configuration: ~/.config/ncsyncd/ncsyncd.cfg (see `ncsync account add`).
+# Credentials: the Secret Service (keyring) of the user session.
+[Unit]
+Description=Nextcloud sync daemon (ncsyncd, unofficial)
+Documentation=https://github.com/Le-Syl21/nextcloud-client-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/ncsyncd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+WatchdogSec=120s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=default.target

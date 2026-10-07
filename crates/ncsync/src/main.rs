@@ -14,6 +14,7 @@
 //! for this client.
 
 mod config_cmds;
+mod control_cmds;
 mod netrc;
 
 use std::io::Write as _;
@@ -68,6 +69,15 @@ enum Command {
         #[command(flatten)]
         config: config_cmds::ConfigArgs,
     },
+    /// Show the accounts and folders of a running ncsyncd.
+    Status(control_cmds::ControlArgs),
+    /// Pause a folder (all folders by default) of a running ncsyncd.
+    Pause(control_cmds::FolderArg),
+    /// Resume a paused folder (all folders by default).
+    Resume(control_cmds::FolderArg),
+    /// Sync a folder now (all folders by default), like the desktop
+    /// client's "Sync now".
+    SyncNow(control_cmds::FolderArg),
 }
 
 #[derive(Args, Debug)]
@@ -167,6 +177,22 @@ fn main() -> ExitCode {
         Command::Folder { cmd, config } => config_cmds::run_folder(cmd, config),
         Command::Takeover { args, config } => config_cmds::run_takeover(args, config),
         Command::Handback { args, config } => config_cmds::run_handback(args, config),
+        Command::Status(c) => control_cmds::run_status(c),
+        Command::Pause(a) => control_cmds::run_folder_request(
+            a,
+            |folder| nc_daemon::control::Request::Pause { folder },
+            "paused",
+        ),
+        Command::Resume(a) => control_cmds::run_folder_request(
+            a,
+            |folder| nc_daemon::control::Request::Resume { folder },
+            "resumed",
+        ),
+        Command::SyncNow(a) => control_cmds::run_folder_request(
+            a,
+            |folder| nc_daemon::control::Request::SyncNow { folder },
+            "sync scheduled",
+        ),
     }
 }
 
