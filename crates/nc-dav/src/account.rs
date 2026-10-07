@@ -106,6 +106,9 @@ impl ServerUrl {
         if authority.is_empty() {
             return Err(UrlError(input.to_owned()));
         }
+        // QUrl normalizes the host to lower case.
+        let authority = authority.to_ascii_lowercase();
+        let authority = authority.as_str();
         let decode = |s: &str| {
             percent_encoding::percent_decode_str(s)
                 .decode_utf8_lossy()
