@@ -14,7 +14,7 @@ nc-dav.workspace = true
 nc-sync.workspace = true
 log.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "signal"] }
 tokio-util.workspace = true
 serde_json.workspace = true
 inotify.workspace = true
@@ -23,9 +23,11 @@ serde.workspace = true
 http.workspace = true
 fastrand.workspace = true
 rustix.workspace = true
+sd-notify = "0.5.0"
 
 [dev-dependencies]
 tempfile.workspace = true
+nc-testutils.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

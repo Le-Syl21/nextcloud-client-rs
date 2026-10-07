@@ -8,6 +8,7 @@
 pub mod account_state;
 pub mod connection_validator;
 pub mod control;
+pub mod daemon;
 pub mod event;
 pub mod folder;
 pub mod folder_man;

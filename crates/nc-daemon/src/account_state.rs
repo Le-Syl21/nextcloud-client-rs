@@ -192,6 +192,15 @@ impl AccountState {
         }
     }
 
+    /// An account state that is connected and never checks its connection
+    /// (the `FakeAccountState` of upstream's tests).
+    pub fn new_fake_connected(id: &str, account: Arc<Account>) -> Self {
+        let mut s = Self::new(id, account, true, Duration::from_secs(30));
+        s.state = State::Connected;
+        s.connection_status = ConnectionStatus::Connected;
+        s
+    }
+
     /// Starts the timers and posts the first connection check (the end of
     /// upstream's constructor).
     pub fn start<E: 'static>(&mut self, tx: &UnboundedSender<E>, wrap: EventWrapper<E>) {

@@ -90,8 +90,6 @@ impl FolderSettingsStore for NullSettingsStore {
 /// What the folder manager asks its owner (the daemon) to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManagerRequest {
-    /// `account()->trySetupPushNotifications()`.
-    SetupPushNotifications(String),
     /// The account needs new credentials.
     CredentialsNeeded(String),
 }
@@ -105,9 +103,6 @@ pub struct FolderMan {
     /// `AccountManager::accounts()`.
     accounts: BTreeMap<String, AccountState>,
     account_limits: HashMap<String, NetworkLimits>,
-    /// Whether the push notifications of the account are ready for files
-    /// (`pushNotificationsFilesReady`).
-    push_files_ready: HashSet<String>,
     folder_map: BTreeMap<String, Folder>,
     aliases: HashMap<FolderId, String>,
     next_id: FolderId,
@@ -147,7 +142,6 @@ impl FolderMan {
             watcher_factory,
             accounts: BTreeMap::new(),
             account_limits: HashMap::new(),
-            push_files_ready: HashSet::new(),
             folder_map: BTreeMap::new(),
             aliases: HashMap::new(),
             next_id: 1,
@@ -189,7 +183,12 @@ impl FolderMan {
         account: Arc<Account>,
         credentials_ready: bool,
         limits: NetworkLimits,
+        push: Option<nc_dav::HttpClientOptions>,
     ) {
+        if let Some(options) = push {
+            account.enable_push_notifications(options);
+            forward_push_events(id, &account, &self.tx);
+        }
         let mut state = AccountState::new(
             id,
             account,
@@ -199,6 +198,20 @@ impl FolderMan {
         state.start(&self.tx, self.account_wrap.clone());
         self.accounts.insert(id.to_owned(), state);
         self.account_limits.insert(id.to_owned(), limits);
+    }
+
+    /// Adds an account that is connected and never checks its connection
+    /// (`FakeAccountState`, for tests).
+    pub fn add_fake_connected_account(&mut self, id: &str, account: Arc<Account>) {
+        self.accounts
+            .insert(id.to_owned(), AccountState::new_fake_connected(id, account));
+        self.account_limits
+            .insert(id.to_owned(), NetworkLimits::default());
+    }
+
+    /// Empties the schedule queue (tests: `_scheduledFolders.clear()`).
+    pub fn clear_schedule_queue(&mut self) {
+        self.scheduled_folders.clear();
     }
 
     pub fn account_state(&self, id: &str) -> Option<&AccountState> {
@@ -250,9 +263,11 @@ impl FolderMan {
                         self.set_folder_sync_paused(fid, state == State::NeedToSignTermsOfService);
                     }
                 }
-                AccountSignal::TrySetupPushNotifications => self
-                    .requests
-                    .push(ManagerRequest::SetupPushNotifications(id.to_owned())),
+                AccountSignal::TrySetupPushNotifications => {
+                    if let Some(a) = self.accounts.get(id) {
+                        a.account().try_setup_push_notifications();
+                    }
+                }
                 AccountSignal::CredentialsNeeded => {
                     log::warn!(target: LOG, "Account {id} needs credentials: run `ncsync account login` (or provide the systemd credential) and reload the daemon");
                     self.requests
@@ -360,7 +375,18 @@ impl FolderMan {
 
     /// `addFolder(accountState, folderDefinition)`: a new folder, saved in
     /// the settings.
-    pub fn add_folder(&mut self, account_id: &str, definition: Definition) -> Option<String> {
+    pub fn add_folder(&mut self, account_id: &str, mut definition: Definition) -> Option<String> {
+        // Choose a db filename
+        let account = self.accounts.get(account_id)?.account().clone();
+        definition.journal_path = nc_journal::journal::make_db_name(
+            std::path::Path::new(&definition.local_path),
+            &account.url().to_credential_free_string(),
+            &definition.target_path,
+            &account.credentials().user,
+        );
+        if !ensure_journal_gone(&definition.absolute_journal_path()) {
+            return None;
+        }
         let clean = nc_sync::touched_files::clean_path(&definition.local_path);
         let alias = self.add_folder_internal(account_id, definition)?;
         // Migration: The first account that's configured for a local folder shall
@@ -732,7 +758,11 @@ impl FolderMan {
 
     /// `pushNotificationsFilesReady(account)`.
     fn push_notifications_files_ready(&self, account_id: &str) -> bool {
-        self.push_files_ready.contains(account_id)
+        self.accounts.get(account_id).is_some_and(|a| {
+            let account = a.account();
+            account.capabilities().push_notifications_files_available()
+                && account.push_notifications().is_some_and(|p| p.is_ready())
+        })
     }
 
     /// `slotEtagPollTimerTimeout()`.
@@ -869,7 +899,7 @@ impl FolderMan {
     }
 
     /// `slotProcessFilesPushNotification(account)`.
-    fn slot_process_files_push_notification(&mut self, account_id: &str) {
+    pub fn slot_process_files_push_notification(&mut self, account_id: &str) {
         log::debug!(target: LOG, "received notify_file push notification account={account_id}");
         let ids: Vec<FolderId> = self
             .folder_map
@@ -887,7 +917,7 @@ impl FolderMan {
     }
 
     /// `slotProcessFileIdsPushNotification(account, fileIds)`.
-    fn slot_process_file_ids_push_notification(&mut self, account_id: &str, file_ids: &[i64]) {
+    pub fn slot_process_file_ids_push_notification(&mut self, account_id: &str, file_ids: &[i64]) {
         log::debug!(target: LOG, "received notify_file_id push notification account={account_id} fileIds={file_ids:?}");
         let mut ids = Vec::new();
         for f in self.folder_map.values() {
@@ -913,14 +943,6 @@ impl FolderMan {
         match event {
             PushEvent::Ready => {
                 log::info!(target: LOG, "Push notifications ready");
-                let files = self.accounts.get(account_id).is_some_and(|a| {
-                    a.account()
-                        .capabilities()
-                        .push_notifications_files_available()
-                });
-                if files {
-                    self.push_files_ready.insert(account_id.to_owned());
-                }
                 let wrap = self.account_wrap.clone();
                 if let Some(state) = self.accounts.get_mut(account_id) {
                     let signals = state.slot_push_notifications_ready(&self.tx, &wrap);
@@ -928,15 +950,19 @@ impl FolderMan {
                 }
             }
             PushEvent::Disabled => {
-                self.push_files_ready.remove(account_id);
                 if let Some(state) = self.accounts.get_mut(account_id) {
                     state.set_push_notifications_ready(false);
                 }
             }
-            PushEvent::FilesChanged => self.slot_process_files_push_notification(account_id),
-            PushEvent::FileIdsChanged(ids) => {
+            // slotConnectToPushNotifications connects these only while
+            // pushNotificationsFilesReady(account).
+            PushEvent::FilesChanged if self.push_notifications_files_ready(account_id) => {
+                self.slot_process_files_push_notification(account_id)
+            }
+            PushEvent::FileIdsChanged(ids) if self.push_notifications_files_ready(account_id) => {
                 self.slot_process_file_ids_push_notification(account_id, &ids)
             }
+            PushEvent::FilesChanged | PushEvent::FileIdsChanged(_) => {}
         }
     }
 
@@ -996,7 +1022,10 @@ impl FolderMan {
             Event::Folder(id, e) => self.handle_folder_event(id, e),
             Event::Watcher(id, e) => self.handle_watcher_event(id, e),
             Event::Push(account_id, e) => self.handle_push_event(&account_id, e),
-            Event::Control(..) | Event::Shutdown => {}
+            Event::Control(..)
+            | Event::Shutdown
+            | Event::WatchdogTick
+            | Event::ReloadCredentials => {}
         }
     }
 
@@ -1155,4 +1184,49 @@ impl FolderMan {
 /// changes are then only found by full local discoveries.
 pub fn no_watcher() -> WatcherFactory {
     Rc::new(|_, _, _, _| None)
+}
+
+/// `FolderMan::slotSetupPushNotifications`: listens to the account's push
+/// notification signals and posts them to the queue.
+fn forward_push_events(id: &str, account: &Arc<Account>, tx: &UnboundedSender<Event>) {
+    use nc_dav::account::AccountPushEvent;
+    use nc_dav::push_notifications::PushNotificationsEvent;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = account.subscribe_push_notifications_events();
+    let tx = tx.clone();
+    let id = id.to_owned();
+    tokio::task::spawn_local(async move {
+        loop {
+            let event = match rx.recv().await {
+                Ok(AccountPushEvent::PushNotificationsReady { .. }) => PushEvent::Ready,
+                Ok(AccountPushEvent::PushNotificationsDisabled { .. }) => PushEvent::Disabled,
+                Ok(AccountPushEvent::PushNotification(PushNotificationsEvent::FilesChanged {
+                    ..
+                })) => PushEvent::FilesChanged,
+                Ok(AccountPushEvent::PushNotification(
+                    PushNotificationsEvent::FileIdsChanged { file_ids, .. },
+                )) => PushEvent::FileIdsChanged(file_ids),
+                Ok(_) => continue,
+                // Missed notifications: sync everything of the account.
+                Err(RecvError::Lagged(_)) => PushEvent::FilesChanged,
+                Err(RecvError::Closed) => return,
+            };
+            if tx.send(Event::Push(id.clone(), event)).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// `ensureJournalGone(journalDbFile)`: removes the old journal file (upstream
+/// asks to retry with a dialog when it cannot).
+pub fn ensure_journal_gone(journal_db_file: &str) -> bool {
+    let path = std::path::Path::new(journal_db_file);
+    if path.exists()
+        && let Err(e) = std::fs::remove_file(path)
+    {
+        log::warn!(target: LOG, "Could not remove old db file at {journal_db_file}: {e}");
+        return false;
+    }
+    true
 }

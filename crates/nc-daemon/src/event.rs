@@ -33,6 +33,10 @@ pub enum Event {
         crate::control::Request,
         tokio::sync::oneshot::Sender<crate::control::Response>,
     ),
+    /// The systemd watchdog interval passed: the loop is alive.
+    WatchdogTick,
+    /// Reload the credentials of the accounts waiting for them (SIGHUP).
+    ReloadCredentials,
     /// Stop: abort the running syncs and quit.
     Shutdown,
 }

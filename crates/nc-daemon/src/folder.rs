@@ -168,14 +168,10 @@ pub trait FolderWatcherHandle {
 }
 
 /// Creates the folder watcher of a folder (`registerFolderWatcher`):
-/// `(folder id, canonical path, exclusion check, event queue)`.
+/// `(folder id, canonical path with a trailing '/', files locking
+/// available, event queue)`.
 pub type WatcherFactory = Rc<
-    dyn Fn(
-        FolderId,
-        &str,
-        Rc<dyn Fn(&str) -> bool>,
-        &UnboundedSender<Event>,
-    ) -> Option<Box<dyn FolderWatcherHandle>>,
+    dyn Fn(FolderId, &str, bool, &UnboundedSender<Event>) -> Option<Box<dyn FolderWatcherHandle>>,
 >;
 
 /// `Folder`.
@@ -234,6 +230,9 @@ impl Folder {
         network_limits: NetworkLimits,
         tx: &UnboundedSender<Event>,
     ) -> Self {
+        let mut definition = definition;
+        definition.local_path = nc_journal::utility::trailing_slash_path(&definition.local_path);
+        definition.target_path = prepare_target_path(&definition.target_path);
         let journal = Arc::new(SyncJournalDb::new(definition.absolute_journal_path()));
         let mut sync_result = SyncResult::new();
         let status = if definition.paused {
@@ -852,12 +851,8 @@ impl Folder {
         if !std::path::Path::new(self.path()).is_dir() {
             return;
         }
-        let excluded = self.excluded_files.clone();
-        let base = self.path().to_owned();
-        let hidden = self.ignore_hidden.clone();
-        let is_ignored: Rc<dyn Fn(&str) -> bool> =
-            Rc::new(move |p: &str| path_is_ignored(&excluded, &base, hidden.get(), p));
-        self.folder_watcher = factory(self.id, self.path(), is_ignored, &self.tx);
+        let files_lock = self.account.capabilities().files_lock_available();
+        self.folder_watcher = factory(self.id, self.path(), files_lock, &self.tx);
     }
 
     /// `disconnectFolderWatcher()`.
@@ -1432,5 +1427,18 @@ fn slot_new_big_folder_discovered(
     {
         undecided.push(new_folder);
         journal.set_selective_sync_list(SelectiveSyncListType::UndecidedList, &undecided);
+    }
+}
+
+/// `FolderDefinition::prepareTargetPath(path)`: remove ending /, then
+/// ensure starting '/': so "/foo/bar" and "/".
+pub fn prepare_target_path(path: &str) -> String {
+    let p = path.strip_suffix('/').unwrap_or(path);
+    // Doing this second ensures the empty string or "/" come
+    // out as "/".
+    if p.starts_with('/') {
+        p.to_owned()
+    } else {
+        format!("/{p}")
     }
 }
