@@ -24,13 +24,36 @@ port; see [docs/crates-vs-port.md](docs/crates-vs-port.md).
 
 ## Status
 
-Phase 0 (libraries and tests only, no binaries yet):
+Phase 1: one-shot synchronization at `nextcloudcmd` parity.
 
 | Crate | Mirrors upstream | Content |
 |---|---|---|
 | `nc-journal` | `src/common`, `src/csync` | journal (`SyncJournalDb`), `c_jhash64`, exclude engine, checksums, remote permissions |
-| `nc-dav` | `src/libsync` (network layer) | Phase 0: only the in-process HTTP transport trait |
-| `nc-testutils` | `test/syncenginetestutils.*` | FakeFolder harness (in-memory server behind the transport trait) |
+| `nc-dav` | `src/libsync` (network layer) | HTTP transport (reqwest), `QNetworkReply` error model, PROPFIND parser, account, capabilities, network jobs |
+| `nc-sync` | `src/libsync` (engine) | discovery, reconciliation, propagator (downloads with resume, uploads v1 and chunked v2, remote and local operations, conflicts), sync engine |
+| `ncsync` | `src/cmd` | `ncsync sync`, the `nextcloudcmd` equivalent |
+| `nc-testutils` | `test/syncenginetestutils.*` | FakeFolder harness (in-memory server behind the transport trait) and the ported FakeFolder tests |
+
+Out of scope for now: virtual files, end-to-end encryption (encrypted folders
+are skipped like the official client does without E2EE), bulk upload (also
+disabled upstream), the GUI.
+
+## Usage
+
+```sh
+ncsync sync [OPTIONS] <source_dir> <server_url>
+```
+
+The options are those of `nextcloudcmd` (`-u`, `-p`, `-n`, `--non-interactive`,
+`--exclude`, `--unsyncedfolders`, `--path`, `--trust`, `--httpproxy`,
+`--max-sync-retries`, `-h` for hidden files, `-s`, `--logdebug`, ...); see
+`ncsync sync --help`. Prefer an app password, given with `--password-file`
+or `NC_PASSWORD` (with `--non-interactive`) rather than `-p`. Extensions: `--new-big-folder-size-limit`,
+`--confirm-external-storage`, `--abort-on-mass-deletion` and
+`--max-deletions`, `--password-file`. Not enforced yet: `--uplimit` / `--downlimit`.
+
+The journal is the official client's `.sync_xxxxxxxxxxxx.db`, named the same
+way, in the synchronized folder.
 
 ## Licensing
 
@@ -43,15 +66,18 @@ the copyright lines and SPDX header of the upstream file it was ported from:
   LGPL-2.1-or-later keep their LGPL-2.1-or-later header (most of
   `nc-journal`); LGPL-2.1-or-later code may be distributed under the GPL, so
   the crate as a whole is GPL-2.0-or-later;
-* files ported from `src/libsync` and `src/cmd` are GPL-2.0-or-later;
-* a few upstream files in those directories are GPL-2.0-or-later
+* a few upstream files in `src/common` and `src/csync` are GPL-2.0-or-later
   (`c_jhash.h`, `checksumcalculator.*`, `checksumconsts.h`) and so are their ports;
+* files ported from `src/libsync` and `src/cmd` are GPL-2.0-or-later;
 * ported tests and test utilities are CC0-1.0 like upstream `test/`.
 
 See `REUSE.toml` and the `LICENSES/` directory.
 
-## Building
+## Building and testing
 
 ```sh
+cargo build --release -p ncsync
 cargo test --workspace
+tools/itest/run.sh      # end-to-end run against a throw-away Nextcloud container (Docker)
+tools/itest/run.sh --down
 ```
