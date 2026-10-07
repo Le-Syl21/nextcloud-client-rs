@@ -654,6 +654,54 @@ fn capture_number(text: &str, prefix: &str) -> Option<i32> {
     digits.parse().ok()
 }
 
+/// `CheckRedirectCostFreeUrlJob`: `GET index.php/204` without following
+/// redirects. Returns the HTTP status code (`jobFinished(statusCode)`); a
+/// transport failure is returned as the reply (`timed_out` for the job's
+/// `timeout` signal).
+pub async fn check_redirect_cost_free_url(
+    account: &Account,
+    opts: &JobOptions,
+) -> Result<u16, Reply> {
+    let path = Target::Account("index.php/204".to_owned()).path(account);
+    let uri = match account.uri(&path) {
+        Ok(u) => u,
+        Err(e) => {
+            return Err(transport_failure(
+                path,
+                String::new(),
+                &TransportError::Other(e.to_string()),
+            ));
+        }
+    };
+    let url = uri.to_string();
+    let (mut req, request_id) =
+        account.build_request(Method::GET, uri, HeaderMap::new(), Body::empty());
+    req.extensions_mut()
+        .insert(crate::transport::NoFollowRedirects);
+    let result = guarded(opts, async {
+        let resp = account.send(req).await?;
+        let (parts, body) = resp.into_parts();
+        let _ = body.collect().await;
+        Ok(parts)
+    })
+    .await;
+    match result {
+        Ok(parts) => {
+            let status = parts.status.as_u16();
+            if (301..=307).contains(&status) {
+                log::debug!(target: "nextcloud.sync.networkjob.checkredirectcostfreeurl", "Redirecting cost-free URL {url} to {}", parts.headers.get(http::header::LOCATION).and_then(|v| v.to_str().ok()).unwrap_or_default());
+            }
+            Ok(status)
+        }
+        Err(e) => {
+            if matches!(e, TransportError::Timeout) {
+                log::debug!(target: "nextcloud.sync.networkjob.checkredirectcostfreeurl", "TIMEOUT");
+            }
+            Err(transport_failure(url, request_id, &e))
+        }
+    }
+}
+
 /// `CheckServerJob`: `GET status.php`. Returns the JSON object.
 pub async fn check_server(
     account: &Account,

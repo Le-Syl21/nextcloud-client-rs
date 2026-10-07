@@ -291,3 +291,9 @@ mod tests {
         assert_eq!(block_on(body.collect()).unwrap().as_ref(), b"abcd");
     }
 }
+
+/// A request extension asking the transport not to follow redirects
+/// (`AbstractNetworkJob::setFollowRedirects(false)`): the 3xx reply itself
+/// is returned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoFollowRedirects;

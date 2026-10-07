@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Port of upstream `src/libsync/syncengine.{h,cpp}` (nextcloud/desktop
-// v34.0.5), without the GUI-only parts (status tracker, progress info,
-// scheduled sync timers, virtual files, end-to-end encryption).
+// v34.0.5), without the GUI-only parts (status tracker, virtual files,
+// end-to-end encryption). The touched files and the scheduled sync run
+// timers are in `touched_files.rs` and `scheduled_sync.rs`.
 
 //! `SyncEngine`: runs one sync (discovery, reconcile, propagation) of a
 //! local folder against a remote folder.
@@ -34,6 +35,8 @@ use crate::item::{
 use crate::options::SyncOptions;
 use crate::progress::{ProgressInfo, ProgressStatus};
 use crate::propagator::{AbortHandle, Propagator, PropagatorEvent};
+use crate::scheduled_sync::ScheduledSyncTimers;
+use crate::touched_files::TouchedFiles;
 
 const LOG: &str = "nextcloud.sync.engine";
 
@@ -80,6 +83,9 @@ pub struct EngineCallbacks {
     pub propagator_event: Option<Box<dyn FnMut(&PropagatorEvent)>>,
     /// `transmissionProgress(progressInfo)`.
     pub transmission_progress: Option<Box<dyn FnMut(&ProgressInfo)>>,
+    /// `rootEtag(etag, time)`: the etag of the remote root, as soon as the
+    /// discovery received it (the time is when it was received).
+    pub root_etag: Option<Box<dyn FnMut(&[u8], std::time::SystemTime)>>,
 }
 
 /// State shared with the discovery and propagator callbacks.
@@ -162,6 +168,11 @@ pub struct SyncEngine {
     callbacks: Rc<RefCell<EngineCallbacks>>,
     discovery_abort: CancellationToken,
     propagator_abort: Rc<RefCell<Option<AbortHandle>>>,
+    /// `_touchedFiles` (shared so that a folder watcher can query it while
+    /// a sync runs, like `wasFileTouched` is called from the GUI thread).
+    touched_files: Rc<RefCell<TouchedFiles>>,
+    /// `_scheduledSyncTimers` / `_filesScheduledForLaterSync`.
+    scheduled_sync_timers: ScheduledSyncTimers,
 }
 
 fn emit_sync_error(cbs: &Rc<RefCell<EngineCallbacks>>, msg: &str, cat: ErrorCategory) {
@@ -206,7 +217,32 @@ impl SyncEngine {
             callbacks: Rc::new(RefCell::new(EngineCallbacks::default())),
             discovery_abort: CancellationToken::new(),
             propagator_abort: Rc::new(RefCell::new(None)),
+            touched_files: Rc::new(RefCell::new(TouchedFiles::new())),
+            scheduled_sync_timers: ScheduledSyncTimers::new(),
         }
+    }
+
+    /// `wasFileTouched(fn)`: whether a job of this engine touched the file
+    /// (absolute path) in the last seconds.
+    pub fn was_file_touched(&self, file_name: &str) -> bool {
+        self.touched_files.borrow_mut().was_file_touched(file_name)
+    }
+
+    /// The touched files list, to query `wasFileTouched` while the engine
+    /// is busy in a sync.
+    pub fn touched_files(&self) -> Rc<RefCell<TouchedFiles>> {
+        self.touched_files.clone()
+    }
+
+    /// `slotAddTouchedFile(fn)`.
+    pub fn add_touched_file(&self, file_name: &str) {
+        self.touched_files.borrow_mut().add(file_name);
+    }
+
+    /// The scheduled sync run timers (sync runs for when server-side locks
+    /// expire).
+    pub fn scheduled_sync_timers(&mut self) -> &mut ScheduledSyncTimers {
+        &mut self.scheduled_sync_timers
     }
 
     pub fn account(&self) -> &Arc<Account> {
@@ -231,6 +267,12 @@ impl SyncEngine {
 
     pub fn excluded_files(&self) -> std::cell::RefMut<'_, ExcludedFiles> {
         self.excluded_files.borrow_mut()
+    }
+
+    /// The exclude engine, shared: the folder watcher filters with it while
+    /// the engine is busy in a sync (`Folder::isFileExcludedAbsolute`).
+    pub fn excluded_files_handle(&self) -> Rc<RefCell<ExcludedFiles>> {
+        self.excluded_files.clone()
     }
 
     pub fn callbacks(&self) -> std::cell::RefMut<'_, EngineCallbacks> {
@@ -328,6 +370,7 @@ impl SyncEngine {
 
     /// `startSync()` until `finished(success)`: one complete sync run.
     pub async fn sync_once(&mut self) -> bool {
+        self.touched_files.borrow_mut().stop_clear_timer();
         let success = self.start_sync().await;
         // finalize(success)
         self.local_discovery_paths.clear();
@@ -335,6 +378,7 @@ impl SyncEngine {
         self.leading_and_trailing_spaces_files_allowed.clear();
         *self.propagator_abort.borrow_mut() = None;
         self.discovery_abort = CancellationToken::new();
+        self.touched_files.borrow_mut().start_clear_timer();
         // connected in the constructor: store the time of the last sync
         self.journal
             .key_value_store_set("last_sync", crate::utility::current_secs_since_epoch());
@@ -545,9 +589,15 @@ impl SyncEngine {
         let remote_root_etag = Rc::new(RefCell::new(Vec::new()));
         {
             let e = remote_root_etag.clone();
+            let cbs2 = cbs.clone();
             discovery.callbacks.root_etag = Some(Box::new(move |etag, _| {
+                // slotRootEtagReceived
                 if e.borrow().is_empty() {
+                    log::debug!(target: LOG, "Root etag: {}", String::from_utf8_lossy(etag));
                     *e.borrow_mut() = etag.to_vec();
+                    if let Some(cb) = cbs2.borrow_mut().root_etag.as_mut() {
+                        cb(etag, std::time::SystemTime::now());
+                    }
                 }
             }));
         }
@@ -678,13 +728,20 @@ impl SyncEngine {
             };
             let path = format!("{}{}", self.local_path, file);
             let parent = filesystem::parent_dir(&path);
+            self.add_touched_file(&parent);
             let _restore = filesystem::FilePermissionsRestore::new(
                 &parent,
                 filesystem::FolderPermissions::ReadWrite,
             );
+            self.add_touched_file(&path);
             if item_type == nc_journal::csync::ItemType::Directory {
                 let mut errors = Vec::new();
-                filesystem::remove_recursively(&path, &mut |_, _| {}, &mut errors);
+                let touched = self.touched_files.clone();
+                filesystem::remove_recursively(
+                    &path,
+                    &mut |p, _| touched.borrow_mut().add(p),
+                    &mut errors,
+                );
             } else {
                 let _ = filesystem::remove(&path);
             }
@@ -749,11 +806,17 @@ impl SyncEngine {
             log::info!(target: LOG, "data fingerprint changed, assume restore from backup");
             Self::restore_old_files(&state.borrow().sync_items);
         }
-        if discovery.another_sync_needed
+        if discovery.another_sync_needed && !discovery.files_needing_scheduled_sync.is_empty() {
+            self.scheduled_sync_timers
+                .schedule_files_delayed_sync(&discovery.files_needing_scheduled_sync);
+        } else if discovery.another_sync_needed
             && self.another_sync_needed == AnotherSyncNeeded::NoFollowUpSync
         {
-            // (slotScheduleFilesDelayedSync: the scheduled sync timers are a daemon feature)
             self.another_sync_needed = AnotherSyncNeeded::ImmediateFollowUp;
+        }
+        if !discovery.files_unschedule_sync.is_empty() {
+            self.scheduled_sync_timers
+                .unschedule_files_delayed_sync(&discovery.files_unschedule_sync);
         }
         if discovery.has_download_removed_items && discovery.has_upload_error_items {
             self.another_sync_needed = AnotherSyncNeeded::ImmediateFollowUp;
@@ -810,8 +873,10 @@ impl SyncEngine {
         {
             let cbs2 = cbs.clone();
             let state2 = state.clone();
+            let touched = self.touched_files.clone();
             propagator.callbacks.event = Some(Box::new(move |ev| {
                 match ev {
+                    PropagatorEvent::TouchedFile(f) => touched.borrow_mut().add(f),
                     PropagatorEvent::SeenLockedFile(f) => {
                         if let Some(cb) = cbs2.borrow_mut().seen_locked_file.as_mut() {
                             cb(f);

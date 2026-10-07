@@ -15,6 +15,8 @@ pub mod local_discovery_tracker;
 pub mod options;
 pub mod progress;
 pub mod propagator;
+pub mod scheduled_sync;
+pub mod touched_files;
 pub mod utility;
 
 pub use engine::{AnotherSyncNeeded, EngineAbortHandle, EngineCallbacks, SyncEngine};

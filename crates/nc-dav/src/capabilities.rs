@@ -306,6 +306,28 @@ impl Capabilities {
         to_bool(self.get("user_status", "supports_busy"))
     }
 
+    /// `maxChunkSize()`: `files.chunked_upload.max_size` (0 if unset).
+    pub fn max_chunk_size(&self) -> i64 {
+        let chunked = to_map(self.get("files", "chunked_upload"));
+        match chunked.get("max_size") {
+            Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+            Some(Value::String(s)) => s.trim().parse().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// `maxConcurrentChunkUploads()`: `files.chunked_upload.max_parallel_count`.
+    pub fn max_concurrent_chunk_uploads(&self) -> i32 {
+        let chunked = to_map(self.get("files", "chunked_upload"));
+        to_int(chunked.get("max_parallel_count"))
+    }
+
+    /// `availablePushNotifications() & PushNotificationType::Files`.
+    pub fn push_notifications_files_available(&self) -> bool {
+        self.available_push_notifications()
+            .test_flag(PushNotificationTypes::FILES)
+    }
+
     /// `availablePushNotifications()`.
     pub fn available_push_notifications(&self) -> PushNotificationTypes {
         if !self.caps.contains_key("notify_push") {
