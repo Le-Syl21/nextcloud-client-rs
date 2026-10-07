@@ -44,6 +44,10 @@ env_logger = "0.11.11"
 rpassword = "7.5.4"
 trash = { version = "5.2.9", default-features = false }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tokio-rustls = "0.26.6"
+rustls-platform-verifier = "0.7.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -70,7 +70,8 @@ the copyright lines and SPDX header of the upstream file it was ported from:
   (`c_jhash.h`, `checksumcalculator.*`, `checksumconsts.h`) and so are their ports;
 * files ported from `src/libsync` and `src/cmd` are GPL-2.0-or-later;
 * ported tests and test utilities are CC0-1.0 like upstream `test/`, except
-  the few upstream test files with another header (`testcapabilities.cpp`
+  the few upstream test files with another header (`testcapabilities.cpp`,
+  `testpushnotifications.cpp` and `pushnotificationstestutils.*`
   GPL-2.0-or-later, `testlongpath.cpp` LGPL-2.1-or-later), whose ports keep it.
 
 See `REUSE.toml` and the `LICENSES/` directory.

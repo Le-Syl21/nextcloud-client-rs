@@ -59,6 +59,17 @@ Build note: `[profile.dev.package."*"] opt-level = 3` optimises the
 dependencies (checksums, SQLite, TLS) in debug builds; the big-file chunking
 tests went from minutes to seconds. The first debug build takes longer.
 
+## Phase 2 (in the tree)
+
+All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| notify_push websocket (`pushnotifications.cpp`, `QWebSocket`) | **tokio-tungstenite** (`handshake` only, no default features) | 0.30.0 (tungstenite 0.30.0) | Websocket framing, the HTTP upgrade, ping/pong and the closing handshake. The client logic (authentication, messages, the ping, ping-timeout and reconnect timers, the error/SSL-error split, the account's reconnect timer and `isPushNotificationsWebSocketUrlAllowed`) is ported in `push_notifications.rs` and `account.rs`. The TCP connection, the TLS layer and the proxy tunnel are set up by the port (below) so that they follow the HTTP client's options. |
+| TLS of `wss://` | **tokio-rustls** (defaults: aws-lc-rs, TLS 1.2) + **rustls-platform-verifier** | 0.26.6 (rustls 0.23), 0.7.1 | Built like reqwest's rustls client in `HttpTransport`: the process default crypto provider or aws-lc-rs, TLS 1.2 and 1.3, the platform verifier, and an accept-all verifier with `--trust` (`trust_invalid_certificates`). A rejected certificate is upstream's `sslErrors` (`authenticationFailed`), any other TLS failure its `errorOccurred` (`connectionLost`). |
+| Proxy for the websocket | ported (HTTP `CONNECT` tunnel, Basic proxy credentials) | — | tokio-tungstenite has no proxy support. The explicit proxy option (`--httpproxy`) is honoured; the system/environment proxies that reqwest's `system-proxy` feature reads (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are not, nor are SOCKS proxies (the websocket then fails with `connectionLost`). |
+| Self-signed certificate of the `wss` fake server (tests only) | **rcgen** (`crypto`, `aws_lc_rs`; no default features) | 0.14.10 | Dev-dependency of `nc-dav`. |
+
 ## Planned (later phases), from the study
 
 All of these are to be re-checked for the latest version when they are added
@@ -67,7 +78,6 @@ All of these are to be re-checked for the latest version when they are added
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
 | inotify watcher (`folderwatcher_linux.cpp`) | **inotify** | 0.11.5 | Exact upstream mask and `IN_Q_OVERFLOW` → full local discovery. `notify` 9.0.0 is still an RC and hides the raw mask. |
-| notify_push websocket (`pushnotifications.cpp`) | **tokio-tungstenite** | 0.30.0 | — |
 | `nextcloud.cfg` takeover / hand-back (QSettings ini) | **ini-preserve** (our crate) | 0.1.3 | Format-preserving, needed to write the official client's config back. `rust-ini` 0.21.3 loses formatting. |
 | Credentials | **keyring** | 4.2.0 | Plus systemd `LoadCredential` for the root daemon. |
 | systemd `Type=notify` and watchdog | **sd-notify** | 0.5.0 | — |
