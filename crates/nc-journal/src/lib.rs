@@ -17,4 +17,6 @@ pub mod csync;
 pub mod exclude;
 pub mod jhash;
 pub mod journal;
+pub mod pinstate;
 pub mod remote_permissions;
+pub mod utility;

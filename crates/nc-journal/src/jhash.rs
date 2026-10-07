@@ -70,8 +70,8 @@ pub fn c_jhash(key: &[u8], initval: u32) -> u32 {
     let mut b: u32 = 0x9e37_79b9;
     let mut c: u32 = initval;
 
-    let mut chunks = key.chunks_exact(12);
-    for k in &mut chunks {
+    let (blocks, k) = key.as_chunks::<12>();
+    for k in blocks {
         a = a.wrapping_add(u32::from_le_bytes([k[0], k[1], k[2], k[3]]));
         b = b.wrapping_add(u32::from_le_bytes([k[4], k[5], k[6], k[7]]));
         c = c.wrapping_add(u32::from_le_bytes([k[8], k[9], k[10], k[11]]));
@@ -79,7 +79,6 @@ pub fn c_jhash(key: &[u8], initval: u32) -> u32 {
     }
 
     // Handle the last 11 bytes; the first byte of `c` is reserved for the length.
-    let k = chunks.remainder();
     c = c.wrapping_add(length);
     for (i, &byte) in k.iter().enumerate() {
         let v = u32::from(byte);
@@ -100,8 +99,8 @@ pub fn c_jhash64(key: &[u8], initval: u64) -> u64 {
     let mut b: u64 = initval;
     let mut c: u64 = 0x9e37_79b9_7f4a_7c13;
 
-    let mut chunks = key.chunks_exact(24);
-    for k in &mut chunks {
+    let (blocks, k) = key.as_chunks::<24>();
+    for k in blocks {
         let word = |o: usize| u64::from_le_bytes(k[o..o + 8].try_into().expect("8 bytes"));
         a = a.wrapping_add(word(0));
         b = b.wrapping_add(word(8));
@@ -110,7 +109,6 @@ pub fn c_jhash64(key: &[u8], initval: u64) -> u64 {
     }
 
     // Handle the last 23 bytes; the first byte of `c` is reserved for the length.
-    let k = chunks.remainder();
     c = c.wrapping_add(length);
     for (i, &byte) in k.iter().enumerate() {
         let v = u64::from(byte);
