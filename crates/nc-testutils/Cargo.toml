@@ -15,6 +15,8 @@ http.workspace = true
 bytes.workspace = true
 percent-encoding.workspace = true
 tempfile.workspace = true
+httpdate.workspace = true
+fastrand.workspace = true
 
 [lints]
 workspace = true

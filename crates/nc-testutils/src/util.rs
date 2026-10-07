@@ -14,26 +14,11 @@
 //! minimal executor for the in-process transport.
 
 use std::future::Future;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `OCC::Utility::rand()`: uniform in `[0, RAND_MAX)`, `RAND_MAX = 2^31 - 1`.
 pub(crate) fn rand() -> u32 {
-    static STATE: Mutex<u64> = Mutex::new(0);
-    let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if *s == 0 {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(1);
-        *s = (nanos as u64) ^ 0x9e37_79b9_7f4a_7c15 | 1;
-    }
-    // xorshift64*
-    *s ^= *s >> 12;
-    *s ^= *s << 25;
-    *s ^= *s >> 27;
-    let v = s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33;
-    (v % 0x7fff_ffff) as u32
+    fastrand::u32(0..0x7fff_ffff)
 }
 
 /// Milliseconds since the Unix epoch (negative before 1970).
@@ -58,35 +43,11 @@ pub(crate) fn from_secs(secs: i64) -> SystemTime {
 }
 
 /// Formats like `QLocale::c().toString(utc, "ddd, dd MMM yyyy HH:mm:ss 'GMT'")`
-/// (the `getlastmodified` format of `FakePropfindReply`).
+/// (the `getlastmodified` format of `FakePropfindReply`), i.e. the IMF-fixdate
+/// of RFC 9110, via the `httpdate` crate. Dates before 1970 are clamped to the
+/// epoch (`httpdate` does not represent them; the fake never produces them).
 pub fn http_date(t: SystemTime) -> String {
-    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let secs = secs_since_epoch(t);
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    // Civil-from-days (Howard Hinnant).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        DAYS[days.rem_euclid(7) as usize],
-        day,
-        MONTHS[(month - 1) as usize],
-        year,
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+    httpdate::fmt_http_date(t.max(UNIX_EPOCH))
 }
 
 /// Drives a future that is expected to be immediately ready, which is the

@@ -18,7 +18,9 @@ end-to-end encryption in v1.
 The behavioural reference ("oracle") is the upstream
 [nextcloud/desktop](https://github.com/nextcloud/desktop) tag **v34.0.5**
 (commit `62ebad6043b1e7c8e319f41be25d41f5a2c733e5`). Upstream tests are ported
-one-to-one by name; see [docs/test-parity.md](docs/test-parity.md).
+one-to-one by name; see [docs/test-parity.md](docs/test-parity.md). Where a
+reputable crate gives the exact upstream behaviour it is used instead of a
+port; see [docs/crates-vs-port.md](docs/crates-vs-port.md).
 
 ## Status
 
