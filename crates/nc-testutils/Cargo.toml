@@ -20,6 +20,7 @@ tempfile.workspace = true
 tokio.workspace = true
 httpdate.workspace = true
 fastrand.workspace = true
+env_logger.workspace = true
 
 [lints]
 workspace = true

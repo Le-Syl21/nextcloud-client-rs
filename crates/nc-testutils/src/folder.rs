@@ -108,6 +108,9 @@ impl FakeFolder {
         remote_path: &str,
         perform_initial_sync: bool,
     ) -> Self {
+        // Upstream tests log through the Logger (debug on); here RUST_LOG
+        // selects what is printed (captured by the test harness).
+        let _ = env_logger::builder().is_test(true).try_init();
         let temp_dir = tempfile::tempdir().expect("create temporary directory");
         let local_path = temp_dir
             .path()
