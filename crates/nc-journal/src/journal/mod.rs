@@ -57,7 +57,12 @@ const LOG_TARGET: &str = "nextcloud.sync.database";
 /// Upstream writes `MIRALL_VERSION_{MAJOR,MINOR,PATCH,BUILD}`. We write the
 /// version of the upstream release whose behaviour we implement, so the
 /// official client sees a journal "written by itself" on hand-over.
-pub const CLIENT_VERSION: (i64, i64, i64, u64) = (34, 0, 5, 0);
+pub const CLIENT_VERSION: (i64, i64, i64, u64) = (
+    crate::UPSTREAM_VERSION.0 as i64,
+    crate::UPSTREAM_VERSION.1 as i64,
+    crate::UPSTREAM_VERSION.2 as i64,
+    0,
+);
 
 const MAJOR_VERSION_3: i64 = 3;
 const MINOR_VERSION_16: i64 = 16;

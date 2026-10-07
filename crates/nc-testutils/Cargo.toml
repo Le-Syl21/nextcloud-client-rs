@@ -1,0 +1,20 @@
+[package]
+name = "nc-testutils"
+description = "FakeFolder test harness of nextcloud-client-rs (port of the Nextcloud desktop client's test/syncenginetestutils)"
+license = "CC0-1.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nc-journal.workspace = true
+nc-dav.workspace = true
+http.workspace = true
+bytes.workspace = true
+percent-encoding.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

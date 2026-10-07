@@ -12,6 +12,11 @@
 //!
 //! Reference upstream: nextcloud/desktop tag `v34.0.5`.
 
+/// Version of the upstream client whose behaviour is implemented
+/// (`MIRALL_VERSION_MAJOR/MINOR/PATCH` of nextcloud/desktop v34.0.5, commit
+/// `62ebad6043b1e7c8e319f41be25d41f5a2c733e5`).
+pub const UPSTREAM_VERSION: (i32, i32, i32) = (34, 0, 5);
+
 pub mod checksums;
 pub mod csync;
 pub mod exclude;

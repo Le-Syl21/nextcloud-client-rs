@@ -43,7 +43,6 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -89,7 +88,7 @@ pub enum ExcludeType {
 
 /// Client version used to evaluate `#!version` directives
 /// (`MIRALL_VERSION_MAJOR/MINOR/PATCH` of the reference upstream, v34.0.5).
-pub const CLIENT_VERSION: Version = (34, 0, 5);
+pub const CLIENT_VERSION: Version = crate::UPSTREAM_VERSION;
 
 /// `ExcludedFiles::Version`
 pub type Version = (i32, i32, i32);
@@ -97,39 +96,7 @@ pub type Version = (i32, i32, i32);
 /// The upstream default exclude list (`sync-exclude.lst` of v34.0.5).
 pub const DEFAULT_SYNC_EXCLUDE_LST: &str = include_str!("../../data/sync-exclude.lst");
 
-// ---------------------------------------------------------------------------
-// Bits of OCC::Utility used by the exclude engine.
-// ---------------------------------------------------------------------------
-
-/// `OCC::Utility::fsCasePreserving()`: whether the file system underneath is
-/// case preserving (case insensitive). True on Windows and macOS; can be
-/// overridden with the `OWNCLOUD_TEST_CASE_PRESERVING` environment variable,
-/// read once, like upstream's static initializer.
-pub fn fs_case_preserving() -> bool {
-    static OVERRIDE: OnceLock<bool> = OnceLock::new();
-    *OVERRIDE.get_or_init(|| match std::env::var("OWNCLOUD_TEST_CASE_PRESERVING") {
-        Ok(env) if !env.is_empty() => qt_to_int(env.as_bytes()) != 0,
-        _ => cfg!(any(windows, target_os = "macos")),
-    })
-}
-
-/// `OCC::Utility::isCaseClashConflictFile()`
-pub fn is_case_clash_conflict_file(name: &str) -> bool {
-    let bname = &name[name.rfind('/').map_or(0, |i| i + 1)..];
-    bname.contains("(case clash from")
-}
-
-/// `OCC::Utility::isConflictFile()`
-pub fn is_conflict_file(name: &str) -> bool {
-    let bname = &name[name.rfind('/').map_or(0, |i| i + 1)..];
-    if bname.contains("_conflict-") {
-        return true;
-    }
-    if bname.contains("(conflicted copy") {
-        return true;
-    }
-    is_case_clash_conflict_file(name)
-}
+use crate::utility::{fs_case_preserving, is_case_clash_conflict_file, is_conflict_file};
 
 /// `QByteArray::toInt()` (base 10): 0 when the text is not a number.
 fn qt_to_int(bytes: &[u8]) -> i32 {

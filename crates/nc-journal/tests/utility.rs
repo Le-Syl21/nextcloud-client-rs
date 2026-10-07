@@ -1,12 +1,38 @@
 // SPDX-FileCopyrightText: 2022 Nextcloud GmbH and Nextcloud contributors
+// SPDX-FileCopyrightText: 2018 Nextcloud GmbH and Nextcloud contributors
 // SPDX-FileCopyrightText: 2017 ownCloud, Inc.
+// SPDX-FileCopyrightText: 2013 ownCloud, Inc.
 // SPDX-License-Identifier: CC0-1.0
 //
-// Port of the pure-function tests of upstream `test/testsyncconflict.cpp`
-// (nextcloud/desktop v34.0.5): testConflictFileBaseName (+ its _data rows).
-// The FakeFolder-based tests of that file belong to Phase 1.
+// Port of the tests of upstream `test/testsyncconflict.cpp` and
+// `test/testutility.cpp` (nextcloud/desktop v34.0.5) that cover the ported
+// parts of `src/common/utility.cpp`:
+// - testConflictFileBaseName (+ its _data rows), from testsyncconflict.cpp;
+// - testFsCasePreserving, from testutility.cpp.
+// The FakeFolder-based tests of testsyncconflict.cpp belong to Phase 1.
 
-use nc_journal::utility::conflict_file_base_name_from_pattern;
+use nc_journal::utility::{
+    conflict_file_base_name_from_pattern, fs_case_preserving, is_mac, is_windows,
+    set_fs_case_preserving_override,
+};
+
+#[test]
+fn test_fs_case_preserving() {
+    // Upstream assumes OWNCLOUD_TEST_CASE_PRESERVING is not set.
+    if std::env::var_os("OWNCLOUD_TEST_CASE_PRESERVING").is_none() {
+        assert!(if is_mac() || is_windows() {
+            fs_case_preserving()
+        } else {
+            !fs_case_preserving()
+        });
+    }
+    set_fs_case_preserving_override(Some(true));
+    assert!(fs_case_preserving());
+    set_fs_case_preserving_override(Some(false));
+    assert!(!fs_case_preserving());
+    // QScopedValueRollback
+    set_fs_case_preserving_override(None);
+}
 
 #[test]
 fn test_conflict_file_base_name() {
