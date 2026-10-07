@@ -14,9 +14,12 @@ nc-dav.workspace = true
 nc-sync.workspace = true
 log.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 serde_json.workspace = true
+inotify.workspace = true
+regex.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

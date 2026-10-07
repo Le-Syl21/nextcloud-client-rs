@@ -4,3 +4,5 @@
 //! Daemon side of the sync client: what the official desktop client does in
 //! `src/gui` without a GUI (folder manager, folders, folder watcher, account
 //! state, configuration, credentials).
+
+pub mod folder_watcher;

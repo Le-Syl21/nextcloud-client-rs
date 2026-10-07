@@ -17,7 +17,7 @@ a `_data` function is counted with its test function, whose data rows all
 run inside the one Rust test. Tests marked *derived* or *rust_only* are
 additions without an upstream counterpart.
 
-Not counted here: test files of later phases (folder watcher, folder manager,
+Not counted here: test files of later phases not ported yet (folder manager,
 sync file status tracker, push notifications, ...), GUI tests, and the
 virtual files / end-to-end encryption test files (out of scope).
 
@@ -54,7 +54,9 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testdownload.cpp | 6 | 5 | 0 | 1 |
 | test/testblacklist.cpp | 2 | 1 | 0 | 1 |
 | test/testasyncop.cpp | 2 | 1 | 0 | 1 |
-| **Total** | **344** | **277** | **3** | **64** |
+| test/testinotifywatcher.cpp | 4 | 3 | 0 | 1 |
+| test/testfolderwatcher.cpp | 15 | 14 | 0 | 1 |
+| **Total** | **363** | **294** | **3** | **66** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -590,3 +592,54 @@ The file keeps upstream's LGPL-2.1-or-later csync header.
 Ported design and status per class: see the crate documentation of
 `crates/nc-testutils/src/lib.rs`. Its own unit tests (`file_info::tests`,
 `server::tests`, `disk::tests`, `folder::tests`, `path::tests`) are derived.
+
+# Phase 2 daemon
+
+## test/testinotifywatcher.cpp → `crates/nc-daemon/tests/testinotifywatcher.rs`
+
+Upstream subclasses `FolderWatcherPrivate` to reach its protected members;
+the port calls the public `FolderWatcherPrivate::default()` (no descriptor,
+null parent `()`), whose inotify calls go through the `InotifySys` seam.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | `init_test_case` fixture | adapted (each test builds the tree in its own tempdir) |
+| testDirsBelowPath | test_dirs_below_path | ported (including upstream's `QVERIFY(dirs.indexOf(...))` that only fails for index 0) |
+| testStaleWatchDescriptorIsIgnored | test_stale_watch_descriptor_is_ignored | ported (the raw `inotify_event` is written to a `std::io::pipe` and read by `slot_received_notification`) |
+| cleanupTestCase | — | n/a (tempdir cleanup is automatic) |
+
+## test/testfolderwatcher.cpp → `crates/nc-daemon/tests/testfolderwatcher.rs`
+
+Upstream runs the functions in order on one tree and one watcher; each Rust
+test builds the fixture, runs the `init()` check, the body and the
+`cleanup()` check. The shell commands (`touch`, `mkdir`, `rmdir`, `rm`, `mv`,
+`echo >`) are run like upstream's `system()`. `QSignalSpy` is the event
+channel of the watcher, read while the test waits.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (Qt logger / QStandardPaths test mode) |
+| init | `TestFolderWatcher::init` | adapted (called by every test: clears the spy, checks the watch count) |
+| cleanup | `TestFolderWatcher::cleanup` | adapted (called by every test: checks the watch count) |
+| testACreate | test_a_create | ported |
+| testATouch | test_a_touch | ported |
+| testMove3LevelDirWithFile | test_move3_level_dir_with_file | ported |
+| testCreateADir | test_create_a_dir | ported |
+| testRemoveADir | test_remove_a_dir | ported |
+| testRemoveAFile | test_remove_a_file | ported |
+| testRenameAFile | test_rename_a_file | ported |
+| testMoveAFile | test_move_a_file | ported |
+| testRenameDirectorySameBase | test_rename_directory_same_base | ported |
+| testRenameDirectoryDifferentBase | test_rename_directory_different_base | adapted (first replays testRenameDirectorySameBase, which created `a1/brename`) |
+| testDetectLockFiles | test_detect_lock_files | ported |
+| testDetectLockFilesExternally | test_detect_lock_files_externally | ported (the macOS `QSKIP` does not apply) |
+
+*Derived* (same file): `derived_watches_exhausted_makes_unreliable_once`
+(`ENOSPC` from `inotify_add_watch` → one `BecameUnreliable`),
+`derived_queue_overflow_reports_lost_changes` (the `IN_Q_OVERFLOW`
+divergence), `derived_journal_files_and_unknown_descriptors_are_filtered`,
+`derived_notification_test` (`startNotificatonTest` with and without
+notifications), `derived_set_permissions_test`. The lock file helpers ported
+from `src/libsync/filesystem.cpp` have unit tests in
+`crates/nc-daemon/src/folder_watcher/lock_file.rs` (*derived*; upstream
+covers them in `testlockfile.cpp`, not ported yet).
