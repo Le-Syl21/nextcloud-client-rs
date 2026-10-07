@@ -38,6 +38,63 @@ pub struct FakeFolder {
     journal: Arc<SyncJournalDb>,
     engine: SyncEngine,
     server_version: String,
+    abort_timer: AbortTimer,
+}
+
+/// `QTimer::singleShot(delay, [&] { fakeFolder.syncEngine().abort(); })`
+/// armed from anywhere, including a server override (which runs on the
+/// server side and cannot reach the engine). The timers fire while
+/// `sync_once()` runs; the ones still pending when it returns are dropped
+/// (upstream they would abort an idle engine, a no-op).
+#[derive(Clone, Default)]
+pub struct AbortTimer {
+    deadlines: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    notify: Arc<tokio::sync::Notify>,
+    fired: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AbortTimer {
+    /// Aborts the running sync after `delay`.
+    pub fn single_shot(&self, delay: std::time::Duration) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(std::time::Instant::now() + delay);
+        self.notify.notify_one();
+    }
+
+    fn next_deadline(&self) -> Option<std::time::Instant> {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .min()
+            .copied()
+    }
+
+    /// Removes the deadlines that are due; true if there was one.
+    fn take_due(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut d = self.deadlines.lock().unwrap_or_else(|e| e.into_inner());
+        let before = d.len();
+        d.retain(|t| *t > now);
+        let due = before - d.len();
+        self.fired
+            .fetch_add(due, std::sync::atomic::Ordering::SeqCst);
+        due != 0
+    }
+
+    /// How many timers fired so far.
+    pub fn fired_count(&self) -> usize {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn clear(&self) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
 }
 
 /// `FakeFolder::ErrorList`.
@@ -84,6 +141,25 @@ impl std::ops::DerefMut for RemoteGuard<'_> {
     }
 }
 
+static TEMP_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Sets the directory in which the following `FakeFolder`s create their
+/// temporary local folder (the system temporary directory by default).
+/// Tests with big files point it at `env!("CARGO_TARGET_TMPDIR")`.
+pub fn set_temp_root(dir: impl Into<PathBuf>) {
+    let dir = dir.into();
+    std::fs::create_dir_all(&dir).expect("create the temporary root");
+    *TEMP_ROOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+}
+
+fn new_temp_dir() -> tempfile::TempDir {
+    match TEMP_ROOT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(root) => tempfile::tempdir_in(root),
+        None => tempfile::tempdir(),
+    }
+    .expect("create temporary directory")
+}
+
 /// Runs a future to completion on a fresh current-thread tokio runtime
 /// (the event loop of a test).
 pub fn run_event_loop<F: std::future::Future>(fut: F) -> F::Output {
@@ -108,7 +184,7 @@ impl FakeFolder {
         remote_path: &str,
         perform_initial_sync: bool,
     ) -> Self {
-        let temp_dir = tempfile::tempdir().expect("create temporary directory");
+        let temp_dir = new_temp_dir();
         let local_path = temp_dir
             .path()
             .canonicalize()
@@ -155,6 +231,7 @@ impl FakeFolder {
             journal,
             engine,
             server_version,
+            abort_timer: AbortTimer::default(),
             _temp_dir: temp_dir,
         };
         if perform_initial_sync {
@@ -166,32 +243,50 @@ impl FakeFolder {
         ff
     }
 
-    /// `syncOnce()`.
+    /// `syncOnce()`. The [`AbortTimer`] armed before or during the sync
+    /// abort it when they fire.
     pub fn sync_once(&mut self) -> bool {
+        let abort = self.engine.abort_handle();
+        let timer = self.abort_timer.clone();
         let engine = &mut self.engine;
-        run_event_loop(engine.sync_once())
+        let result = run_event_loop(async move {
+            let sync = engine.sync_once();
+            tokio::pin!(sync);
+            loop {
+                let next = timer.next_deadline();
+                let sleep = async {
+                    match next {
+                        Some(t) => {
+                            tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await
+                        }
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    r = &mut sync => return r,
+                    _ = timer.notify.notified() => {}
+                    _ = sleep => {
+                        if timer.take_due() {
+                            abort.abort();
+                        }
+                    }
+                }
+            }
+        });
+        self.abort_timer.clear();
+        result
     }
 
     /// `syncOnce()` with `QTimer::singleShot(delay, [&] { syncEngine().abort(); })`.
     pub fn sync_once_aborting_after(&mut self, delay: std::time::Duration) -> bool {
-        let abort = self.engine.abort_handle();
-        let engine = &mut self.engine;
-        run_event_loop(async move {
-            let sync = engine.sync_once();
-            tokio::pin!(sync);
-            let timer = tokio::time::sleep(delay);
-            tokio::pin!(timer);
-            let mut fired = false;
-            loop {
-                tokio::select! {
-                    r = &mut sync => return r,
-                    _ = &mut timer, if !fired => {
-                        fired = true;
-                        abort.abort();
-                    }
-                }
-            }
-        })
+        self.abort_timer.single_shot(delay);
+        self.sync_once()
+    }
+
+    /// The timers aborting the running sync (`QTimer::singleShot(delay,
+    /// [&] { fakeFolder.syncEngine().abort(); })`), usable from overrides.
+    pub fn abort_timer(&self) -> AbortTimer {
+        self.abort_timer.clone()
     }
 
     pub fn sync_engine(&mut self) -> &mut SyncEngine {

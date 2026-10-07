@@ -147,6 +147,8 @@ pub struct ReplyOverride {
     pub error: NetworkError,
     /// `None` means the reply has no HTTP status attribute (0).
     pub http_status: Option<u16>,
+    /// `Http2WasUsedAttribute`.
+    pub http2_was_used: bool,
 }
 
 /// A finished request, the equivalent of a finished `QNetworkReply` plus the
@@ -169,6 +171,8 @@ pub struct Reply {
     pub timed_out: bool,
     /// The `X-Request-ID` header sent with the request.
     pub request_id: String,
+    /// `Http2WasUsedAttribute`.
+    pub http2_was_used: bool,
 }
 
 impl Reply {
@@ -193,11 +197,13 @@ impl Reply {
             reason_phrase: parts.status.canonical_reason().unwrap_or("").to_owned(),
             error: NetworkError::from_http_status(parts.status.as_u16()),
             headers: parts.headers.clone(),
+            http2_was_used: parts.version == http::Version::HTTP_2,
             ..Self::default()
         };
         if let Some(o) = parts.extensions.get::<ReplyOverride>() {
             reply.error = o.error;
             reply.http_status = o.http_status.unwrap_or(0);
+            reply.http2_was_used = o.http2_was_used;
         }
         reply
     }

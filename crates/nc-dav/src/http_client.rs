@@ -96,6 +96,7 @@ impl Transport for HttpTransport {
             };
             let resp = builder.send().await.map_err(|e| map_error(&e))?;
             let status = resp.status();
+            let version = resp.version();
             let headers = resp.headers().clone();
             let len = resp.content_length();
             let stream = resp
@@ -103,6 +104,7 @@ impl Transport for HttpTransport {
                 .map_err(|e| std::io::Error::other(e.to_string()));
             let mut out = http::Response::new(Body::from_stream(stream, len));
             *out.status_mut() = status;
+            *out.version_mut() = version;
             *out.headers_mut() = headers;
             Ok(out)
         })

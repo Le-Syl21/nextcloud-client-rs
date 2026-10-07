@@ -401,6 +401,17 @@ pub(crate) struct Shared {
     pub remote_folder: String,
     pub options: SyncOptions,
     pub abort_requested: Cell<bool>,
+    /// Number of running network requests an asynchronous abort leaves
+    /// alone (the final MOVE of a chunked upload, the final PUT of a v1
+    /// upload): see [`NonAbortable`].
+    non_abortable_jobs: Cell<usize>,
+    /// An asynchronous abort was requested while a non-abortable request
+    /// was running: upstream's `abortFinished` is then never emitted (the
+    /// job's running count never reaches 0), so the propagation only ends
+    /// normally or at the abort timeout.
+    abort_unfinishable: Cell<bool>,
+    /// The 5 s abort timeout fired (`abortTimeout`).
+    abort_timed_out: Cell<bool>,
     /// `_activeJobList`: (job, isLikelyFinishedQuickly) entries; a job may
     /// be there several times.
     pub active_job_list: RefCell<Vec<(JobId, bool)>>,
@@ -431,7 +442,42 @@ pub(crate) struct Shared {
     pub committed_disk_space: RefCell<HashMap<JobId, i64>>,
 }
 
+/// Marks a running request that an asynchronous abort does not abort
+/// (`mayAbortJob` returning false in `abortNetworkJobs`), for as long as
+/// the guard lives.
+pub(crate) struct NonAbortable(Rc<Shared>);
+
+impl NonAbortable {
+    pub fn new(shared: &Rc<Shared>) -> Self {
+        shared
+            .non_abortable_jobs
+            .set(shared.non_abortable_jobs.get() + 1);
+        Self(shared.clone())
+    }
+}
+
+impl Drop for NonAbortable {
+    fn drop(&mut self) {
+        self.0
+            .non_abortable_jobs
+            .set(self.0.non_abortable_jobs.get().saturating_sub(1));
+    }
+}
+
 impl Shared {
+    /// `OwncloudPropagator::abort()`: requests an asynchronous abort.
+    fn request_abort(&self) {
+        if self.abort_requested.get() {
+            return;
+        }
+        self.abort_requested.set(true);
+        if self.non_abortable_jobs.get() > 0 {
+            self.abort_unfinishable.set(true);
+        }
+        self.soft_abort.cancel();
+        self.wake.notify_one();
+    }
+
     /// `scheduleNextJob()`.
     pub fn schedule_next_job(&self) {
         self.schedule_requested.set(true);
@@ -788,6 +834,9 @@ impl Propagator {
             remote_folder: nc_journal::utility::trailing_slash_path(remote_folder),
             options,
             abort_requested: Cell::new(false),
+            non_abortable_jobs: Cell::new(0),
+            abort_unfinishable: Cell::new(false),
+            abort_timed_out: Cell::new(false),
             active_job_list: RefCell::new(Vec::new()),
             another_sync_needed: Cell::new(false),
             folder_quota: RefCell::new(HashMap::new()),
@@ -827,12 +876,7 @@ impl Propagator {
 
     /// `abort()`: an asynchronous abort of all running jobs.
     pub fn abort(&mut self) {
-        if self.shared.abort_requested.get() {
-            return;
-        }
-        self.shared.abort_requested.set(true);
-        self.shared.soft_abort.cancel();
-        self.shared.wake.notify_one();
+        self.shared.request_abort();
     }
 
     /// A handle to abort the propagation from a callback.
@@ -1319,7 +1363,10 @@ impl Propagator {
             if handled {
                 continue;
             }
-            if self.shared.abort_requested.get() && self.futures.is_empty() {
+            if self.shared.abort_requested.get()
+                && self.futures.is_empty()
+                && (!self.shared.abort_unfinishable.get() || self.shared.abort_timed_out.get())
+            {
                 // `abortFinished` of the root job: every running job is done.
                 self.emit_finished(Status::NormalError);
                 continue;
@@ -1351,6 +1398,7 @@ impl Propagator {
                 _ = shared.wake.notified() => {}
                 _ = abort_timeout => {
                     // abortTimeout: abort synchronously and finish
+                    shared.abort_timed_out.set(true);
                     shared.hard_abort.cancel();
                 }
             }
@@ -1392,6 +1440,8 @@ impl Propagator {
             self.finished_emitted = Some(status);
         }
         self.shared.abort_requested.set(false);
+        self.shared.abort_unfinishable.set(false);
+        self.shared.abort_timed_out.set(false);
     }
 
     /// `scheduleNextJobImpl`.
@@ -2031,12 +2081,8 @@ pub struct AbortHandle {
 
 impl AbortHandle {
     pub fn abort(&self) {
-        if let Some(s) = self.shared.upgrade()
-            && !s.abort_requested.get()
-        {
-            s.abort_requested.set(true);
-            s.soft_abort.cancel();
-            s.wake.notify_one();
+        if let Some(s) = self.shared.upgrade() {
+            s.request_abort();
         }
     }
 }

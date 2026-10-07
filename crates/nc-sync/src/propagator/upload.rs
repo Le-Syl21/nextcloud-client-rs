@@ -836,8 +836,12 @@ async fn upload_v1(up: &mut Upload<'_>) -> Outcome {
                 let target = Target::Dav(ctx.shared.full_remote_path(&path));
                 let account = ctx.shared.account.clone();
                 let chunk_no = current_chunk;
+                // An asynchronous abort leaves the final chunk alone
+                // (PropagateUploadFileV1::abort).
+                let non_abortable = is_final_chunk.then(|| super::NonAbortable::new(&ctx.shared));
                 jobs.push(Box::pin(async move {
                     let reply = nc_dav::jobs::put(&account, &target, &headers, device, &opts).await;
+                    drop(non_abortable);
                     (chunk_no, reply)
                 }));
                 inflight_chunks.push(chunk_no);
@@ -1398,6 +1402,8 @@ async fn upload_ng(up: &mut Upload<'_>) -> Outcome {
     let mut opts = JobOptions::with_cancel(ctx.shared.hard_abort.child_token());
     adjust_last_job_timeout(&mut opts, file_size);
     ctx.shared.active_add(ctx.id, up.quick());
+    // An asynchronous abort leaves the MOVE alone (PropagateUploadFileNG::abort).
+    let non_abortable = super::NonAbortable::new(&ctx.shared);
     let reply = nc_dav::jobs::move_(
         &account,
         &Target::Absolute(nc_dav::account::concat_url_path(
@@ -1409,6 +1415,7 @@ async fn upload_ng(up: &mut Upload<'_>) -> Outcome {
         &opts,
     )
     .await;
+    drop(non_abortable);
     // slotMoveJobFinished
     ctx.shared.active_remove(ctx.id);
     {
