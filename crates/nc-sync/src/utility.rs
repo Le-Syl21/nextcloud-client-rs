@@ -181,16 +181,36 @@ pub fn octets_to_string(octets: i64) -> String {
     }
 }
 
+/// The `periods` table of `utility.cpp`.
+const PERIODS: &[(&str, u64)] = &[
+    ("year(s)", 365 * 24 * 3600 * 1000),
+    ("month(s)", 30 * 24 * 3600 * 1000),
+    ("day(s)", 24 * 3600 * 1000),
+    ("hour(s)", 3600 * 1000),
+    ("minute(s)", 60 * 1000),
+    ("second(s)", 1000),
+];
+
+/// `Utility::durationToDescriptiveString2` (untranslated plural forms):
+/// the two most significant units.
+pub fn duration_to_descriptive_string2(msecs: u64) -> String {
+    let mut p = 0;
+    while p + 1 < PERIODS.len() && msecs < PERIODS[p].1 {
+        p += 1;
+    }
+    let first_part = format!("{} {}", msecs / PERIODS[p].1, PERIODS[p].0);
+    if p + 1 >= PERIODS.len() {
+        return first_part;
+    }
+    let second_part_num = ((msecs % PERIODS[p].1) as f64 / PERIODS[p + 1].1 as f64).round() as u64;
+    if second_part_num == 0 {
+        return first_part;
+    }
+    format!("{first_part} {second_part_num} {}", PERIODS[p + 1].0)
+}
+
 /// `Utility::durationToDescriptiveString1` (untranslated plural forms).
 pub fn duration_to_descriptive_string1(msecs: u64) -> String {
-    const PERIODS: &[(&str, u64)] = &[
-        ("year(s)", 365 * 24 * 3600 * 1000),
-        ("month(s)", 30 * 24 * 3600 * 1000),
-        ("day(s)", 24 * 3600 * 1000),
-        ("hour(s)", 3600 * 1000),
-        ("minute(s)", 60 * 1000),
-        ("second(s)", 1000),
-    ];
     let mut p = 0;
     while p + 1 < PERIODS.len() && msecs < PERIODS[p].1 {
         p += 1;
@@ -264,5 +284,204 @@ mod tests {
             full_remote_path_to_remote_sync_root_relative("/A/b", "/"),
             "A/b"
         );
+    }
+
+    // Ports of upstream test/testutility.cpp (CC0-1.0,
+    // SPDX-FileCopyrightText: 2021 Nextcloud GmbH and Nextcloud contributors,
+    // 2014 ownCloud GmbH): the functions whose subject lives here.
+
+    #[test]
+    fn test_octets_to_string() {
+        assert_eq!(octets_to_string(999), "999 B");
+        assert_eq!(octets_to_string(1024), "1 KB");
+        assert_eq!(octets_to_string(1110), "1 KB");
+        assert_eq!(octets_to_string(1364), "1 KB");
+
+        assert_eq!(octets_to_string(9110), "9 KB");
+        assert_eq!(octets_to_string(9910), "10 KB");
+        assert_eq!(octets_to_string(9999), "10 KB");
+        assert_eq!(octets_to_string(10240), "10 KB");
+
+        assert_eq!(octets_to_string(123456), "121 KB");
+        assert_eq!(octets_to_string(1234567), "1.2 MB");
+        assert_eq!(octets_to_string(12345678), "12 MB");
+        assert_eq!(octets_to_string(123456789), "118 MB");
+        assert_eq!(octets_to_string(1000 * 1000 * 1000 * 5), "4.7 GB");
+
+        assert_eq!(octets_to_string(1), "1 B");
+        assert_eq!(octets_to_string(2), "2 B");
+        assert_eq!(octets_to_string(1024), "1 KB");
+        assert_eq!(octets_to_string(1024 * 1024), "1 MB");
+        assert_eq!(octets_to_string(1024 * 1024 * 1024), "1 GB");
+        assert_eq!(octets_to_string(1024 * 1024 * 1024 * 1024), "1 TB");
+        assert_eq!(octets_to_string(1024 * 1024 * 1024 * 1024 * 5), "5 TB");
+    }
+
+    #[test]
+    fn test_duration_to_descriptive_string() {
+        let sec: u64 = 1000;
+        let hour: u64 = 3600 * sec;
+
+        let current = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+        let msecs_to = |later: jiff::Zoned| {
+            (later.timestamp().as_millisecond() - current.timestamp().as_millisecond()) as u64
+        };
+        let in_4y5m2d23h = || {
+            msecs_to(
+                current
+                    .checked_add(jiff::Span::new().years(4).months(5).days(2))
+                    .unwrap()
+                    .checked_add(jiff::Span::new().hours(23))
+                    .unwrap(),
+            )
+        };
+        let in_2d23h = || {
+            msecs_to(
+                current
+                    .checked_add(jiff::Span::new().days(2))
+                    .unwrap()
+                    .checked_add(jiff::Span::new().hours(23))
+                    .unwrap(),
+            )
+        };
+
+        assert_eq!(duration_to_descriptive_string2(0), "0 second(s)");
+        assert_eq!(duration_to_descriptive_string2(5), "0 second(s)");
+        assert_eq!(duration_to_descriptive_string2(1000), "1 second(s)");
+        assert_eq!(duration_to_descriptive_string2(1005), "1 second(s)");
+        assert_eq!(duration_to_descriptive_string2(56123), "56 second(s)");
+        assert_eq!(
+            duration_to_descriptive_string2(90 * sec),
+            "1 minute(s) 30 second(s)"
+        );
+        assert_eq!(duration_to_descriptive_string2(3 * hour), "3 hour(s)");
+        assert_eq!(
+            duration_to_descriptive_string2(3 * hour + 20 * sec),
+            "3 hour(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string2(3 * hour + 70 * sec),
+            "3 hour(s) 1 minute(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string2(3 * hour + 100 * sec),
+            "3 hour(s) 2 minute(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string2(in_4y5m2d23h()),
+            "4 year(s) 5 month(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string2(in_2d23h()),
+            "2 day(s) 23 hour(s)"
+        );
+
+        assert_eq!(duration_to_descriptive_string1(0), "0 second(s)");
+        assert_eq!(duration_to_descriptive_string1(5), "0 second(s)");
+        assert_eq!(duration_to_descriptive_string1(1000), "1 second(s)");
+        assert_eq!(duration_to_descriptive_string1(1005), "1 second(s)");
+        assert_eq!(duration_to_descriptive_string1(56123), "56 second(s)");
+        assert_eq!(duration_to_descriptive_string1(90 * sec), "2 minute(s)");
+        assert_eq!(duration_to_descriptive_string1(3 * hour), "3 hour(s)");
+        assert_eq!(
+            duration_to_descriptive_string1(3 * hour + 20 * sec),
+            "3 hour(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string1(3 * hour + 70 * sec),
+            "3 hour(s)"
+        );
+        assert_eq!(
+            duration_to_descriptive_string1(3 * hour + 100 * sec),
+            "3 hour(s)"
+        );
+        assert_eq!(duration_to_descriptive_string1(in_4y5m2d23h()), "4 year(s)");
+        assert_eq!(duration_to_descriptive_string1(in_2d23h()), "3 day(s)");
+    }
+
+    #[test]
+    fn test_sanitize_for_file_name() {
+        // _data rows (all named "")
+        assert_eq!(sanitize_for_file_name("foobar"), "foobar");
+        assert_eq!(
+            sanitize_for_file_name("a/b?c<d>e\\f:g*h|i\"j"),
+            "abcdefghij"
+        );
+        assert_eq!(
+            sanitize_for_file_name("a\u{01} b\u{1f} c\u{80} d\u{9f}"),
+            "a b c d"
+        );
+    }
+
+    #[test]
+    fn test_normalize_etag() {
+        let check = |test: &str, expect: &str| {
+            assert_eq!(normalize_etag(test.as_bytes()), expect.as_bytes())
+        };
+        check("foo", "foo");
+        check("\"foo\"", "foo");
+        check("\"nar123\"", "nar123");
+        check("", "");
+        check("\"\"", "");
+
+        /* Test with -gzip (all combinaison) */
+        check("foo-gzip", "foo");
+        check("\"foo\"-gzip", "foo");
+        check("\"foo-gzip\"", "foo");
+    }
+
+    #[test]
+    fn test_full_remote_path_to_remote_sync_root_relative() {
+        let remote_full_paths_for_root = [
+            ("2020", "2020"),
+            ("/2021/", "2021"),
+            ("/2022/file.docx", "2022/file.docx"),
+        ];
+        // test against root remote path - result must stay unchanged, leading and trailing slashes must get removed
+        for (original, expected) in remote_full_paths_for_root {
+            assert_eq!(
+                full_remote_path_to_remote_sync_root_relative(original, "/"),
+                expected
+            );
+        }
+
+        let remote_path_non_root = "/Documents/reports";
+        let remote_full_paths_for_non_root = [
+            (format!("{remote_path_non_root}/2020"), "2020"),
+            (format!("{remote_path_non_root}/2021/"), "2021"),
+            (
+                format!("{remote_path_non_root}/2022/file.docx"),
+                "2022/file.docx",
+            ),
+        ];
+
+        // test against non-root remote path - must always return a proper path as in local db
+        for (original, expected) in &remote_full_paths_for_non_root {
+            assert_eq!(
+                full_remote_path_to_remote_sync_root_relative(original, remote_path_non_root),
+                *expected
+            );
+        }
+
+        // test against non-root remote path with trailing slash - must work the same
+        let remote_path_non_root_with_trailing_slash = "/Documents/reports/";
+        for (original, expected) in &remote_full_paths_for_non_root {
+            assert_eq!(
+                full_remote_path_to_remote_sync_root_relative(
+                    original,
+                    remote_path_non_root_with_trailing_slash
+                ),
+                *expected
+            );
+        }
+
+        // test against unrelated remote path - result must stay unchanged
+        let remote_path_unrelated = "/Documents1/reports";
+        for (original, _) in &remote_full_paths_for_non_root {
+            assert_eq!(
+                full_remote_path_to_remote_sync_root_relative(original, remote_path_unrelated),
+                *original
+            );
+        }
     }
 }
