@@ -1578,3 +1578,995 @@ fn test_server_case_clash_create_conflict_on_move() {
         }
     );
 }
+
+#[test]
+fn test_server_sub_folder_case_clash_create_conflict_on_move() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "a/b/test";
+    let test_upper_case_file = "a/b/TEST2";
+    let test_upper_case_file_after_move = "a/b/TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder.remote_modifier().mkdir("a");
+    fake_folder.remote_modifier().mkdir("a/b");
+    fake_folder
+        .remote_modifier()
+        .insert("a/b/otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(conflicts.len(), 0);
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert!(!has_conflict);
+
+    fake_folder
+        .remote_modifier()
+        .rename(test_upper_case_file, test_upper_case_file_after_move);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict_after_move = expect_conflict(
+        &fake_folder.current_local_state(),
+        test_upper_case_file_after_move,
+    );
+    assert_eq!(has_conflict_after_move, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+/// The `CaseClashConflictSolver` part only runs where case clashes exist
+/// (not on Linux), like upstream; the solver itself is a GUI class not
+/// ported yet.
+#[test]
+fn test_server_case_clash_create_conflict_and_solve_it() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "test";
+    let test_upper_case_file = "TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder
+        .remote_modifier()
+        .insert("otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert_eq!(has_conflict, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+/// Same as above: the solver part does not run on Linux.
+#[test]
+fn test_server_sub_folder_case_clash_create_conflict_and_solve_it() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "a/b/test";
+    let test_upper_case_file = "a/b/TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    fake_folder.remote_modifier().mkdir("a");
+    fake_folder.remote_modifier().mkdir("a/b");
+    fake_folder
+        .remote_modifier()
+        .insert("a/b/otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert_eq!(has_conflict, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts =
+        find_case_clash_conflicts(fake_folder.current_local_state().find("a/b").unwrap());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+fn server_case_clash_create_conflict_then_remove_one_remote_file(move_to_trash_enabled: bool) {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let test_lower_case_file = "test";
+    let test_upper_case_file = "TEST";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    let mut sync_options = fake_folder.sync_engine().sync_options().clone();
+    sync_options.move_files_to_trash = move_to_trash_enabled;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    fake_folder
+        .remote_modifier()
+        .insert("otherFile.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_lower_case_file, 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+    let has_conflict = expect_conflict(&fake_folder.current_local_state(), test_lower_case_file);
+    assert_eq!(has_conflict, SHOULD_HAVE_CASE_CLASH_CONFLICT);
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+
+    // remove (UPPERCASE) file
+    fake_folder.remote_modifier().remove(test_upper_case_file);
+    assert!(fake_folder.sync_once());
+
+    // make sure we got no conflicts now (conflicted copy gets removed)
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(conflicts.len(), 0);
+
+    // insert (UPPERCASE) file back
+    fake_folder
+        .remote_modifier()
+        .insert(test_upper_case_file, 64, b'W');
+    assert!(fake_folder.sync_once());
+
+    // we must get conflicts
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(
+        conflicts.len(),
+        if SHOULD_HAVE_CASE_CLASH_CONFLICT {
+            1
+        } else {
+            0
+        }
+    );
+
+    // now remove (lowercase) file
+    fake_folder.remote_modifier().remove(test_lower_case_file);
+    assert!(fake_folder.sync_once());
+
+    // make sure we got no conflicts now (conflicted copy gets removed)
+    let conflicts = find_case_clash_conflicts(&fake_folder.current_local_state());
+    assert_eq!(conflicts.len(), 0);
+
+    // remove the other file
+    fake_folder.remote_modifier().remove(test_upper_case_file);
+    assert!(fake_folder.sync_once());
+}
+
+#[test]
+fn test_server_case_clash_create_conflict_then_remove_one_remote_file() {
+    // _data rows "move to trash" and "delete"
+    server_case_clash_create_conflict_then_remove_one_remote_file(true);
+    server_case_clash_create_conflict_then_remove_one_remote_file(false);
+}
+
+/// On Linux upstream only builds the folders (everything else is under
+/// `if (shouldHaveCaseClashConflict)`).
+#[test]
+fn test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_them() {
+    let fake_folder = FakeFolder::new(FileInfo::default());
+
+    let conflicts_folder_path_components = ["Documents", "DiverseConflicts"];
+
+    let mut diverse_conflicts_folder_path = String::new();
+    for component in conflicts_folder_path_components {
+        if diverse_conflicts_folder_path.is_empty() {
+            diverse_conflicts_folder_path += component;
+        } else {
+            diverse_conflicts_folder_path += &format!("/{component}");
+        }
+        fake_folder
+            .remote_modifier()
+            .mkdir(&diverse_conflicts_folder_path);
+    }
+
+    let test_lower_case_file = "testfile";
+    let test_upper_case_file = "TESTFILE";
+
+    let test_lower_case_folder = "testfolder";
+    let test_upper_case_folder = "TESTFOLDER";
+
+    let test_invalid_char_folder = "Really?";
+
+    let d = &diverse_conflicts_folder_path;
+    fake_folder
+        .remote_modifier()
+        .insert(&format!("{d}/{test_lower_case_file}"), 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert(&format!("{d}/{test_upper_case_file}"), 64, b'W');
+
+    fake_folder
+        .remote_modifier()
+        .mkdir(&format!("{d}/{test_lower_case_folder}"));
+    fake_folder
+        .remote_modifier()
+        .mkdir(&format!("{d}/{test_upper_case_folder}"));
+
+    fake_folder
+        .remote_modifier()
+        .mkdir(&format!("{d}/{test_invalid_char_folder}"));
+
+    const { assert!(!SHOULD_HAVE_CASE_CLASH_CONFLICT) };
+}
+
+#[test]
+fn test_existing_folder_became_big() {
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let test_folder = "folder";
+    let test_small_file = "folder/small_file.txt";
+    let test_large_file = "folder/large_file.txt";
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    // config.setNotifyExistingFoldersOverLimit(true)
+    let spy = Rc::new(RefCell::new(0usize));
+    {
+        let spy = spy.clone();
+        fake_folder
+            .sync_engine()
+            .callbacks()
+            .existing_folder_now_big = Some(Box::new(move |_| *spy.borrow_mut() += 1));
+    }
+
+    let mut sync_options = fake_folder.sync_engine().sync_options().clone();
+    sync_options.new_big_folder_size_limit = 128; // 128 bytes
+    sync_options.notify_existing_folders_over_limit = true;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    fake_folder.remote_modifier().mkdir(test_folder);
+    fake_folder
+        .remote_modifier()
+        .insert(test_small_file, 64, b'W');
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+    assert_eq!(*spy.borrow(), 0);
+
+    fake_folder
+        .remote_modifier()
+        .insert(test_large_file, 256, b'W');
+    assert!(fake_folder.sync_once());
+    assert_eq!(*spy.borrow(), 1);
+}
+
+#[test]
+fn test_file_download_with_unicode_character_in_name() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    let complete_spy = ItemCompletedSpy::new(&mut fake_folder);
+    fake_folder
+        .remote_modifier()
+        .insert("A/abcdęfg.txt", 64, b'W');
+    fake_folder.sync_once();
+    assert!(item_did_complete_successfully(
+        &complete_spy,
+        "A/abcdęfg.txt"
+    ));
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_remote_type_change_existing_local_must_get_removed() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+
+    // test file change to directory on remote
+    fake_folder.remote_modifier().mkdir("a");
+    fake_folder.remote_modifier().insert("a/TESTFILE", 64, b'W');
+    assert!(fake_folder.sync_once());
+
+    fake_folder.remote_modifier().remove("a/TESTFILE");
+    fake_folder.remote_modifier().mkdir("a/TESTFILE");
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    // test directory change to file on remote
+    fake_folder.remote_modifier().mkdir("a/TESTDIR");
+    assert!(fake_folder.sync_once());
+
+    fake_folder.remote_modifier().remove("a/TESTDIR");
+    fake_folder.remote_modifier().insert("a/TESTDIR", 64, b'W');
+    assert!(fake_folder.sync_once());
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+fn remove_all_files(is_cmd: bool) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    let mut options = fake_folder.sync_engine().sync_options().clone();
+    options.set_is_cmd(is_cmd);
+    fake_folder.sync_engine().set_sync_options(options);
+    // ConfigFile().setPromptDeleteFiles(true)
+    fake_folder.sync_engine().prompt_delete_files = true;
+    let display_dialog_signal = Rc::new(RefCell::new(0usize));
+    {
+        let s = display_dialog_signal.clone();
+        fake_folder
+            .sync_engine()
+            .callbacks()
+            .about_to_remove_all_files = Some(Box::new(move |_| {
+            *s.borrow_mut() += 1;
+            false
+        }));
+    }
+
+    fake_folder.remote_modifier().mkdir("folder");
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file1", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file2", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file3", 64, b'W');
+    fake_folder.remote_modifier().mkdir("folder2");
+    fake_folder.remote_modifier().insert("file1", 64, b'W');
+    fake_folder.remote_modifier().insert("file2", 64, b'W');
+    fake_folder.remote_modifier().insert("file3", 64, b'W');
+
+    assert!(fake_folder.sync_once());
+    if !is_cmd {
+        assert_eq!(
+            fake_folder.current_local_state(),
+            fake_folder.current_remote_state()
+        );
+    }
+
+    fake_folder.remote_modifier().remove("folder");
+    fake_folder.remote_modifier().remove("folder2");
+    fake_folder.remote_modifier().remove("file1");
+    fake_folder.remote_modifier().remove("file2");
+    fake_folder.remote_modifier().remove("file3");
+
+    assert!(fake_folder.sync_once());
+    // the signal to display the dialog should (not) be emitted
+    assert_eq!(*display_dialog_signal.borrow(), if is_cmd { 0 } else { 1 });
+    assert!(fake_folder.remote_modifier().find("folder").is_none());
+    assert!(fake_folder.remote_modifier().find("folder2").is_none());
+    assert!(fake_folder.remote_modifier().find("file1").is_none());
+}
+
+#[test]
+fn test_remove_all_files_with_nextcloud_cmd() {
+    remove_all_files(true);
+}
+
+#[test]
+fn test_remove_all_files_without_nextcloud_cmd() {
+    remove_all_files(false);
+}
+
+const LONG_DIRS: [&str; 8] = [
+    "abcdefabcdefabcdefabcdefabcdefabcd",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef/abcdef acbdef abcd",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef/abcdef acbdef abcd/123abcdefabcdef1",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef/abcdef acbdef abcd/123abcdefabcdef1/123123abcdef123 abcdef1",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef/abcdef acbdef abcd/123abcdefabcdef1/123123abcdef123 abcdef1/12abcabc",
+    "abcdefabcdefabcdefabcdefabcdefabcd/abcdef abcdef abcdef a/abcdef abcdef/abcdef acbdef abcd/123abcdefabcdef1/123123abcdef123 abcdef1/12abcabc/12abcabd",
+];
+
+fn perms(s: &str) -> nc_journal::remote_permissions::RemotePermissions {
+    nc_journal::remote_permissions::RemotePermissions::from_server_string(s)
+}
+
+#[test]
+fn test_sync_read_only_lnk_windows_shortcuts() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    let long_file = format!(
+        "{}/this is a long long long long long long long long long long long long long long long long l.docx - Sh.lnk",
+        LONG_DIRS[7]
+    );
+
+    for d in LONG_DIRS {
+        fake_folder.remote_modifier().mkdir(d);
+    }
+    fake_folder.remote_modifier().insert(&long_file, 64, b'W');
+
+    fake_folder.remote_modifier().mkdir("folder");
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file1.lnk", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file2.lnk", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file3.lnk", 64, b'W');
+    fake_folder.remote_modifier().mkdir("folder2");
+    fake_folder.remote_modifier().insert("file1", 64, b'W');
+    fake_folder.remote_modifier().insert("file2", 64, b'W');
+    fake_folder.remote_modifier().insert("file3", 64, b'W');
+
+    {
+        let mut remote = fake_folder.remote_modifier();
+        remote.find_mut("folder").unwrap().permissions = perms("DNVSG");
+        remote.find_mut("folder/file1.lnk").unwrap().permissions = perms("SG");
+        remote.find_mut("folder/file2.lnk").unwrap().permissions = perms("SG");
+        remote.find_mut("folder/file3.lnk").unwrap().permissions = perms("SG");
+        for d in LONG_DIRS {
+            remote.find_mut(d).unwrap().permissions = perms("DNVSG");
+        }
+        remote.find_mut(long_file.as_str()).unwrap().permissions = perms("SG");
+    }
+
+    assert!(fake_folder.sync_once());
+}
+
+#[test]
+fn test_sync_long_paths() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    let name = |dir: &str, n: &str| format!("{dir}/{n}");
+    let long_md = "this is a long long long long long long long long long long long long long long long long l.docx - Sh.md";
+    let hello_md = "this is a long long long long long long long long long long hello.docx - Sh.md";
+
+    for d in LONG_DIRS {
+        fake_folder.remote_modifier().mkdir(d);
+    }
+    fake_folder
+        .remote_modifier()
+        .insert(&name(LONG_DIRS[7], long_md), 64, b'W');
+
+    fake_folder.remote_modifier().mkdir("folder");
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file1.lnk", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file2.lnk", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("folder/file3.lnk", 64, b'W');
+    fake_folder.remote_modifier().mkdir("folder2");
+    fake_folder.remote_modifier().insert("file1", 64, b'W');
+    fake_folder.remote_modifier().insert("file2", 64, b'W');
+    fake_folder.remote_modifier().insert("file3", 64, b'W');
+
+    {
+        let mut remote = fake_folder.remote_modifier();
+        remote.find_mut("folder").unwrap().permissions = perms("DNVSG");
+        remote.find_mut("folder/file1.lnk").unwrap().permissions = perms("SG");
+        remote.find_mut("folder/file2.lnk").unwrap().permissions = perms("SG");
+        remote.find_mut("folder/file3.lnk").unwrap().permissions = perms("SG");
+        remote.find_mut(LONG_DIRS[0]).unwrap().permissions = perms("DNVSG");
+        for d in &LONG_DIRS[1..] {
+            remote.find_mut(*d).unwrap().permissions = perms("SG");
+        }
+        remote
+            .find_mut(name(LONG_DIRS[7], long_md).as_str())
+            .unwrap()
+            .permissions = perms("GS");
+    }
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .remove(&name(LONG_DIRS[7], long_md));
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .insert(&name(LONG_DIRS[7], long_md), 64, b'W');
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .rename(&name(LONG_DIRS[7], long_md), &name(LONG_DIRS[7], hello_md));
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .rename(&name(LONG_DIRS[7], hello_md), &name(LONG_DIRS[6], hello_md));
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .append_byte(&name(LONG_DIRS[6], hello_md));
+
+    assert!(fake_folder.sync_once());
+
+    fake_folder
+        .remote_modifier()
+        .remove(&name(LONG_DIRS[7], long_md));
+
+    assert!(fake_folder.sync_once());
+}
+
+#[test]
+fn test_create_file_with_trailing_leading_spaces_local_automated_rename_before_upload() {
+    use nc_sync::Status;
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.enable_enforce_windows_file_name_compatibility();
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_enforce_windows_file_name_compatibility(true);
+
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+
+    let file_with_spaces1 = " foo";
+    let file_with_spaces2 = " bar ";
+    let file_with_spaces3 = "bla ";
+    let file_with_spaces4 = "A/ foo";
+    let file_with_spaces5 = "A/ bar ";
+    let file_with_spaces6 = "A/bla ";
+    let extra_file_name_with_spaces = " with spaces ";
+    let file_without_spaces1 = " foo";
+    let file_without_spaces2 = " bar";
+    let file_without_spaces3 = "bla";
+    let file_without_spaces4 = "A/ foo";
+    let file_without_spaces5 = "A/ bar";
+    let file_without_spaces6 = "A/bla";
+    let extra_file_name_without_spaces = " with spaces";
+
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces1, 64, b'W');
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces2, 64, b'W');
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces3, 64, b'W');
+    fake_folder.local_modifier().mkdir("A");
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces4, 64, b'W');
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces5, 64, b'W');
+    fake_folder
+        .local_modifier()
+        .insert(file_with_spaces6, 64, b'W');
+    fake_folder
+        .local_modifier()
+        .mkdir(extra_file_name_with_spaces);
+
+    let complete_spy = ItemCompletedSpy::new(&mut fake_folder);
+    complete_spy.clear();
+
+    assert!(fake_folder.sync_once());
+
+    let st = |p: &str| complete_spy.find_item(p).status;
+    assert_eq!(st(file_with_spaces1), Status::Success);
+    assert_eq!(st(file_with_spaces2), Status::FileNameInvalid);
+    assert_eq!(st(file_with_spaces3), Status::FileNameInvalid);
+    assert_eq!(st(file_with_spaces4), Status::Success);
+    assert_eq!(st(file_with_spaces5), Status::FileNameInvalid);
+    assert_eq!(st(file_with_spaces6), Status::FileNameInvalid);
+    assert_eq!(st(extra_file_name_with_spaces), Status::FileNameInvalid);
+    assert_eq!(st(file_without_spaces1), Status::Success);
+    assert_eq!(st(file_without_spaces2), Status::NoStatus);
+    assert_eq!(st(file_without_spaces3), Status::NoStatus);
+    assert_eq!(st(file_without_spaces4), Status::Success);
+    assert_eq!(st(file_without_spaces5), Status::NoStatus);
+    assert_eq!(st(file_without_spaces6), Status::NoStatus);
+    assert_eq!(st(extra_file_name_without_spaces), Status::NoStatus);
+
+    complete_spy.clear();
+
+    fake_folder.sync_engine().set_local_discovery_options(
+        LocalDiscoveryStyle::DatabaseAndFilesystem,
+        ["foo", "bar", "bla", "A/foo", "A/bar", "A/bla"].map(String::from),
+    );
+    assert!(fake_folder.sync_once());
+
+    let st = |p: &str| complete_spy.find_item(p).status;
+    assert_eq!(st(file_with_spaces1), Status::NoStatus);
+    assert_eq!(st(file_with_spaces2), Status::NoStatus);
+    assert_eq!(st(file_with_spaces3), Status::NoStatus);
+    assert_eq!(st(file_with_spaces4), Status::NoStatus);
+    assert_eq!(st(file_with_spaces5), Status::NoStatus);
+    assert_eq!(st(file_with_spaces6), Status::NoStatus);
+    assert_eq!(st(extra_file_name_with_spaces), Status::NoStatus);
+    assert_eq!(st(file_without_spaces1), Status::NoStatus);
+    assert_eq!(st(file_without_spaces2), Status::Success);
+    assert_eq!(st(file_without_spaces3), Status::Success);
+    assert_eq!(st(file_without_spaces4), Status::NoStatus);
+    assert_eq!(st(file_without_spaces5), Status::Success);
+    assert_eq!(st(file_without_spaces6), Status::Success);
+    assert_eq!(st(extra_file_name_without_spaces), Status::Success);
+}
+
+/// Adapted: `OwncloudPropagator::touchedFile` is observed through the
+/// engine's `propagator_event` callback.
+#[test]
+fn test_touched_files_when_changing_folder_permissions_during_sync() {
+    use nc_sync::propagator::PropagatorEvent;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.local_modifier().mkdir("directory");
+    fake_folder.local_modifier().mkdir("directory/subdir");
+    fake_folder.remote_modifier().mkdir("directory");
+    fake_folder.remote_modifier().mkdir("directory/subdir");
+
+    // perform an initial sync to ensure local and remote have the same state
+    assert!(fake_folder.sync_once());
+
+    let touched_files: Rc<RefCell<Vec<String>>> = Rc::default();
+    {
+        let t = touched_files.clone();
+        fake_folder.sync_engine().callbacks().propagator_event = Some(Box::new(move |e| {
+            if let PropagatorEvent::TouchedFile(f) = e {
+                t.borrow_mut().push(f.clone());
+            }
+        }));
+    }
+    let local = |f: &FakeFolder, p: &str| format!("{}{}", f.local_path(), p);
+
+    let sync_and_expect_no_touched_files = |f: &mut FakeFolder| {
+        touched_files.borrow_mut().clear();
+        assert!(f.sync_once());
+        assert_eq!(touched_files.borrow().len(), 0);
+    };
+
+    // when nothing changed expect no files to be touched
+    sync_and_expect_no_touched_files(&mut fake_folder);
+
+    // when the remote etag of a subsubdir changes expect the parent+subdirs to be touched
+    fake_folder
+        .remote_modifier()
+        .find_invalidating_etags("directory/subdir");
+    assert!(fake_folder.sync_once());
+    assert_eq!(touched_files.borrow().len(), 2);
+    assert!(
+        touched_files
+            .borrow()
+            .contains(&local(&fake_folder, "directory/subdir"))
+    );
+    assert!(
+        touched_files
+            .borrow()
+            .contains(&local(&fake_folder, "directory"))
+    );
+
+    // nothing changed again, expect no files to be touched
+    sync_and_expect_no_touched_files(&mut fake_folder);
+
+    // when subdir folder permissions change, expect the parent to be touched
+    touched_files.borrow_mut().clear();
+    fake_folder
+        .remote_modifier()
+        .find_mut("directory")
+        .unwrap()
+        .permissions = perms("SG");
+    assert!(fake_folder.sync_once());
+    assert_eq!(touched_files.borrow().len(), 1);
+    assert!(
+        touched_files
+            .borrow()
+            .contains(&local(&fake_folder, "directory"))
+    );
+
+    // another sync without changes, expect no files to be touched
+    sync_and_expect_no_touched_files(&mut fake_folder);
+
+    // remote etag of the subdir changed, expect the parent to be touched
+    touched_files.borrow_mut().clear();
+    fake_folder
+        .remote_modifier()
+        .find_invalidating_etags("directory");
+    assert!(fake_folder.sync_once());
+    assert_eq!(touched_files.borrow().len(), 1);
+    assert!(
+        touched_files
+            .borrow()
+            .contains(&local(&fake_folder, "directory"))
+    );
+
+    // same as usual, expect no files to be touched
+    sync_and_expect_no_touched_files(&mut fake_folder);
+
+    // remote rename of the subdir folder, expect the new name to be touched
+    touched_files.borrow_mut().clear();
+    fake_folder
+        .remote_modifier()
+        .rename("directory", "renamedDirectory");
+    assert!(fake_folder.sync_once());
+    assert!(touched_files.borrow().len() > 1);
+    assert!(
+        touched_files
+            .borrow()
+            .contains(&local(&fake_folder, "renamedDirectory"))
+    );
+
+    // last sync without changes, expect no files to be touched
+    sync_and_expect_no_touched_files(&mut fake_folder);
+}
+
+#[test]
+fn test_sync_folder_new_delete_conflict_expect_deletion() {
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.remote_modifier().mkdir("directory");
+    fake_folder.remote_modifier().mkdir("directory/subdir");
+    fake_folder
+        .remote_modifier()
+        .insert("directory/file1", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("directory/file2", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("directory/file3", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("directory/subdir/fileTxt1.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("directory/subdir/fileTxt2.txt", 64, b'W');
+    fake_folder
+        .remote_modifier()
+        .insert("directory/subdir/fileTxt3.txt", 64, b'W');
+
+    // perform an initial sync to ensure local and remote have the same state
+    assert!(fake_folder.sync_once());
+
+    fake_folder.remote_modifier().remove("directory");
+    fake_folder.local_modifier().mkdir("directory/subFolder");
+    fake_folder
+        .local_modifier()
+        .insert("directory/file4", 64, b'W');
+    fake_folder
+        .local_modifier()
+        .insert("directory/subdir/fileTxt4.txt", 64, b'W');
+
+    assert!(fake_folder.sync_once());
+    assert!(fake_folder.remote_modifier().find("directory").is_none());
+}
+
+/// Adapted: `scheduleSync()` + `execUntilBeforePropagation()` become an
+/// `about_to_propagate` callback that grows the file, `execUntilFinished()`
+/// is the rest of `sync_once()`.
+#[test]
+fn test_upload_while_file_is_changing() {
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::rc::Rc;
+    const MIB: usize = 1024 * 1024;
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    fake_folder.set_capabilities(serde_json::json!({ "dav": { "chunking": "1.0" } }));
+    assert!(fake_folder.sync_once());
+
+    let changeme_path = format!("{}/changeme", fake_folder.local_path());
+    let changeme_file = Rc::new(RefCell::new(std::fs::File::create(&changeme_path).unwrap()));
+    assert!(std::path::Path::new(&changeme_path).exists());
+    changeme_file.borrow_mut().write_all(b"AA").unwrap();
+
+    let mut sync_options = fake_folder.sync_engine().sync_options().clone();
+    sync_options.initial_chunk_size = 5 * MIB as i64;
+    sync_options.minimum_file_age_for_upload = std::time::Duration::ZERO;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    let item_discovered_spy: Rc<RefCell<Vec<i64>>> = Rc::default();
+    {
+        let s = item_discovered_spy.clone();
+        fake_folder.sync_engine().callbacks().item_discovered = Some(Box::new(move |item| {
+            s.borrow_mut().push(item.borrow().size)
+        }));
+    }
+    let grow_before_propagation = Rc::new(RefCell::new(true));
+    {
+        let (f, grow) = (changeme_file.clone(), grow_before_propagation.clone());
+        fake_folder.sync_engine().callbacks().about_to_propagate = Some(Box::new(move |_| {
+            if *grow.borrow() {
+                // just before propagation starts, the file size changed!
+                let one_megabyte_of_screaming = vec![b'A'; MIB];
+                for _ in 0..25 {
+                    f.borrow_mut()
+                        .write_all(&one_megabyte_of_screaming)
+                        .unwrap();
+                }
+            }
+        }));
+    }
+
+    // the file should be discovered with an initial size of 2 bytes
+    // --> propagation is done by PropagateUploadFileV1
+    let item_complete_spy = ItemCompletedSpy::new(&mut fake_folder);
+    assert!(!fake_folder.sync_once());
+    assert_eq!(*item_discovered_spy.borrow(), vec![2]);
+    // finish the sync: the file should be reuploaded on the next sync run,
+    // and nothing should have been uploaded
+    assert!(!item_did_complete_successfully(
+        &item_complete_spy,
+        "changeme"
+    ));
+    assert_eq!(
+        item_complete_spy.find_item("changeme").error_string,
+        "Local file changed during sync."
+    );
+    assert_ne!(
+        fake_folder.sync_engine().is_another_sync_needed(),
+        nc_sync::AnotherSyncNeeded::NoFollowUpSync
+    );
+    assert_eq!(fake_folder.current_remote_state().children.len(), 0);
+
+    // retry the sync again -- the file is still changing
+    // this time as the file size is large enough the correct chunking
+    // system from PropagateUploadFileNG would be used
+    item_discovered_spy.borrow_mut().clear();
+    item_complete_spy.clear();
+    assert!(!fake_folder.sync_once());
+    assert_eq!(*item_discovered_spy.borrow(), vec![25 * MIB as i64 + 2]);
+    // and we fail again!
+    assert!(!item_did_complete_successfully(
+        &item_complete_spy,
+        "changeme"
+    ));
+    assert_eq!(
+        item_complete_spy.find_item("changeme").error_string,
+        "Local file changed during sync."
+    );
+    assert_ne!(
+        fake_folder.sync_engine().is_another_sync_needed(),
+        nc_sync::AnotherSyncNeeded::NoFollowUpSync
+    );
+    assert_eq!(fake_folder.current_remote_state().children.len(), 0);
+
+    // the file is now complete, the next sync should work and result in the
+    // same remote and local states.  again, still using the chunking from
+    // the PropagateUploadFileNG job
+    *grow_before_propagation.borrow_mut() = false;
+    drop(changeme_file);
+    item_discovered_spy.borrow_mut().clear();
+    item_complete_spy.clear();
+    assert!(fake_folder.sync_once());
+    assert_eq!(*item_discovered_spy.borrow(), vec![50 * MIB as i64 + 2]);
+    assert!(item_did_complete_successfully(
+        &item_complete_spy,
+        "changeme"
+    ));
+    assert_eq!(
+        fake_folder.sync_engine().is_another_sync_needed(),
+        nc_sync::AnotherSyncNeeded::NoFollowUpSync
+    );
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}

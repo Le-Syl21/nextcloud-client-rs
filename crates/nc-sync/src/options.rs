@@ -24,6 +24,10 @@ pub struct SyncOptions {
     pub new_big_folder_size_limit: i64,
     /// If a confirmation should be asked for external storages.
     pub confirm_external_storage: bool,
+    /// Port addition: upstream reads `ConfigFile::notifyExistingFoldersOverLimit()`
+    /// (a GUI setting, default false) from the discovery phase; the port
+    /// carries it here.
+    pub notify_existing_folders_over_limit: bool,
     /// If remotely deleted files are needed to move to trash.
     pub move_files_to_trash: bool,
     /// The initial un-adjusted chunk size in bytes for chunked uploads, which
@@ -50,6 +54,7 @@ impl Default for SyncOptions {
         Self {
             new_big_folder_size_limit: -1,
             confirm_external_storage: false,
+            notify_existing_folders_over_limit: false,
             move_files_to_trash: false,
             initial_chunk_size: 100 * 1024 * 1024,
             target_chunk_upload_duration: Duration::from_secs(60),

@@ -627,10 +627,10 @@ impl DiscoveryPhase {
     }
 
     /// `notifyExistingFolderOverLimit`: also needs the
-    /// `notifyExistingFoldersOverLimit` setting of the GUI configuration,
-    /// which the command line client does not have (false).
+    /// `notifyExistingFoldersOverLimit` setting of the GUI configuration
+    /// (`SyncOptions::notify_existing_folders_over_limit` in the port).
     fn notify_existing_folder_over_limit(&self) -> bool {
-        false
+        self.active_folder_size_limit() && self.sync_options.notify_existing_folders_over_limit
     }
 
     /// `isRenamed`.

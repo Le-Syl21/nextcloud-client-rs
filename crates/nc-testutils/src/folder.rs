@@ -211,6 +211,26 @@ impl FakeFolder {
         self.account.set_capabilities(Capabilities::from_json(caps));
     }
 
+    /// `enableEnforceWindowsFileNameCompatibility()`: the forbidden names
+    /// capabilities of a server enforcing Windows compatible names.
+    pub fn enable_enforce_windows_file_name_compatibility(&self) {
+        self.set_capabilities(serde_json::json!({
+            "files": {
+                "forbidden_filename_basenames": [
+                    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5",
+                    "com6", "com7", "com8", "com9", "com¹", "com²", "com³", "lpt0", "lpt1",
+                    "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹",
+                    "lpt²", "lpt³"
+                ],
+                "forbidden_filename_characters": [
+                    "\\", "/", "<", ">", ":", "\"", "|", "?", "*", "\\", "/"
+                ],
+                "forbidden_filename_extensions": [" ", ".", ".filepart", ".part", ".part"],
+                "forbidden_filenames": ["\\", ".htaccess"]
+            }
+        }));
+    }
+
     /// The transport to hand to another engine.
     pub fn transport(&self) -> FakeServer {
         self.server.clone()
