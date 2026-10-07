@@ -172,6 +172,28 @@ impl FakeFolder {
         run_event_loop(engine.sync_once())
     }
 
+    /// `syncOnce()` with `QTimer::singleShot(delay, [&] { syncEngine().abort(); })`.
+    pub fn sync_once_aborting_after(&mut self, delay: std::time::Duration) -> bool {
+        let abort = self.engine.abort_handle();
+        let engine = &mut self.engine;
+        run_event_loop(async move {
+            let sync = engine.sync_once();
+            tokio::pin!(sync);
+            let timer = tokio::time::sleep(delay);
+            tokio::pin!(timer);
+            let mut fired = false;
+            loop {
+                tokio::select! {
+                    r = &mut sync => return r,
+                    _ = &mut timer, if !fired => {
+                        fired = true;
+                        abort.abort();
+                    }
+                }
+            }
+        })
+    }
+
     pub fn sync_engine(&mut self) -> &mut SyncEngine {
         &mut self.engine
     }

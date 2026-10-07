@@ -281,7 +281,7 @@ fn response(status: StatusCode) -> http::response::Builder {
         .header("Date", http_date(SystemTime::now()))
 }
 
-fn status_reply(status: StatusCode) -> Response {
+pub fn status_reply(status: StatusCode) -> Response {
     response(status).body(Body::empty()).unwrap()
 }
 
@@ -494,7 +494,7 @@ fn with_file_headers(builder: http::response::Builder, fi: &FileInfo) -> http::r
 ///
 /// Deviation: upstream asserts that the file exists; here a missing file is
 /// a 404 (`ContentNotFoundError`), what upstream does in release builds.
-fn get_reply(root: &mut FileInfo, file_name: &str) -> Response {
+pub fn get_reply(root: &FileInfo, file_name: &str) -> Response {
     assert!(!file_name.is_empty(), "GET on the root");
     let Some(fi) = root.find(file_name) else {
         // Release build behaviour: `ContentNotFoundError` without HTTP status.

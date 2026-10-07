@@ -73,4 +73,4 @@ pub use file_info::{
 pub use folder::{FakeFolder, ItemCompletedSpy, run_event_loop};
 pub use path::PathComponents;
 pub use server::{FakeReply, FakeServer, Override, ServerState};
-pub use util::{block_on, http_date};
+pub use util::{block_on, from_secs, http_date};
