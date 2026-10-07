@@ -34,7 +34,7 @@ pub(crate) fn secs_since_epoch(t: SystemTime) -> i64 {
     msecs_since_epoch(t).div_euclid(1000)
 }
 
-pub(crate) fn from_secs(secs: i64) -> SystemTime {
+pub fn from_secs(secs: i64) -> SystemTime {
     if secs >= 0 {
         UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
     } else {

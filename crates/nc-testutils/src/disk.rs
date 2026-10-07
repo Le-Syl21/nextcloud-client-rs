@@ -153,6 +153,12 @@ fn from_disk_into(dir: &Path, template: &mut FileInfo) {
     for entry in entries {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().into_owned();
+        // `QDir::entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot)`
+        // does not list hidden entries (dot files on Unix), like the
+        // journal `.sync_test.db`.
+        if name.starts_with('.') {
+            continue;
+        }
         // QFileInfo follows symlinks.
         let meta = fs::metadata(entry.path()).unwrap();
         if meta.is_dir() {

@@ -23,7 +23,7 @@
 //! - database values are read as C strings: scanning stops at the first NUL
 //!   byte.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// `" GWDNVCKRSMm"`: index = bit number. Index 12 is the C string terminator.
@@ -135,7 +135,7 @@ impl RemotePermissions {
         Self::from_server_string_with(
             value,
             MountedPermissionAlgorithm::default(),
-            &HashMap::new(),
+            &BTreeMap::new(),
         )
     }
 
@@ -148,7 +148,7 @@ impl RemotePermissions {
     pub fn from_server_string_with(
         value: &str,
         algorithm: MountedPermissionAlgorithm,
-        other_properties: &HashMap<String, String>,
+        other_properties: &BTreeMap<String, String>,
     ) -> Self {
         // QString::utf16() scanned until the first 0 unit, each unit cast to char.
         let mut perm = Self::from_units(
@@ -254,7 +254,7 @@ mod tests {
     //! `test/testpermissions.cpp`.
     use super::*;
 
-    fn props(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -384,7 +384,7 @@ mod tests {
         );
         assert!(!sub.has_permission(Permission::IsMounted));
         assert!(sub.has_permission(Permission::IsMountedSub));
-        let missing = RemotePermissions::from_server_string_with("GM", use_root, &HashMap::new());
+        let missing = RemotePermissions::from_server_string_with("GM", use_root, &BTreeMap::new());
         assert!(missing.has_permission(Permission::IsMountedSub));
         let root = RemotePermissions::from_server_string_with(
             "GM",

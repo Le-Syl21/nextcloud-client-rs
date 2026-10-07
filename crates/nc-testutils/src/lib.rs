@@ -70,7 +70,7 @@ pub use file_info::{
     EtagsAction, FileInfo, FileModifier, FolderQuota, LockChange, LockState, find_conflict,
     generate_etag, generate_file_id, print_db_data, to_string_no_elide,
 };
-pub use folder::FakeFolder;
+pub use folder::{FakeFolder, ItemCompletedSpy, run_event_loop};
 pub use path::PathComponents;
 pub use server::{FakeReply, FakeServer, Override, ServerState};
 pub use util::{block_on, http_date};

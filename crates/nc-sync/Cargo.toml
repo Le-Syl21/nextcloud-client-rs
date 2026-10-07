@@ -1,0 +1,33 @@
+[package]
+name = "nc-sync"
+description = "Sync engine of nextcloud-client-rs (unofficial port of the Nextcloud desktop client discovery, reconciliation and propagation)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+nc-journal.workspace = true
+nc-dav.workspace = true
+http.workspace = true
+bytes.workspace = true
+log.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+jiff.workspace = true
+httpdate.workspace = true
+fastrand.workspace = true
+rustix.workspace = true
+trash.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
