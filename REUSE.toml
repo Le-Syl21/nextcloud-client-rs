@@ -1,0 +1,16 @@
+version = 1
+SPDX-PackageName = "nextcloud-client-rs"
+SPDX-PackageSupplier = "Sylvain Gargasson"
+SPDX-PackageDownloadLocation = "https://github.com/Le-Syl21/nextcloud-client-rs"
+
+[[annotations]]
+path = ["Cargo.toml", "Cargo.lock", "crates/*/Cargo.toml", ".gitignore", ".cargo/config.toml", "README.md", "REUSE.toml", "docs/**", "tools/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 nextcloud-client-rs contributors"
+SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = ["crates/*/tests/fixtures/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2014 ownCloud GmbH", "2020 Nextcloud GmbH and Nextcloud contributors"]
+SPDX-License-Identifier = "GPL-2.0-or-later"

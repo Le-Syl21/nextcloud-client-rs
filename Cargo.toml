@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/Le-Syl21/nextcloud-client-rs"
+publish = false
+
+[workspace.dependencies]
+nc-journal = { path = "crates/nc-journal" }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+regex = "1"
+thiserror = "2"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+adler2 = "2"
+tempfile = "3"
+log = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
