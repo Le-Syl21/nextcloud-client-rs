@@ -407,8 +407,8 @@ impl<'a> CredentialResolver<'a> {
         })
     }
 
-    /// Stores a new app password: in the keyring for the user daemon; for a
-    /// system instance, in `<state_dir>/credentials/ncsyncd-<id>` (mode
+    /// Stores a new app password: in the keyring for the user daemon (when
+    /// there is one); for a system instance or without a keyring, in `<state_dir>/credentials/ncsyncd-<id>` (mode
     /// 0600), whose path is put in `acc.password_file` (the caller saves the
     /// account). systemd credentials are provisioned by the administrator.
     pub fn store_app_password(
@@ -417,10 +417,9 @@ impl<'a> CredentialResolver<'a> {
         secret: &AppPassword,
         state_dir: &Path,
     ) -> Result<CredentialSource, CredentialsError> {
-        if self.keyring_allowed() {
-            let store = self.store.ok_or_else(|| {
-                CredentialsError::StoreUnavailable("no keyring connection".to_owned())
-            })?;
+        if self.keyring_allowed()
+            && let Some(store) = self.store
+        {
             let key = account_keychain_key(acc).ok_or_else(|| CredentialsError::NoKey {
                 account: acc.id.clone(),
             })?;
@@ -430,6 +429,15 @@ impl<'a> CredentialResolver<'a> {
                 service: KEYRING_SERVICE.to_owned(),
                 key,
             });
+        }
+        if self.keyring_allowed() {
+            // A user daemon without a Secret Service (a headless server):
+            // the secret goes to a password file, like for a system instance.
+            log::warn!(
+                "No keyring available: storing the app password of account {} in a file of {} (mode 0600)",
+                acc.id,
+                state_dir.display()
+            );
         }
         let dir = state_dir.join("credentials");
         let path = dir.join(systemd_credential_name(&acc.id));

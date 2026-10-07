@@ -18,7 +18,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 compose=(docker compose -f "$here/compose.yml" -p ncrs-itest)
 
 if [[ "${1:-}" == "--down" ]]; then
-    "${compose[@]}" down -v
+    "${compose[@]}" --profile push down -v
     exit 0
 fi
 
@@ -32,7 +32,7 @@ dav="$url/remote.php/dav/files/$user"
 auth=(-u "$user:$pass")
 
 (cd "$root" && cargo build -q -p ncsync)
-"${compose[@]}" down -v 2>/dev/null || true # start from a fresh installation (skeleton files)
+"${compose[@]}" --profile push down -v 2>/dev/null || true # start from a fresh installation (skeleton files)
 "${compose[@]}" up -d
 echo "waiting for the server installation..."
 for _ in $(seq 120); do
