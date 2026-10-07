@@ -12,6 +12,7 @@ pub mod engine;
 pub mod filesystem;
 pub mod item;
 pub mod options;
+pub mod progress;
 pub mod propagator;
 pub mod utility;
 
@@ -21,3 +22,4 @@ pub use item::{
     SyncFileItemPtr, SyncFileItemVector,
 };
 pub use options::SyncOptions;
+pub use progress::{ProgressInfo, ProgressStatus};

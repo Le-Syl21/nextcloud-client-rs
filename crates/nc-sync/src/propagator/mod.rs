@@ -422,6 +422,11 @@ pub(crate) struct Shared {
     /// Tasks appended to composites by running jobs (`createConflict`).
     tree_ops: RefCell<Vec<(JobId, SyncFileItemPtr)>>,
     events: RefCell<Vec<PropagatorEvent>>,
+    /// Receiver of the signals other than `itemCompleted`: called when they
+    /// are emitted (a direct Qt connection), from inside the running jobs.
+    event_sink: RefCell<Option<EventCallback>>,
+    /// Receiver of `progress(item, bytes)` (`reportProgress`).
+    progress_sink: RefCell<Option<ProgressCallback>>,
     /// `committedDiskSpace()` of the running downloads (bytes still to come).
     pub committed_disk_space: RefCell<HashMap<JobId, i64>>,
 }
@@ -445,8 +450,33 @@ impl Shared {
         }
     }
 
+    /// Emits a signal. Like upstream's direct connections, the receiver
+    /// runs right away; a signal emitted by the receiver itself is queued
+    /// and delivered by the propagator loop.
     pub fn emit(&self, ev: PropagatorEvent) {
-        self.events.borrow_mut().push(ev);
+        let sink = self.event_sink.borrow_mut().take();
+        match sink {
+            Some(mut cb) => {
+                cb(&ev);
+                let mut slot = self.event_sink.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(cb);
+                }
+            }
+            None => self.events.borrow_mut().push(ev),
+        }
+    }
+
+    /// `reportProgress(item, bytes)`: emits `progress(item, bytes)`.
+    pub fn report_progress(&self, item: &SyncFileItem, bytes: i64) {
+        let sink = self.progress_sink.borrow_mut().take();
+        if let Some(mut cb) = sink {
+            cb(item, bytes);
+            let mut slot = self.progress_sink.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(cb);
+            }
+        }
     }
 
     /// `fullLocalPath(tmp_file_name)`.
@@ -712,9 +742,15 @@ enum PostedEvent {
 pub struct PropagatorCallbacks {
     /// `itemCompleted(item, category)`.
     pub item_completed: Option<Box<dyn FnMut(&SyncFileItemPtr, ErrorCategory)>>,
-    /// The other signals.
-    pub event: Option<Box<dyn FnMut(&PropagatorEvent)>>,
+    /// The other signals (moved into the shared state when the run
+    /// starts, so that the jobs emit them directly).
+    pub event: Option<EventCallback>,
 }
+
+/// Receiver of the propagator signals other than `itemCompleted`.
+pub type EventCallback = Box<dyn FnMut(&PropagatorEvent)>;
+/// Receiver of `progress(item, bytes)`.
+pub type ProgressCallback = Box<dyn FnMut(&SyncFileItem, i64)>;
 
 /// The propagator (`OwncloudPropagator`).
 pub struct Propagator {
@@ -765,6 +801,8 @@ impl Propagator {
             hard_abort,
             tree_ops: RefCell::new(Vec::new()),
             events: RefCell::new(Vec::new()),
+            event_sink: RefCell::new(None),
+            progress_sink: RefCell::new(None),
             committed_disk_space: RefCell::new(HashMap::new()),
         });
         Self {
@@ -1253,6 +1291,9 @@ impl Propagator {
     /// Runs the propagation until the root job finished (or the abort
     /// completed). Returns the status of `finished(status)`.
     pub async fn run(&mut self) -> Status {
+        if let Some(cb) = self.callbacks.event.take() {
+            *self.shared.event_sink.borrow_mut() = Some(cb);
+        }
         loop {
             self.drain_events();
             while let Some(ev) = self.posted.pop_front() {
@@ -1318,11 +1359,14 @@ impl Propagator {
 
     fn drain_events(&mut self) {
         let events: Vec<PropagatorEvent> = std::mem::take(&mut *self.shared.events.borrow_mut());
-        if let Some(cb) = self.callbacks.event.as_mut() {
-            for e in &events {
-                cb(e);
-            }
+        for e in events {
+            self.shared.emit(e);
         }
+    }
+
+    /// Connects `progress(item, bytes)`.
+    pub fn set_progress_callback(&mut self, cb: ProgressCallback) {
+        *self.shared.progress_sink.borrow_mut() = Some(cb);
     }
 
     /// Applies the tasks appended by running jobs (`composite->appendTask`).

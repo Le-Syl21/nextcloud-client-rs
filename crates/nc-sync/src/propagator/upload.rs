@@ -743,6 +743,7 @@ async fn upload_v1(up: &mut Upload<'_>) -> Outcome {
         ctx.shared.journal.commit("Upload info", true);
     }
     let mut current_chunk: i64 = 0;
+    ctx.shared.report_progress(&ctx.item.borrow().clone(), 0);
     let mut inflight_chunks: Vec<i64> = Vec::new();
     // In-flight PUTs: (chunk number as `_chunk`, reply).
     let mut jobs: FuturesUnordered<PutFuture<'_>> = FuturesUnordered::new();
@@ -869,6 +870,33 @@ async fn upload_v1(up: &mut Upload<'_>) -> Outcome {
             // Nothing in flight: upstream would wait forever; report the abort.
             return None;
         };
+        if reply.error == NetworkError::NoError {
+            // slotUploadProgress(sent, total): the fake server (like a real
+            // reply) reports the whole chunk as sent right before finishing.
+            let sending_chunk = (job_chunk + start_chunk) % chunk_count.max(1);
+            let sent_by_job = if chunk_count <= 1 {
+                file_size
+            } else if sending_chunk == chunk_count - 1 && file_size % chunk_size != 0 {
+                file_size % chunk_size
+            } else {
+                chunk_size
+            };
+            let mut progress_chunk = current_chunk + start_chunk - 1;
+            if progress_chunk >= chunk_count {
+                progress_chunk = current_chunk - 1;
+            }
+            // amount is the number of bytes already sent by all the other chunks that were sent
+            // not including this one.
+            let mut amount = progress_chunk * chunk_size;
+            let other_jobs = jobs.len() as i64;
+            if other_jobs > 0 {
+                // The other jobs still in flight have not reported any byte yet.
+                amount -= other_jobs * chunk_size;
+            }
+            amount += sent_by_job;
+            ctx.shared
+                .report_progress(&ctx.item.borrow().clone(), amount);
+        }
         // slotPutFinished
         if let Some(pos) = inflight_chunks.iter().position(|c| *c == job_chunk) {
             inflight_chunks.remove(pos);
@@ -1170,6 +1198,7 @@ async fn upload_ng(up: &mut Upload<'_>) -> Outcome {
             ^ fastrand::u32(..);
         sent = 0;
         current_chunk = 1; // Chunked upload v2: numbers range from 1 to 10000
+        ctx.shared.report_progress(&ctx.item.borrow().clone(), 0);
         ctx.shared.journal.set_upload_info(
             &file,
             &UploadInfo {
@@ -1263,6 +1292,17 @@ async fn upload_ng(up: &mut Upload<'_>) -> Outcome {
             &up.opts(),
         )
         .await;
+        if reply.error == NetworkError::NoError {
+            // slotUploadProgress(sent, total): the fake server (like a real
+            // reply) reports the whole chunk as sent right before finishing.
+            ctx.shared.report_progress(&ctx.item.borrow().clone(), sent);
+            if ctx.shared.abort_requested.get() {
+                // The receiver aborted the sync: the reply is aborted
+                // before it finishes.
+                ctx.shared.active_remove(ctx.id);
+                return None;
+            }
+        }
         // slotPutFinished
         ctx.shared.active_remove(ctx.id);
         if reply.error != NetworkError::NoError {

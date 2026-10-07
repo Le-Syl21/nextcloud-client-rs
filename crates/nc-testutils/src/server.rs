@@ -157,10 +157,17 @@ impl FakeServer {
 
     /// Handles one request synchronously (`FakeQNAM::createRequest`).
     pub fn handle(&self, mut request: Request) -> FakeReply {
-        let request_id = format!("{:08x}{:08x}", rand(), rand());
-        request
-            .headers_mut()
-            .insert("X-Request-ID", HeaderValue::from_str(&request_id).unwrap());
+        // Upstream's FakeQNAM replaces `AccessManager`, so it sets the
+        // `X-Request-ID` header itself. Here the requests come through
+        // `Account::build_request` (the `AccessManager` equivalent), which
+        // already set one: keep it, so that the request id the job reports
+        // (`AbstractNetworkJob::requestId()`) is the one the server saw.
+        if !request.headers().contains_key("X-Request-ID") {
+            let request_id = format!("{:08x}{:08x}", rand(), rand());
+            request
+                .headers_mut()
+                .insert("X-Request-ID", HeaderValue::from_str(&request_id).unwrap());
+        }
         let mut guard = self.state();
         let state = &mut *guard;
 
