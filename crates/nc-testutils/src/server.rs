@@ -157,10 +157,17 @@ impl FakeServer {
 
     /// Handles one request synchronously (`FakeQNAM::createRequest`).
     pub fn handle(&self, mut request: Request) -> FakeReply {
-        let request_id = format!("{:08x}{:08x}", rand(), rand());
-        request
-            .headers_mut()
-            .insert("X-Request-ID", HeaderValue::from_str(&request_id).unwrap());
+        // Upstream's FakeQNAM replaces `AccessManager`, so it sets the
+        // `X-Request-ID` header itself. Here the requests come through
+        // `Account::build_request` (the `AccessManager` equivalent), which
+        // already set one: keep it, so that the request id the job reports
+        // (`AbstractNetworkJob::requestId()`) is the one the server saw.
+        if !request.headers().contains_key("X-Request-ID") {
+            let request_id = format!("{:08x}{:08x}", rand(), rand());
+            request
+                .headers_mut()
+                .insert("X-Request-ID", HeaderValue::from_str(&request_id).unwrap());
+        }
         let mut guard = self.state();
         let state = &mut *guard;
 
@@ -302,8 +309,11 @@ pub fn with_override(
     error: NetworkError,
     http_status: Option<u16>,
 ) -> Response {
-    resp.extensions_mut()
-        .insert(ReplyOverride { error, http_status });
+    resp.extensions_mut().insert(ReplyOverride {
+        error,
+        http_status,
+        http2_was_used: false,
+    });
     resp
 }
 
@@ -584,8 +594,9 @@ pub fn put_perform<'a>(
 }
 
 /// `FakePutReply`: 200 with the new etag and file id, or 412 when the file
-/// could not be created.
-fn put_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> Response {
+/// could not be created. Public for overrides (`new FakePutReply(...)`,
+/// e.g. wrapped in a [`FakeReply::Delayed`]).
+pub fn put_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> Response {
     let Some(fi) = put_perform(root, request, file_name) else {
         // Upstream sets the 412 status but no error.
         return with_override(
@@ -702,7 +713,10 @@ pub fn chunk_move_perform<'a>(
     remote_root.find_with(file_name.as_str(), EtagsAction::Invalidate)
 }
 
-fn chunk_move_reply(
+/// `FakeChunkMoveReply`: performs the assembly MOVE (see
+/// [`chunk_move_perform`]) and answers 201, or 412 when the precondition
+/// failed. Public for overrides.
+pub fn chunk_move_reply(
     uploads: &mut FileInfo,
     remote_root: &mut FileInfo,
     request: &Request,

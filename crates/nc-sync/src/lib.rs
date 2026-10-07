@@ -13,6 +13,7 @@ pub mod filesystem;
 pub mod item;
 pub mod local_discovery_tracker;
 pub mod options;
+pub mod progress;
 pub mod propagator;
 pub mod utility;
 
@@ -23,3 +24,4 @@ pub use item::{
 };
 pub use local_discovery_tracker::LocalDiscoveryTracker;
 pub use options::SyncOptions;
+pub use progress::{ProgressInfo, ProgressStatus};

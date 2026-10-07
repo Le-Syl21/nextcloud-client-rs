@@ -34,7 +34,7 @@
 //! | `FakeGetWithDataReply` | [`server::get_with_data_reply`] (for overrides) | ported |
 //! | `FakePutReply` | PUT handler | ported |
 //! | `FakeMkcolReply`, `FakeDeleteReply`, `FakeMoveReply` | handlers | ported |
-//! | `FakeChunkMoveReply` (chunking v2 assembly MOVE) | MOVE handler on the uploads tree | ported (untested until the chunked uploader exists) |
+//! | `FakeChunkMoveReply` (chunking v2 assembly MOVE) | MOVE handler on the uploads tree, [`server::chunk_move_reply`] (for overrides) | ported |
 //! | `FakeFileLockReply` (LOCK/UNLOCK) | handler | ported |
 //! | `FakeErrorReply`, `FakeJsonErrorReply`, `FakePayloadReply`, `FakeJsonReply` | [`server::error_reply`], [`server::payload_reply`], [`server::json_reply`] | ported (no delays) |
 //! | `FakeHangingReply` | [`FakeReply::Hang`] | ported |
@@ -51,7 +51,20 @@
 //! excludes upstream adds (`.~lock.*#` and `]*.~*`), set
 //! `minimumFileAgeForUpload` to 0 and run an initial sync unless told not to.
 //!
+//! | `QTimer::singleShot(delay, [&] { syncEngine().abort(); })` | [`AbortTimer`] ([`FakeFolder::abort_timer`]), usable from overrides | ported |
+//! | `QScopedValueRollback(AbstractNetworkJob::httpTimeout, ...)` | `nc_dav::jobs::set_http_timeout` (per thread) | ported |
+//!
 //! # Deliberate deviations
+//!
+//! `FakeQNAM` sets a fresh `X-Request-ID` on every request because it
+//! replaces `AccessManager`, which sets it in the real client. Here requests
+//! come through `Account::build_request` (the `AccessManager` equivalent),
+//! so the fake server keeps the client's id: the request id a job reports is
+//! then the one the server saw, as upstream.
+//!
+//! Local folders are created in the system temporary directory, or in the
+//! directory given to [`set_temp_root`] (tests with big files use the cargo
+//! target directory).
 //!
 //! Where upstream relies on a `Q_ASSERT` that would abort the test binary,
 //! the Rust port either panics (programming error in the test) or, when the
@@ -70,7 +83,7 @@ pub use file_info::{
     EtagsAction, FileInfo, FileModifier, FolderQuota, LockChange, LockState, find_conflict,
     generate_etag, generate_file_id, print_db_data, to_string_no_elide,
 };
-pub use folder::{FakeFolder, ItemCompletedSpy, run_event_loop};
+pub use folder::{AbortTimer, FakeFolder, ItemCompletedSpy, run_event_loop, set_temp_root};
 pub use path::PathComponents;
 pub use server::{FakeReply, FakeServer, Override, ServerState};
 pub use util::{block_on, from_secs, http_date};

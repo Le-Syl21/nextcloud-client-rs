@@ -49,3 +49,8 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# The ported sync tests move hundreds of megabytes (checksums, chunked
+# uploads): optimize the dependencies even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3

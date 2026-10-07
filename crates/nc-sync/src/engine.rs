@@ -32,6 +32,7 @@ use crate::item::{
     item_ordering,
 };
 use crate::options::SyncOptions;
+use crate::progress::{ProgressInfo, ProgressStatus};
 use crate::propagator::{AbortHandle, Propagator, PropagatorEvent};
 
 const LOG: &str = "nextcloud.sync.engine";
@@ -74,8 +75,11 @@ pub struct EngineCallbacks {
     pub seen_locked_file: Option<Box<dyn FnMut(&str)>>,
     /// `rootFileIdReceived(fileId)`.
     pub root_file_id_received: Option<Box<dyn FnMut(i64)>>,
-    /// `transmissionProgress`, simplified: (file, bytes) of completed items.
+    /// The other signals of the propagator (`touchedFile`...), delivered
+    /// when they are emitted.
     pub propagator_event: Option<Box<dyn FnMut(&PropagatorEvent)>>,
+    /// `transmissionProgress(progressInfo)`.
+    pub transmission_progress: Option<Box<dyn FnMut(&ProgressInfo)>>,
 }
 
 /// State shared with the discovery and propagator callbacks.
@@ -87,6 +91,27 @@ struct SyncState {
     seen_conflict_files: HashSet<String>,
     remnant_read_only_folders: SyncFileItemVector,
     unique_errors: HashSet<String>,
+    /// `_progressInfo` (reset at the start of every sync).
+    progress: ProgressInfo,
+}
+
+/// `Q_EMIT transmissionProgress(*_progressInfo)`, optionally setting the
+/// status first.
+fn emit_transmission_progress(
+    cbs: &Rc<RefCell<EngineCallbacks>>,
+    state: &Rc<RefCell<SyncState>>,
+    status: Option<ProgressStatus>,
+) {
+    let info = {
+        let mut s = state.borrow_mut();
+        if let Some(status) = status {
+            s.progress.status = status;
+        }
+        s.progress.clone()
+    };
+    if let Some(cb) = cbs.borrow_mut().transmission_progress.as_mut() {
+        cb(&info);
+    }
 }
 
 /// Aborts a running sync from a callback (`SyncEngine::abort`).
@@ -340,6 +365,7 @@ impl SyncEngine {
             seen_conflict_files: HashSet::new(),
             remnant_read_only_folders: Vec::new(),
             unique_errors: HashSet::new(),
+            progress: ProgressInfo::default(),
         }));
         if !filesystem::file_exists(&self.local_path) {
             self.another_sync_needed = AnotherSyncNeeded::DelayedFollowUp;
@@ -404,6 +430,8 @@ impl SyncEngine {
             return false;
         };
         self.process_case_clash_conflicts_before_discovery();
+        emit_transmission_progress(&cbs, &state, Some(ProgressStatus::Starting));
+        emit_transmission_progress(&cbs, &state, Some(ProgressStatus::Discovery));
 
         let mut discovery = DiscoveryPhase::new(
             self.local_path.clone(),
@@ -568,6 +596,12 @@ impl SyncEngine {
         // Commits a possibly existing (should not though) transaction and starts a new one for the propagate phase
         self.journal
             .commit_if_needed_and_start_new_transaction("Post discovery");
+        {
+            let mut s = state.borrow_mut();
+            s.progress.current_discovered_remote_folder.clear();
+            s.progress.current_discovered_local_folder.clear();
+        }
+        emit_transmission_progress(&cbs, &state, Some(ProgressStatus::Reconcile));
         // (shouldRestartSync is only relevant with the Windows cfapi VFS)
         if self.handle_mass_deletion(&state) {
             return false;
@@ -734,6 +768,8 @@ impl SyncEngine {
         if let Some(cb) = cbs.borrow_mut().about_to_propagate.as_mut() {
             cb(&items);
         }
+        // it's important to do this before ProgressInfo::start(), to announce start of new sync
+        emit_transmission_progress(&cbs, &state, Some(ProgressStatus::Propagation));
         // do a database commit
         self.journal.commit("post treewalk", true);
 
@@ -746,10 +782,29 @@ impl SyncEngine {
         );
         {
             let cbs2 = cbs.clone();
+            let state2 = state.clone();
             propagator.callbacks.item_completed = Some(Box::new(move |item, cat| {
+                // slotItemCompleted
+                state2
+                    .borrow_mut()
+                    .progress
+                    .set_progress_complete(&item.borrow());
+                emit_transmission_progress(&cbs2, &state2, None);
                 if let Some(cb) = cbs2.borrow_mut().item_completed.as_mut() {
                     cb(item, cat);
                 }
+            }));
+        }
+        {
+            let cbs2 = cbs.clone();
+            let state2 = state.clone();
+            propagator.set_progress_callback(Box::new(move |item, current| {
+                // slotProgress
+                state2
+                    .borrow_mut()
+                    .progress
+                    .set_progress_item(item, current);
+                emit_transmission_progress(&cbs2, &state2, None);
             }));
         }
         {
@@ -816,6 +871,11 @@ impl SyncEngine {
         self.case_clash_conflict_record_maintenance();
         self.journal.delete_stale_flags_entries();
         self.journal.commit("All Finished.", false);
+        // Emit the finished signal and make sure the ProgressInfo is done even if no
+        // files needed propagation, but clear the lastCompletedItem
+        // so we don't count this twice (like Recent Files)
+        state.borrow_mut().progress.last_completed_item.clear();
+        emit_transmission_progress(&cbs, &state, Some(ProgressStatus::Done));
         status == Status::Success
     }
 
@@ -1227,6 +1287,8 @@ fn slot_item_discovered(
             .partition_point(|x| item_ordering(&x.borrow(), &i) == std::cmp::Ordering::Less)
     };
     s.sync_items.insert(pos, item.clone());
+    // slotNewItem(item)
+    s.progress.adjust_totals_for_file(&item.borrow());
 }
 
 #[cfg(test)]

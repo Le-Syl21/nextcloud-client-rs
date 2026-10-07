@@ -230,6 +230,7 @@ async fn start_download(ctx: &JobCtx, parent: &mut ParentPermissions) -> Outcome
     if ctx.shared.local_file_name_clash(&file) {
         ctx.item.borrow_mut().instruction = Instruction::CaseClashConflict;
     }
+    ctx.shared.report_progress(&ctx.item.borrow().clone(), 0);
     let (etag, size) = {
         let i = ctx.item.borrow();
         (i.etag.clone(), i.size)

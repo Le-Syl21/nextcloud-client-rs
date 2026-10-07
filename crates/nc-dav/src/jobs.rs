@@ -30,19 +30,22 @@ use crate::reply::{NetworkError, Reply};
 use crate::transport::{Body, BodyStream, TransportError, method};
 use crate::xml::{self, LsColListing, PropertyMap};
 
-/// Value assigned to `AbstractNetworkJob::httpTimeout` (seconds, 0 = unset).
-static HTTP_TIMEOUT_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static HTTP_TIMEOUT_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// Assigns `AbstractNetworkJob::httpTimeout` (a process-wide static upstream,
-/// that tests change); `0` goes back to the `OWNCLOUD_TIMEOUT` default.
-/// Returns the previous assignment. Only jobs created afterwards see it.
+/// Assigns `AbstractNetworkJob::httpTimeout` (seconds); `0` goes back to the
+/// `OWNCLOUD_TIMEOUT` default. Returns the previous assignment. Upstream's
+/// variable is a process-wide static that tests change; here it is per
+/// thread, so that tests running in parallel threads (each sync runs on its
+/// test's thread) do not see each other's value.
 pub fn set_http_timeout(secs: u64) -> u64 {
-    HTTP_TIMEOUT_OVERRIDE.swap(secs, std::sync::atomic::Ordering::SeqCst)
+    HTTP_TIMEOUT_OVERRIDE.with(|t| t.replace(secs))
 }
 
 /// `AbstractNetworkJob::httpTimeout`: `OWNCLOUD_TIMEOUT` seconds, 300 by default.
 pub fn http_timeout() -> Duration {
-    let assigned = HTTP_TIMEOUT_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst);
+    let assigned = HTTP_TIMEOUT_OVERRIDE.with(std::cell::Cell::get);
     if assigned > 0 {
         return Duration::from_secs(assigned);
     }
@@ -171,24 +174,74 @@ pub async fn send(
         }
     };
     let url = uri.to_string();
-    let (req, request_id) = account.build_request(method, uri, headers, body);
-    let result = guarded(opts, async {
-        let resp = account.send(req).await?;
-        let (parts, body) = resp.into_parts();
-        let bytes = body
-            .collect()
-            .await
-            .map_err(|e| TransportError::RemoteHostClosed(e.to_string()))?;
-        Ok((parts, bytes))
-    })
-    .await;
-    match result {
-        Ok((parts, bytes)) => {
-            let mut reply = Reply::from_parts(url, request_id, &parts);
-            reply.body = bytes;
-            reply
+    let mut resend = Http2Resend::new(&body);
+    let mut body = Some(body);
+    loop {
+        let (req, request_id) = account.build_request(
+            method.clone(),
+            uri.clone(),
+            headers.clone(),
+            body.take().unwrap_or_default(),
+        );
+        let result = guarded(opts, async {
+            let resp = account.send(req).await?;
+            let (parts, body) = resp.into_parts();
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|e| TransportError::RemoteHostClosed(e.to_string()))?;
+            Ok((parts, bytes))
+        })
+        .await;
+        let reply = match result {
+            Ok((parts, bytes)) => {
+                let mut reply = Reply::from_parts(url.clone(), request_id, &parts);
+                reply.body = bytes;
+                reply
+            }
+            Err(e) => transport_failure(url.clone(), request_id, &e),
+        };
+        if resend.should_resend(&reply) {
+            continue;
         }
-        Err(e) => transport_failure(url, request_id, &e),
+        return reply;
+    }
+}
+
+/// `AbstractNetworkJob::slotFinished`: Qt doesn't yet transparently resend
+/// HTTP2 requests, do so here.
+struct Http2Resend {
+    /// Upstream refuses to resend a request with a (non-sequential) body:
+    /// only body-less requests are resent.
+    possible: bool,
+    count: u32,
+}
+
+impl Http2Resend {
+    const MAX_HTTP2_RESENDS: u32 = 3;
+
+    fn new(body: &Body) -> Self {
+        Self {
+            possible: body.as_bytes().is_some_and(|b| b.is_empty()),
+            count: 0,
+        }
+    }
+
+    fn should_resend(&mut self, reply: &Reply) -> bool {
+        if reply.error != NetworkError::ContentReSendError || !reply.http2_was_used {
+            return false;
+        }
+        if !self.possible {
+            log::warn!(target: "nextcloud.sync.networkjob", "Can't resend HTTP2 request, verb or body not suitable {}", reply.url);
+            false
+        } else if self.count >= Self::MAX_HTTP2_RESENDS {
+            log::warn!(target: "nextcloud.sync.networkjob", "Not resending HTTP2 request, number of resends exhausted {} {}", reply.url, self.count);
+            false
+        } else {
+            log::info!(target: "nextcloud.sync.networkjob", "HTTP2 resending {}", reply.url);
+            self.count += 1;
+            true
+        }
     }
 }
 
@@ -220,17 +273,29 @@ pub async fn send_streaming(
         }
     };
     let url = uri.to_string();
-    let (req, request_id) = account.build_request(method, uri, headers, body);
-    match guarded(opts, account.send(req)).await {
-        Ok(resp) => {
-            let (parts, body) = resp.into_parts();
-            let reply = Reply::from_parts(url, request_id, &parts);
-            Ok(StreamingReply {
-                reply,
-                body: body.into_stream(),
-            })
+    let mut resend = Http2Resend::new(&body);
+    let mut body = Some(body);
+    loop {
+        let (req, request_id) = account.build_request(
+            method.clone(),
+            uri.clone(),
+            headers.clone(),
+            body.take().unwrap_or_default(),
+        );
+        match guarded(opts, account.send(req)).await {
+            Ok(resp) => {
+                let (parts, body) = resp.into_parts();
+                let reply = Reply::from_parts(url.clone(), request_id, &parts);
+                if resend.should_resend(&reply) {
+                    continue;
+                }
+                return Ok(StreamingReply {
+                    reply,
+                    body: body.into_stream(),
+                });
+            }
+            Err(e) => return Err(transport_failure(url.clone(), request_id, &e)),
         }
-        Err(e) => Err(transport_failure(url, request_id, &e)),
     }
 }
 
