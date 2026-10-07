@@ -202,6 +202,12 @@ impl FakeFolder {
         &self.journal
     }
 
+    /// A shared handle on the journal, for callbacks that query it while the
+    /// engine runs (upstream lambdas capturing `fakeFolder`).
+    pub fn sync_journal_handle(&self) -> Arc<SyncJournalDb> {
+        self.journal.clone()
+    }
+
     pub fn account(&self) -> &Arc<Account> {
         &self.account
     }

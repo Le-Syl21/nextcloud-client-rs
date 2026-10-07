@@ -29,6 +29,7 @@
 
 mod download;
 mod local;
+pub use local::is_path_inside_deleted_dir;
 mod remote;
 mod upload;
 
