@@ -66,3 +66,17 @@ pub fn expect_conflict(state: &FileInfo, path: &str) -> bool {
 pub const fn mib(v: i64) -> i64 {
     v * 1024 * 1024
 }
+
+/// `device->readAll()` in a server override: the request body (the fake
+/// server collects streamed bodies before calling the override).
+pub fn request_body(req: &nc_dav::Request) -> &[u8] {
+    match req.body() {
+        nc_dav::transport::Body::Full(b) => b,
+        nc_dav::transport::Body::Stream { .. } => &[],
+    }
+}
+
+/// `QByteArray::contains`.
+pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+}
