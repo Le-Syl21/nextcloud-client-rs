@@ -1204,6 +1204,7 @@ dependencies = [
  "nc-journal",
  "nc-sync",
  "percent-encoding",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

@@ -38,9 +38,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use futures_util::future::LocalBoxFuture;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use nc_dav::xml::PropertyMap;
 use nc_dav::{Account, HttpError, JobOptions, Target};
 use nc_journal::csync::{ItemEncryptionStatus, ItemType};
@@ -515,8 +515,13 @@ pub struct DiscoveryPhase {
     permanent_deletion_requests: HashSet<String>,
 
     jobs: Vec<Option<ProcessDirectoryJob>>,
-    pending: FuturesUnordered<LocalBoxFuture<'static, Completion>>,
-    posted: VecDeque<Posted>,
+    pending: FuturesUnordered<LocalBoxFuture<'static, (u64, Completion)>>,
+    posted: VecDeque<(u64, Posted)>,
+    /// Completions already available, keyed by the sequence number of their
+    /// request (see [`DiscoveryPhase::run`]).
+    ready: BTreeMap<u64, Completion>,
+    /// Sequence number of the next request or posted event.
+    next_seq: u64,
     fatal: Option<(String, ErrorCategory)>,
     finished: bool,
 }
@@ -590,6 +595,8 @@ impl DiscoveryPhase {
             jobs: Vec::new(),
             pending: FuturesUnordered::new(),
             posted: VecDeque::new(),
+            ready: BTreeMap::new(),
+            next_seq: 0,
             fatal: None,
             finished: false,
         }
@@ -816,9 +823,33 @@ impl DiscoveryPhase {
             if abort.is_cancelled() {
                 return Err(DiscoveryError::Aborted);
             }
-            if let Some(ev) = self.posted.pop_front() {
-                self.handle_posted(ev);
-                continue;
+            // Upstream's event queue is FIFO and FakeQNAM answers with a
+            // queued event posted when the request is sent, so a reply that
+            // is already available is delivered before the events posted
+            // after its request (e.g. the `RequestEtagJob` of a move is
+            // answered before `scheduleMoreJobs` starts the next directory).
+            while let Some(Some((seq, c))) = self.pending.next().now_or_never() {
+                self.ready.insert(seq, c);
+            }
+            let next_posted = self.posted.front().map(|(seq, _)| *seq);
+            let next_ready = self.ready.keys().next().copied();
+            match (next_posted, next_ready) {
+                (Some(p), Some(r)) if r < p => {
+                    let c = self.ready.remove(&r).expect("ready completion");
+                    self.handle_completion(c);
+                    continue;
+                }
+                (Some(_), _) => {
+                    let (_, ev) = self.posted.pop_front().expect("posted event");
+                    self.handle_posted(ev);
+                    continue;
+                }
+                (None, Some(r)) => {
+                    let c = self.ready.remove(&r).expect("ready completion");
+                    self.handle_completion(c);
+                    continue;
+                }
+                (None, None) => {}
             }
             let next = tokio::select! {
                 biased;
@@ -826,7 +857,7 @@ impl DiscoveryPhase {
                 c = self.pending.next() => c,
             };
             match next {
-                Some(c) => self.handle_completion(c),
+                Some((_, c)) => self.handle_completion(c),
                 None => {
                     return Err(DiscoveryError::Fatal(
                         "Discovery stalled: nothing left to wait for".to_owned(),
@@ -874,8 +905,23 @@ impl DiscoveryPhase {
         }
     }
 
+    /// Queues an in-flight request; its completion keeps the request's place
+    /// in the event order.
+    fn push_pending(&mut self, fut: LocalBoxFuture<'static, Completion>) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.pending.push(Box::pin(async move { (seq, fut.await) }));
+    }
+
+    /// `QTimer::singleShot(0)` / a queued signal.
+    fn push_posted(&mut self, ev: Posted) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.posted.push_back((seq, ev));
+    }
+
     fn post_schedule_more_jobs(&mut self) {
-        self.posted.push_back(Posted::ScheduleMoreJobs);
+        self.push_posted(Posted::ScheduleMoreJobs);
     }
 
     fn handle_posted(&mut self, ev: Posted) {
@@ -1008,7 +1054,7 @@ impl DiscoveryPhase {
                 listing: Box::new(listing),
             }
         };
-        self.pending.push(Box::pin(fut));
+        self.push_pending(Box::pin(fut));
     }
 
     /// The `finished` handler of the server query in `startAsyncServerQuery`.
@@ -1091,8 +1137,7 @@ impl DiscoveryPhase {
         self.currently_active_jobs += 1;
         self.job_mut(id).pending_async_jobs += 1;
         let result = self.discovery_single_local_directory(id, &local_path);
-        self.posted
-            .push_back(Posted::LocalListing { job: id, result });
+        self.push_posted(Posted::LocalListing { job: id, result });
     }
 
     /// `DiscoverySingleLocalDirectoryJob::run`. Items for undecodable names
@@ -1854,7 +1899,7 @@ impl DiscoveryPhase {
                 size,
             }
         };
-        self.pending.push(Box::pin(fut));
+        self.push_pending(Box::pin(fut));
         None
     }
 
@@ -1891,7 +1936,7 @@ impl DiscoveryPhase {
         let account = self.account.clone();
         let full = format!("{}{}", self.remote_folder, path);
         let p = path.to_owned();
-        self.pending.push(Box::pin(async move {
+        self.push_pending(Box::pin(async move {
             let size = folder_size(&account, &full).await;
             Completion::ExistingFolderSize { path: p, size }
         }));
@@ -2238,7 +2283,7 @@ impl DiscoveryPhase {
                     base: base.clone(),
                     original_path: original_path.clone(),
                 };
-                self.pending.push(Box::pin(async move {
+                self.push_pending(Box::pin(async move {
                     let result =
                         nc_dav::jobs::request_etag(&account, &remote, &JobOptions::default()).await;
                     Completion::RenameEtagDown {
@@ -2858,7 +2903,7 @@ impl DiscoveryPhase {
                 original_path,
                 recurse_query_server,
             };
-            self.pending.push(Box::pin(async move {
+            self.push_pending(Box::pin(async move {
                 let result = nc_dav::jobs::request_etag(
                     &account,
                     &server_original_path,

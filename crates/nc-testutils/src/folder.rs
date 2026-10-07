@@ -338,6 +338,34 @@ impl FakeFolder {
     }
 }
 
+impl Drop for FakeFolder {
+    /// Tests (and the engine, for read-only remote folders) leave folders
+    /// without write permission behind: make them writable again so the
+    /// temporary directory can be removed.
+    fn drop(&mut self) {
+        fn make_writable(dir: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+            let Ok(meta) = std::fs::symlink_metadata(dir) else {
+                return;
+            };
+            if !meta.is_dir() {
+                return;
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o700 != 0o700 {
+                let _ =
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700));
+            }
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    make_writable(&entry.path());
+                }
+            }
+        }
+        make_writable(&self.local_path);
+    }
+}
+
 fn find_or_create_dirs<'a>(
     base: &'a mut FileInfo,
     components: &PathComponents,
