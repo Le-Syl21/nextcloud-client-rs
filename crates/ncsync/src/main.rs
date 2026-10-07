@@ -129,7 +129,10 @@ struct SyncArgs {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // cmd.cpp runs Utility::expandCommandLineOptionValues on its arguments.
+    let cli = Cli::parse_from(expand_command_line_option_values(
+        std::env::args().collect(),
+    ));
     match cli.command {
         Command::Sync(args) => run_sync(args),
     }
@@ -554,6 +557,118 @@ fn new_big_folder_discovered(journal: &SyncJournalDb, new_f: &str, is_external: 
             log::warn!(
                 "A new folder larger than the size limit has been added: {new_f}. It is not synced."
             );
+        }
+    }
+}
+
+/// `Utility::expandCommandLineOptionValues`: splits `--option=value` into
+/// `--option value` (only at the first `=`; an empty value is dropped so the
+/// option is left without one). Anything else is passed through untouched.
+fn expand_command_line_option_values(arguments: Vec<String>) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        // Anything that is not a long option is passed through untouched: paths and custom
+        // URI scheme arguments may legitimately contain a '='.
+        let separator = if argument.starts_with("--") {
+            argument.find('=')
+        } else {
+            None
+        };
+        match separator {
+            Some(sep) if sep >= 3 => {
+                let value = argument[sep + 1..].to_owned();
+                expanded.push(argument[..sep].to_owned());
+                if !value.is_empty() {
+                    expanded.push(value);
+                }
+            }
+            _ => expanded.push(argument),
+        }
+    }
+    expanded
+}
+
+// Port of upstream test/testutility.cpp testExpandCommandLineOptionValues
+// (CC0-1.0, SPDX-FileCopyrightText: 2021 Nextcloud GmbH and Nextcloud
+// contributors, 2014 ownCloud GmbH).
+#[cfg(test)]
+mod tests {
+    use super::expand_command_line_option_values as expand;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn test_expand_command_line_option_values() {
+        let rows: &[(&str, &[&str], &[&str])] = &[
+            ("empty", &[], &[]),
+            (
+                "separate value is left alone",
+                &["nextcloud", "--userid", "alice"],
+                &["nextcloud", "--userid", "alice"],
+            ),
+            (
+                "inline value is split off",
+                &["nextcloud", "--userid=alice"],
+                &["nextcloud", "--userid", "alice"],
+            ),
+            (
+                "both spellings can be mixed",
+                &[
+                    "nextcloud",
+                    "--userid=alice",
+                    "--serverurl",
+                    "https://example.com",
+                ],
+                &[
+                    "nextcloud",
+                    "--userid",
+                    "alice",
+                    "--serverurl",
+                    "https://example.com",
+                ],
+            ),
+            // Only the first '=' separates, so query strings and passwords stay intact.
+            (
+                "value keeps its own equal signs",
+                &["--serverurl=https://example.com/?a=b&c=d"],
+                &["--serverurl", "https://example.com/?a=b&c=d"],
+            ),
+            (
+                "password keeps its own equal signs",
+                &["--apppassword=pa=ss"],
+                &["--apppassword", "pa=ss"],
+            ),
+            // An empty inline value must not become an empty argument: the option is left
+            // without a value so that the parsers report their usual "not specified" error.
+            (
+                "empty inline value yields no value",
+                &["--userid="],
+                &["--userid"],
+            ),
+            // Anything that is not a long option is passed through untouched, because local
+            // paths and custom URI scheme arguments may legitimately contain a '='.
+            (
+                "path with an equal sign is untouched",
+                &["/home/alice/a=b/file.txt"],
+                &["/home/alice/a=b/file.txt"],
+            ),
+            (
+                "uri scheme argument is untouched",
+                &["nc://open/file?id=42"],
+                &["nc://open/file?id=42"],
+            ),
+            ("short option is untouched", &["-u=alice"], &["-u=alice"]),
+            ("bare double dash is untouched", &["--"], &["--"]),
+            (
+                "option without a name is untouched",
+                &["--=alice"],
+                &["--=alice"],
+            ),
+        ];
+        for (name, arguments, expected) in rows {
+            assert_eq!(expand(v(arguments)), v(expected), "row {name}");
         }
     }
 }
