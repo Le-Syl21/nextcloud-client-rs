@@ -55,16 +55,6 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | Engine (discovery, reconcile, propagator, jobs) | ported | — | The behaviour under test. |
 | Progress (`ProgressInfo`, `progressdispatcher.cpp`) | ported (totals and per-item progress; no estimates) | — | Drives `transmissionProgress`, which several upstream tests use as their hook. |
 
-## Phase 2 (in the tree)
-
-All versions are the latest on crates.io on 2026-10-07 (`cargo search`).
-
-| Component (upstream) | Choice | Version | Why |
-|---|---|---|---|
-| Transparent gzip/deflate decoding of replies with Qt's decompression safety check (`QNetworkRequest::setDecompressedSafetyCheckThreshold`, `QDecompressHelper`; used by `GETFileJob`) | **zlib-rs** (`std`; no default features), check ported in `nc-dav/src/decompress.rs` | 0.6.8 | reqwest's `gzip`/`deflate` decoding has no ratio check, so it is disabled and the transport decodes itself. zlib-rs is a memory-safe port of zlib with the same `inflateInit2(MAX_WBITS + 32)` zlib/gzip auto detection Qt uses (flate2 does not expose it). The Qt rules are reproduced: `Accept-Encoding: gzip, deflate` unless the caller set one, raw deflate retry, concatenated streams, eager decoding with the compressed/decompressed byte counts, ratio > 40 above the threshold (default 10 MiB, `-1` disables) → `UnknownContentError`, `Content-Length` removed for HTTP/1 only (QTBUG-73364). |
-| Bandwidth limits (`bandwidthmanager.cpp`, `UploadDevice`, `GETFileJob` quota) | ported (`nc-sync/src/propagator/bandwidth.rs`) on tokio timers and `Notify` | — | Upstream-specific quota scheme (limit split per registered transfer every second, 10 s switching timer). No crate does that; a token-bucket crate (`governor`, ...) would pace differently. |
-| Local HTTP servers of the `HAVE_QHTTPSERVER` tests (`QHttpServer`) | hand-written std `TcpListener` server in `nc-testutils/tests/common/http_server.rs` | — | About 150 lines for routes, recorded requests and fixed responses; a server framework would add a large dev-dependency for nothing the tests need. |
-
 Build note: `[profile.dev.package."*"] opt-level = 3` optimises the
 dependencies (checksums, SQLite, TLS) in debug builds; the big-file chunking
 tests went from minutes to seconds. The first debug build takes longer.
@@ -91,6 +81,14 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | QR code of the login link | **qrcode** (no default features: no `image`) | 0.14.1 | Unicode `Dense1x2` rendering for terminals. |
 | Official client detection | std (`/proc`) | — | `comm`/`exe`/`argv[0]` of the configuration owner's processes. |
 | Paused clock in the Login Flow tests | **tokio** `test-util` (dev only) | 1.53.2 | — |
+| Transparent gzip/deflate decoding of replies with Qt's decompression safety check (`QNetworkRequest::setDecompressedSafetyCheckThreshold`, `QDecompressHelper`; used by `GETFileJob`) | **zlib-rs** (`std`; no default features), check ported in `nc-dav/src/decompress.rs` | 0.6.8 | reqwest's `gzip`/`deflate` decoding has no ratio check, so it is disabled and the transport decodes itself. zlib-rs is a memory-safe port of zlib with the same `inflateInit2(MAX_WBITS + 32)` zlib/gzip auto detection Qt uses (flate2 does not expose it). The Qt rules are reproduced: `Accept-Encoding: gzip, deflate` unless the caller set one, raw deflate retry, concatenated streams, eager decoding with the compressed/decompressed byte counts, ratio > 40 above the threshold (default 10 MiB, `-1` disables) → `UnknownContentError`, `Content-Length` removed for HTTP/1 only (QTBUG-73364). |
+| Bandwidth limits (`bandwidthmanager.cpp`, `UploadDevice`, `GETFileJob` quota) | ported (`nc-sync/src/propagator/bandwidth.rs`) on tokio timers and `Notify` | — | Upstream-specific quota scheme (limit split per registered transfer every second, 10 s switching timer). No crate does that; a token-bucket crate (`governor`, ...) would pace differently. |
+| Local HTTP servers of the `HAVE_QHTTPSERVER` tests (`QHttpServer`) | hand-written std `TcpListener` server in `nc-testutils/tests/common/http_server.rs` | — | About 150 lines for routes, recorded requests and fixed responses; a server framework would add a large dev-dependency for nothing the tests need. |
+| Folder, FolderMan, AccountState, ConnectionValidator, SyncResult (`folder.cpp`, `folderman.cpp`, `accountstate.cpp`, `connectionvalidator.cpp`, `syncresult.cpp`) | ported | — | The scheduling (queue, pause after the last sync, etag polling one request at a time, time scheduler, failure back-off, follow-up syncs), the connection state machine and its retry back-off are the behaviour under test. |
+| Qt event loop, `QTimer` | **tokio** current-thread runtime + `LocalSet`; timers are local tasks posting generation-stamped events (`nc-daemon/src/timer.rs`) | 1.53.2 | One thread like the GUI thread: events are handled one at a time, in posting order; a stopped timer's late timeout is dropped like `QTimer::stop()` guarantees. |
+| Scheduled sync run timers for expiring server locks, touched files (`syncengine.cpp`) | ported (`nc-sync/src/scheduled_sync.rs`, `touched_files.rs`) as deadlines | — | The daemon arms one tokio timer on the earliest deadline. |
+| systemd `Type=notify`, watchdog, status | **sd-notify** | 0.5.0 | `READY=1`, `STATUS=`, `STOPPING=1`, and `WATCHDOG=1` sent from the event loop itself (half of `WatchdogSec`), so a stuck loop gets the service restarted. |
+| Control socket (no upstream counterpart: the GUI) | tokio `UnixListener`, one JSON line per request, **serde** (`derive`) + **serde_json** | 1.0.229, 1.0.151 | Mode 0600 in a 0700 runtime directory. |
 
 ## Planned (later phases), from the study
 
@@ -99,5 +97,4 @@ All of these are to be re-checked for the latest version when they are added
 
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
-| systemd `Type=notify` and watchdog | **sd-notify** | 0.5.0 | — |
 | NFC/NFD (macOS `getPHash`, server names) | **unicode-normalization** | 0.1.25 | Only where upstream normalizes. |

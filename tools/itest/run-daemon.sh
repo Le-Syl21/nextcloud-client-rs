@@ -116,4 +116,15 @@ kill -0 "$(cat "$work/daemon.pid")" 2>/dev/null && fail "daemon did not stop"
 grep -q "shutting down" "$work/daemon.log" || fail "no clean shutdown"
 trap - EXIT
 
+echo "7. a folder also listed by the official client is refused"
+cp "$cfg" "$work/official.cfg"
+"$ncsyncd" --official-config "$work/official.cfg" > "$work/daemon2.log" 2>&1 &
+echo $! > "$work/daemon.pid"
+trap pkill_daemon EXIT
+wait_for 60 "refusal" grep -q "is also configured in the official desktop client" "$work/daemon2.log"
+wait_for 30 "control socket" test -S "$XDG_RUNTIME_DIR/ncsyncd/control.sock"
+[[ "$(status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["folders"]))')" == 0 ]] || fail "refused folder is loaded"
+pkill_daemon
+trap - EXIT
+
 echo "all good (tear down with: $here/run.sh --down)"

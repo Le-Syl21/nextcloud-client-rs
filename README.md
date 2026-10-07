@@ -24,14 +24,20 @@ port; see [docs/crates-vs-port.md](docs/crates-vs-port.md).
 
 ## Status
 
-Phase 1: one-shot synchronization at `nextcloudcmd` parity.
+Phase 1: one-shot synchronization at `nextcloudcmd` parity (`ncsync sync`).
+Phase 2: the daemon `ncsyncd`, with the official client's sync logic
+(folder watcher, etag polling or notify_push, scheduling and back-off,
+several accounts and folders), its `nextcloud.cfg` configuration format,
+folder takeover and hand-back, and systemd services.
 
 | Crate | Mirrors upstream | Content |
 |---|---|---|
 | `nc-journal` | `src/common`, `src/csync` | journal (`SyncJournalDb`), `c_jhash64`, exclude engine, checksums, remote permissions |
 | `nc-dav` | `src/libsync` (network layer) | HTTP transport (reqwest), `QNetworkReply` error model, PROPFIND parser, account, capabilities, network jobs |
 | `nc-sync` | `src/libsync` (engine) | discovery, reconciliation, propagator (downloads with resume, uploads v1 and chunked v2, remote and local operations, conflicts), sync engine |
-| `ncsync` | `src/cmd` | `ncsync sync`, the `nextcloudcmd` equivalent |
+| `nc-daemon` | `src/gui` (sync logic, no GUI) | folder manager, folders, inotify folder watcher, account state and connection validator, `nextcloud.cfg` settings, credentials, Login Flow v2, takeover, control socket, event loop |
+| `ncsync` | `src/cmd` | `ncsync sync` (the `nextcloudcmd` equivalent), configuration commands, daemon control |
+| `ncsyncd` | `src/gui/application.cpp` | the daemon |
 | `nc-testutils` | `test/syncenginetestutils.*` | FakeFolder harness (in-memory server behind the transport trait) and the ported FakeFolder tests |
 
 Out of scope for now: virtual files, end-to-end encryption (encrypted folders
@@ -54,6 +60,134 @@ or `NC_PASSWORD` (with `--non-interactive`) rather than `-p`. Extensions: `--new
 
 The journal is the official client's `.sync_xxxxxxxxxxxx.db`, named the same
 way, in the synchronized folder.
+
+## The daemon: `ncsyncd`
+
+`ncsyncd` syncs every folder of its configuration continuously, like the
+official desktop client without its GUI:
+
+* local changes are seen by inotify (and a full local scan every hour, as
+  upstream); remote changes by notify_push ("Client Push") when the server
+  has it, otherwise by checking the remote etag every 30 s;
+* one folder syncs at a time, failed syncs are retried with upstream's
+  back-off, a folder is fully synced every 2 hours anyway;
+* the configuration file has the format of the official client's
+  `nextcloud.cfg` (same groups and keys), so folders can move between the
+  two clients without losing their journal (`ncsync takeover` /
+  `ncsync handback`);
+* a folder that the official client's configuration also lists is never
+  synced (never run both clients on one folder): take it over first;
+* folders in virtual files mode are refused.
+
+### Setting it up (user service)
+
+```sh
+ncsync account add https://cloud.example.com          # Login Flow v2: open the URL (or scan the QR code)
+ncsync account add https://cloud.example.com -u alice --app-password-file ~/app-password   # or an app password
+ncsync folder add ~/Nextcloud                         # --remote /Photos to sync a subfolder; --account ID
+ncsync folder list
+install -Dm644 contrib/systemd/ncsyncd.service ~/.config/systemd/user/ncsyncd.service
+systemctl --user daemon-reload && systemctl --user enable --now ncsyncd
+loginctl enable-linger "$USER"                        # keep syncing when logged out
+```
+
+The configuration is `~/.config/ncsyncd/ncsyncd.cfg`; the app password goes
+to the Secret Service (service `ncsyncd`, key `<login>:<url>/:<account id>`,
+the official client's key layout), or, when there is no keyring (a headless
+server), to `~/.local/state/ncsyncd/credentials/ncsyncd-<id>` (mode 0600),
+referenced by the account's `ncsyncd_passwordFile` key.
+
+A configuration made by these commands looks like this (any key of the
+official client's `nextcloud.cfg` is understood, e.g. `[Nextcloud]
+remotePollInterval`, `forceSyncInterval`, `fullLocalDiscoveryInterval`,
+`newBigFolderSizeLimit`, `moveToTrash`, the per-account bandwidth limits):
+
+```ini
+[Accounts]
+version=13
+0\version=13
+0\url=https://cloud.example.com
+0\authType=webflow
+0\webflow_user=alice
+0\dav_user=alice
+0\networkUploadLimitSetting=1
+0\networkUploadLimit=500
+0\Folders\1\localPath=/home/alice/Nextcloud/
+0\Folders\1\journalPath=.sync_cf3fcd105d51.db
+0\Folders\1\targetPath=/
+0\Folders\1\paused=false
+0\Folders\1\ignoreHiddenFiles=false
+0\Folders\1\virtualFilesMode=off
+0\Folders\1\version=2
+
+[Nextcloud]
+remotePollInterval=30000
+```
+
+(`networkUploadLimitSetting=1` with `networkUploadLimit=500`: 500 KB/s.)
+Edit the file while the daemon is stopped, or reload it with
+`systemctl --user restart ncsyncd`; `systemctl --user reload ncsyncd`
+(SIGHUP) re-reads the credentials only.
+
+### Setting it up (system service, as root)
+
+The template `ncsyncd@.service` runs one daemon per configuration
+`/etc/ncsyncd/<instance>.cfg`, as root unless a drop-in sets `User=`:
+
+```sh
+install -Dm644 contrib/systemd/ncsyncd@.service /etc/systemd/system/ncsyncd@.service
+ncsync account add https://cloud.example.com -u backup --app-password-file /root/app-password --instance srv
+ncsync folder add /srv/data --remote /Server --instance srv
+systemctl daemon-reload && systemctl enable --now ncsyncd@srv
+```
+
+For a system instance the app password is never put in a keyring. It is
+read, in this order, from the systemd credential `ncsyncd-<account id>`
+(`$CREDENTIALS_DIRECTORY`), then from the account's `ncsyncd_passwordFile`
+(`account add --instance` writes `/var/lib/ncsyncd/<instance>/credentials/ncsyncd-<id>`,
+mode 0600). With systemd credentials (encrypted at rest with
+`systemd-creds`), the password file is not needed:
+
+```sh
+systemd-creds encrypt --name=ncsyncd-0 /root/app-password /etc/credstore.encrypted/ncsyncd-0
+systemctl edit ncsyncd@srv
+#   [Service]
+#   LoadCredentialEncrypted=ncsyncd-0:/etc/credstore.encrypted/ncsyncd-0
+#   User=backup         # optional: run as this user (it must own the folders)
+#   Group=backup
+```
+
+### Controlling it
+
+```sh
+ncsync status                 # accounts and folders (--json for the daemon's JSON answer)
+ncsync pause [ALIAS|PATH]     # all folders without an argument
+ncsync resume [ALIAS|PATH]
+ncsync sync-now [ALIAS|PATH]  # like the tray's "Sync now"
+ncsync status --instance srv  # a system instance (as root)
+```
+
+The control socket is `$XDG_RUNTIME_DIR/ncsyncd/control.sock` (user) or
+`/run/ncsyncd/<instance>/control.sock` (system), mode 0600. The daemon
+reports `READY`, a one-line `STATUS` and the watchdog to systemd
+(`Type=notify`, `WatchdogSec=120`); the watchdog is fed from the event loop.
+
+### Moving a folder from the official client
+
+With the official client **stopped** (it rewrites its configuration when it
+quits):
+
+```sh
+ncsync takeover ~/Nextcloud   # or the folder's alias in the official client
+ncsync handback 1             # gives it back, restoring its original entry
+```
+
+`takeover` copies the account (with its app password from the official
+client's keyring entry when it can be read, otherwise Login Flow v2 or
+`--app-password-file`) and the folder entry, keeping the local path and the
+journal, and removes the folder from the official configuration (a backup
+of the official file is kept as `nextcloud.cfg.ncsyncd-bak`). Both commands
+refuse while the official client runs.
 
 ## Licensing
 
@@ -79,8 +213,9 @@ See `REUSE.toml` and the `LICENSES/` directory.
 ## Building and testing
 
 ```sh
-cargo build --release -p ncsync
+cargo build --release -p ncsync -p ncsyncd
 cargo test --workspace
-tools/itest/run.sh      # end-to-end run against a throw-away Nextcloud container (Docker)
+tools/itest/run.sh          # ncsync sync end to end against a throw-away Nextcloud container (Docker)
+tools/itest/run-daemon.sh   # ncsyncd end to end, with redis and notify_push
 tools/itest/run.sh --down
 ```
