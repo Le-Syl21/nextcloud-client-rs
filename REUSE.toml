@@ -28,3 +28,10 @@ path = ["crates/nc-journal/data/sync-exclude.lst"]
 precedence = "override"
 SPDX-FileCopyrightText = ["2020 Nextcloud GmbH and Nextcloud contributors", "2012 ownCloud GmbH"]
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+# Hand-written nextcloud.cfg sample (fixture of the nc-daemon configuration tests).
+path = ["crates/nc-daemon/testdata/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 nextcloud-client-rs contributors"
+SPDX-License-Identifier = "GPL-2.0-or-later"

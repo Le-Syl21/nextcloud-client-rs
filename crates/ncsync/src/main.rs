@@ -13,6 +13,7 @@
 //! `nextcloudcmd` are accepted with the same meaning where they make sense
 //! for this client.
 
+mod config_cmds;
 mod netrc;
 
 use std::io::Write as _;
@@ -38,6 +39,35 @@ struct Cli {
 enum Command {
     /// Synchronize a local folder with a Nextcloud folder once (like nextcloudcmd).
     Sync(SyncArgs),
+    /// Manage the accounts of the ncsyncd configuration.
+    Account {
+        #[command(subcommand)]
+        cmd: config_cmds::AccountCommand,
+        #[command(flatten)]
+        config: config_cmds::ConfigArgs,
+    },
+    /// Manage the folders of the ncsyncd configuration.
+    Folder {
+        #[command(subcommand)]
+        cmd: config_cmds::FolderCommand,
+        #[command(flatten)]
+        config: config_cmds::ConfigArgs,
+    },
+    /// Move a folder from the official desktop client's configuration to
+    /// ncsyncd's (the official client must not be running).
+    Takeover {
+        #[command(flatten)]
+        args: config_cmds::TakeoverArgs,
+        #[command(flatten)]
+        config: config_cmds::ConfigArgs,
+    },
+    /// Give a taken-over folder back to the official desktop client.
+    Handback {
+        #[command(flatten)]
+        args: config_cmds::HandbackArgs,
+        #[command(flatten)]
+        config: config_cmds::ConfigArgs,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -133,6 +163,10 @@ fn main() -> ExitCode {
     ));
     match cli.command {
         Command::Sync(args) => run_sync(args),
+        Command::Account { cmd, config } => config_cmds::run_account(cmd, config),
+        Command::Folder { cmd, config } => config_cmds::run_folder(cmd, config),
+        Command::Takeover { args, config } => config_cmds::run_takeover(args, config),
+        Command::Handback { args, config } => config_cmds::run_handback(args, config),
     }
 }
 

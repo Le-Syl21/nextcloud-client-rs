@@ -57,7 +57,11 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testinotifywatcher.cpp | 4 | 3 | 0 | 1 |
 | test/testfolderwatcher.cpp | 15 | 14 | 0 | 1 |
 | test/testpushnotifications.cpp | 15 | 14 | 0 | 1 |
-| **Total** | **378** | **310** | **1** | **67** |
+| test/testfolderman.cpp | 10 | 4 | 0 | 6 |
+| test/testforcesyncnow.cpp | 3 | 2 | 0 | 1 |
+| test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
+| test/testaccount.cpp | 5 | 2 | 0 | 3 |
+| **Total** | **403** | **319** | **1** | **83** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -696,3 +700,68 @@ Derived unit test: `push_notifications::tests::derived_file_id_to_integer`
   `send_text_message()` and `abort()` (TCP closed without a closing
   handshake) act on the server-side connection.
 * `CredentialsStub`: n/a, `nc_dav::Credentials` is plain data.
+
+# Phase 2 daemon configuration
+
+The configuration layer of `nc-daemon` (`settings`, `config_file`,
+`account_config`, `folder_definition`, `credentials`, `flow2auth`,
+`takeover`, `manage`) also has derived tests in each module (QSettings
+escaping and a round trip of a multi-account `nextcloud.cfg` fixture,
+`crates/nc-daemon/testdata/nextcloud.cfg`; ConfigFile defaults and clamps;
+account loading fix-ups and migrations; folder loading rules and
+migrations; credential resolution order and the QtKeychain lookup; Login
+Flow v2 against a scripted transport; takeover and hand-back).
+
+## test/testfolderman.cpp → `crates/nc-daemon/src/folder_definition/tests.rs`, `crates/nc-daemon/tests/testfolderman.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testDeleteEncryptedFiles | — | n/a (end-to-end encryption, out of scope) |
+| testLeaveShare | — | n/a (`FolderMan::leaveShare`, a file manager context-menu action) |
+| testCheckPathValidityForNewFolder | test_check_path_validity_for_new_folder | adapted (the configured folders are an `ExistingFolder` list; the `.sync_*.db` file upstream's `Folder` creates when it opens its journal is created by the test helper) |
+| testFindGoodPathForNewSyncFolder | test_find_good_path_for_new_sync_folder | adapted (idem) |
+| testProcessingFileIdsPushNotification | test_processing_file_ids_push_notification | adapted (the spied `folderSyncStateChange` emissions are read as the schedule queue, cleared before every check like upstream clears `_scheduledFolders`) |
+| testUnloadAndDeleteAllFolders | test_unload_and_delete_all_folders | ported (without the socket API calls, which do not apply) |
+| testMacFileProviderModeEnabledConfig | — | n/a (macOS File Provider) |
+| testFileProviderEtagPollingRequiresConnectedAccount | — | n/a (macOS File Provider) |
+| testAddFolderRefusedWhenFileProviderModeEnabled | — | n/a (macOS File Provider) |
+
+## test/testforcesyncnow.cpp → `crates/nc-daemon/tests/testfolderman.rs`
+
+`User::forceSyncNow()` (the tray's "sync now") routes to
+`FolderMan::forceSyncForFolder`, which is what `ncsync sync-now` calls.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| forceSyncNow_withClassicFolder_unpausesAndSchedules | force_sync_now_with_classic_folder_unpauses_and_schedules | adapted (calls `forceSyncForFolder` directly; also checks the folder is queued) |
+| forceSyncNow_withoutFolderOrFileProvider_doesNotCrash | force_sync_now_without_folder_or_file_provider_does_not_crash | adapted (an unknown alias) |
+
+## Daemon end to end (rust_only) → `crates/nc-daemon/tests/rust_only_daemon.rs`
+
+`rust_only_daemon_polls_watches_and_obeys_control_requests`: the event
+loop against the FakeFolder server: the initial sync of a loaded folder, a
+remote change found by etag polling, a local change found by inotify,
+pause (a remote change is not applied), resume and sync-now.
+
+## test/testaccountmanager.cpp → `crates/nc-daemon/src/account_config/tests.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, cleanup | — | n/a (test setup) |
+| testAccountFromUserId_asciiDomain_matchesByExactId | — | n/a (`accountFromUserId` serves the `nc://` URI handler and the File Provider, not the daemon) |
+| testAccountFromUserId_unknownId_returnsNull | — | n/a (idem) |
+| testAccountFromUserId_idnDomain (+_data) | — | n/a (idem) |
+| testAccountFromUserId_idnDomainWithPort (+_data) | — | n/a (idem) |
+| restoresPublicShareLinkWithBasicCredentials | restores_public_share_link_with_basic_credentials | ported (on the loaded `AccountDefinition`: auth type `http`, public share link, login name) |
+
+## test/testaccount.cpp → `crates/nc-daemon/src/account_config/tests.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging setup) |
+| testAccountDavPath_unitialized_noCrash | — | n/a (`nc_dav::Account` is always built with its URL) |
+| testAccount_isPublicShareLink (+_data, 8 rows) | test_account_is_public_share_link | adapted (`Account::setUrl`'s detection is `public_share_link_parts`, used when an account is loaded) |
+| testAccount_setLimitSettings_globalNetworkLimitFallback | test_account_set_limit_settings_global_network_limit_fallback | adapted (the setters are on `AccountDefinition`) |
+| testAccount_listRemoteFolder (+_data) | — | n/a (`Account::listRemoteFolder` serves the GUI folder wizard) |

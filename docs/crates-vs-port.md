@@ -82,6 +82,15 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | TLS of `wss://` | **tokio-rustls** (defaults: aws-lc-rs, TLS 1.2) + **rustls-platform-verifier** | 0.26.6 (rustls 0.23), 0.7.1 | Built like reqwest's rustls client in `HttpTransport`: the process default crypto provider or aws-lc-rs, TLS 1.2 and 1.3, the platform verifier, and an accept-all verifier with `--trust` (`trust_invalid_certificates`). A rejected certificate is upstream's `sslErrors` (`authenticationFailed`), any other TLS failure its `errorOccurred` (`connectionLost`). |
 | Proxy for the websocket | ported (HTTP `CONNECT` tunnel, Basic proxy credentials) | — | tokio-tungstenite has no proxy support. The explicit proxy option (`--httpproxy`) is honoured; the system/environment proxies that reqwest's `system-proxy` feature reads (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are not, nor are SOCKS proxies (the websocket then fails with `connectionLost`). |
 | Self-signed certificate of the `wss` fake server (tests only) | **rcgen** (`crypto`, `aws_lc_rs`; no default features) | 0.14.10 | Dev-dependency of `nc-dav`. |
+| `nextcloud.cfg` (`QSettings`, `IniFormat`) | **ini-preserve** (our crate) + ported `QSettings` layer (`nc-daemon/src/settings.rs`) | 0.1.3 | ini-preserve keeps every untouched line (comments, order, `@Variant` blobs such as `serverColor`), which a takeover of the official client's file needs; `rust-ini` 0.21.3 rewrites the file. On top of it, written from the documented `IniFormat` behaviour: `\`-separated subkeys, `[General]`/`[%General]`, `%XX`/`%UXXXX` key escaping, value escaping and quoting, string lists, `@ByteArray`/`@Variant`/`@Invalid`/`@@`, `childGroups`/`childKeys`/`remove`, a `QLockFile`-style `<file>.lock` and atomic writes. Two ini-preserve 0.1.3 traits show in new keys only: they are written `key = value` (QSettings writes `key=value`, and reads both) and appended after the section's trailing blank line. |
+| `ConfigFile`, `AccountManager` load/save, `FolderDefinition`, `FolderMan` setup and path checks | ported | — | The keys, groups, defaults and migrations are the interface with the official client. |
+| Credentials, user daemon (QtKeychain) | **keyring-core** + **zbus-secret-service-keyring-store** (`crypto-rust`) | 1.0.0, 1.0.1 | `keyring` 4.2.0 is now a thin wrapper: its `v1` feature is keyring-core plus this same store on Linux behind a global default store and `Entry::new(service, user)` only, and its README tells applications to depend on keyring-core and the stores directly. We need an explicit store instance (tests use an in-memory store, never the session keyring) and the store's attribute search, to read the official client's QtKeychain item (`server`=`Nextcloud`, `user`=keychain key). Pure Rust D-Bus (zbus), no libsecret. |
+| Credentials, system instance | systemd credentials (`$CREDENTIALS_DIRECTORY/ncsyncd-<accountId>`) and password files | — | `LoadCredential=`/`LoadCredentialEncrypted=` need no library: the secret is a file. |
+| QtKeychain binary items (`type`=`base64`) | **base64** | 0.23.1 | — |
+| Login Flow v2 (`flow2auth.cpp`) | ported, on the nc-dav jobs | — | Same TLS/proxy options as the sync. The login link is printed instead of opened. |
+| QR code of the login link | **qrcode** (no default features: no `image`) | 0.14.1 | Unicode `Dense1x2` rendering for terminals. |
+| Official client detection | std (`/proc`) | — | `comm`/`exe`/`argv[0]` of the configuration owner's processes. |
+| Paused clock in the Login Flow tests | **tokio** `test-util` (dev only) | 1.53.2 | — |
 
 ## Planned (later phases), from the study
 
@@ -90,7 +99,5 @@ All of these are to be re-checked for the latest version when they are added
 
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
-| `nextcloud.cfg` takeover / hand-back (QSettings ini) | **ini-preserve** (our crate) | 0.1.3 | Format-preserving, needed to write the official client's config back. `rust-ini` 0.21.3 loses formatting. |
-| Credentials | **keyring** | 4.2.0 | Plus systemd `LoadCredential` for the root daemon. |
 | systemd `Type=notify` and watchdog | **sd-notify** | 0.5.0 | — |
 | NFC/NFD (macOS `getPHash`, server names) | **unicode-normalization** | 0.1.25 | Only where upstream normalizes. |
