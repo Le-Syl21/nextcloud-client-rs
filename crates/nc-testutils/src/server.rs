@@ -474,6 +474,16 @@ fn propfind_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> Re
     raw_propfind_reply(Bytes::from(body))
 }
 
+/// The `payload` `FakePropfindReply` builds for `request` (`None` when the
+/// target does not exist, where upstream responds 404). For overrides that
+/// alter the payload like upstream's `FakePropfindReply` subclasses, then
+/// answer with [`raw_propfind_reply`].
+pub fn propfind_payload(root: &FileInfo, request: &Request) -> Option<String> {
+    let file_name = file_path_from_url(request.uri())?;
+    let fi = root.find(file_name.as_str())?;
+    Some(propfind_body(fi, &request_prefix(request, &file_name)))
+}
+
 /// `FakePropfindReply(replyContents, ...)`: 207 with a custom body.
 pub fn raw_propfind_reply(body: Bytes) -> Response {
     response(StatusCode::MULTI_STATUS)

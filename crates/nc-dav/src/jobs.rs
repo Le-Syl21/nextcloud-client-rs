@@ -30,8 +30,22 @@ use crate::reply::{NetworkError, Reply};
 use crate::transport::{Body, BodyStream, TransportError, method};
 use crate::xml::{self, LsColListing, PropertyMap};
 
+/// Value assigned to `AbstractNetworkJob::httpTimeout` (seconds, 0 = unset).
+static HTTP_TIMEOUT_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Assigns `AbstractNetworkJob::httpTimeout` (a process-wide static upstream,
+/// that tests change); `0` goes back to the `OWNCLOUD_TIMEOUT` default.
+/// Returns the previous assignment. Only jobs created afterwards see it.
+pub fn set_http_timeout(secs: u64) -> u64 {
+    HTTP_TIMEOUT_OVERRIDE.swap(secs, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// `AbstractNetworkJob::httpTimeout`: `OWNCLOUD_TIMEOUT` seconds, 300 by default.
 pub fn http_timeout() -> Duration {
+    let assigned = HTTP_TIMEOUT_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst);
+    if assigned > 0 {
+        return Duration::from_secs(assigned);
+    }
     let secs = std::env::var("OWNCLOUD_TIMEOUT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
