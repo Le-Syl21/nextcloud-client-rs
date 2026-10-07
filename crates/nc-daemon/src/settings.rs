@@ -27,8 +27,8 @@
 //!
 //! Lines this module does not touch keep their exact text (comments,
 //! ordering, unknown keys, `@Variant` blobs such as `serverColor`). New keys
-//! are added at the end of their section; ini-preserve writes them as
-//! `key = value` (with spaces), which `QSettings` reads like `key=value`.
+//! are added at the end of their section, written `key=value` like
+//! `QSettings` (ini-preserve's `KeyStyle::Compact`).
 //!
 //! Like `QSettings`, writes to a file take a `<file>.lock` lock file
 //! (`QLockFile` layout: pid, application name, host name) and replace the
@@ -40,7 +40,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use ini_preserve::Ini;
+use ini_preserve::{Ini, KeyStyle};
 
 /// Errors reading or writing a settings file.
 #[derive(Debug, thiserror::Error)]
@@ -589,10 +589,19 @@ struct Entry {
 }
 
 /// A `QSettings` (IniFormat) document.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Settings {
     ini: Ini,
     path: Option<PathBuf>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            ini: Ini::new().with_key_style(KeyStyle::Compact),
+            path: None,
+        }
+    }
 }
 
 impl fmt::Display for Settings {
@@ -634,10 +643,12 @@ impl Settings {
 
     /// Parses settings text.
     pub fn parse(text: &str) -> Result<Self, SettingsError> {
-        let ini = Ini::parse(text).map_err(|message| SettingsError::Parse {
-            path: PathBuf::new(),
-            message,
-        })?;
+        let ini = Ini::parse(text)
+            .map_err(|message| SettingsError::Parse {
+                path: PathBuf::new(),
+                message,
+            })?
+            .with_key_style(KeyStyle::Compact);
         Ok(Self { ini, path: None })
     }
 
@@ -655,10 +666,12 @@ impl Settings {
                 });
             }
         };
-        let ini = Ini::parse(&text).map_err(|message| SettingsError::Parse {
-            path: path.to_owned(),
-            message,
-        })?;
+        let ini = Ini::parse(&text)
+            .map_err(|message| SettingsError::Parse {
+                path: path.to_owned(),
+                message,
+            })?
+            .with_key_style(KeyStyle::Compact);
         Ok(Self {
             ini,
             path: Some(path.to_owned()),

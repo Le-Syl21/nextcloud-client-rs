@@ -1234,9 +1234,9 @@ dependencies = [
 
 [[package]]
 name = "ini-preserve"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf974c6a8547eb4c1a62e238093a1e1e4ee14b2e5f288c9c0b9887392dc17065"
+checksum = "15c550c43f4e976d6abe93e6990fe207007cf8b328a453bb20757bb85aee5c98"
 
 [[package]]
 name = "inotify"
@@ -1539,6 +1539,7 @@ dependencies = [
  "nc-journal",
  "nc-sync",
  "nc-testutils",
+ "nix",
  "qrcode",
  "regex",
  "rustix",
@@ -1663,6 +1664,18 @@ dependencies = [
  "log",
  "nc-daemon",
  "tokio",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

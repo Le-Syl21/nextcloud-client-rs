@@ -58,6 +58,24 @@ fn rust_only_unmodified_round_trip_is_identical() {
 }
 
 #[test]
+fn rust_only_written_from_scratch_is_byte_identical_to_qsettings() {
+    // A configuration written by us, key by key (in the order QSettings
+    // writes them: sections and keys sorted), is the file QSettings wrote.
+    let order = Settings::parse(FIXTURE).unwrap().entries();
+    let mut s = Settings::new();
+    for e in &order {
+        s.set_value(&e.path, unescape_value(&e.raw));
+    }
+    assert_eq!(s.to_string(), FIXTURE);
+    // Saved to a file, byte for byte.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nextcloud.cfg");
+    s.set_file_path(&path);
+    s.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), FIXTURE.as_bytes());
+}
+
+#[test]
 fn rust_only_rewriting_every_value_keeps_the_file() {
     // Re-encoding every decoded value gives the text QSettings wrote.
     let mut s = Settings::parse(FIXTURE).unwrap();
@@ -77,12 +95,12 @@ fn rust_only_new_keys_go_to_their_section() {
     s.set_value("General/odd", "x");
     s.set_value("Nextcloud/forceSyncInterval", 7_200_000_i64);
     let text = s.to_string();
-    assert!(text.contains("2\\url = https://new.example.net\n"));
-    assert!(text.contains("2\\Folders\\1\\paused = true\n"));
-    // ini-preserve 0.1.3 appends a new key after the section's trailing
-    // blank line (cosmetic: QSettings reads it the same).
-    assert!(text.contains("useNewBigFolderSizeLimit=true\n\ntimeout = 120\n[Accounts]"));
-    assert!(text.contains("[%General]\nodd = x\n"));
+    assert!(text.contains("2\\url=https://new.example.net\n"));
+    assert!(text.contains("2\\Folders\\1\\paused=true\n"));
+    // A new key goes right after the section's last key, before the blank
+    // line that separates sections, like QSettings writes it.
+    assert!(text.contains("useNewBigFolderSizeLimit=true\ntimeout=120\n\n[Accounts]"));
+    assert!(text.contains("[%General]\nodd=x\n"));
     let s2 = Settings::parse(&text).unwrap();
     assert_eq!(s2.string("Accounts/2/url"), "https://new.example.net");
     assert!(s2.bool_or("Accounts/2/Folders/1/paused", false));
@@ -128,7 +146,7 @@ fn rust_only_key_escaping() {
 
     let mut s = Settings::new();
     s.set_value("My Group/key with space", "v");
-    assert_eq!(s.to_string(), "[My%20Group]\nkey%20with%20space = v\n");
+    assert_eq!(s.to_string(), "[My%20Group]\nkey%20with%20space=v\n");
     assert_eq!(s.string("My Group/key with space"), "v");
 }
 
