@@ -83,7 +83,9 @@ pub use file_info::{
     EtagsAction, FileInfo, FileModifier, FolderQuota, LockChange, LockState, find_conflict,
     generate_etag, generate_file_id, print_db_data, to_string_no_elide,
 };
-pub use folder::{AbortTimer, FakeFolder, ItemCompletedSpy, run_event_loop, set_temp_root};
+pub use folder::{
+    AbortTimer, AbortTrigger, FakeFolder, ItemCompletedSpy, run_event_loop, set_temp_root,
+};
 pub use path::PathComponents;
 pub use server::{FakeReply, FakeServer, Override, ServerState};
 pub use util::{block_on, from_secs, http_date};

@@ -16,7 +16,7 @@
 //! resolved and CDATA included, empty elements reported as start + end), and
 //! the upstream algorithms run on that stream.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use percent_encoding::percent_decode;
 use quick_xml::NsReader;
@@ -263,6 +263,23 @@ pub struct ListingEntry {
     pub properties: PropertyMap,
 }
 
+/// `ExtraFolderInfo` of `networkjobs.h`: the `oc:size` and `oc:fileid`
+/// properties, keyed by href (as decoded, trailing slash kept).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraFolderInfo {
+    pub file_id: Vec<u8>,
+    pub size: i64,
+}
+
+impl Default for ExtraFolderInfo {
+    fn default() -> Self {
+        Self {
+            file_id: Vec::new(),
+            size: -1,
+        }
+    }
+}
+
 /// Result of [`parse_lscol`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LsColListing {
@@ -270,6 +287,10 @@ pub struct LsColListing {
     pub entries: Vec<ListingEntry>,
     /// Hrefs whose resourcetype is a collection (`directoryListingSubfolders`).
     pub subfolders: Vec<String>,
+    /// The `fileInfo` out-parameter of `LsColXMLParser::parse`
+    /// (`LsColJob::_folderInfos`); filled while parsing, so it is also
+    /// partially filled on failure.
+    pub folder_infos: HashMap<String, ExtraFolderInfo>,
 }
 
 /// Why [`parse_lscol`] failed. Upstream emits the entries parsed before the
@@ -337,6 +358,21 @@ pub fn parse_lscol(xml: &[u8], expected_path: &str) -> Result<LsColListing, LsCo
                 let property_content = cur.read_contents_as_string();
                 if name == "resourcetype" && property_content.contains("collection") {
                     listing.subfolders.push(current_href.clone());
+                } else if name == "size" {
+                    // `QString::toLongLong(&ok)`: surrounding whitespace allowed.
+                    if let Ok(size) = property_content.trim().parse::<i64>() {
+                        listing
+                            .folder_infos
+                            .entry(current_href.clone())
+                            .or_default()
+                            .size = size;
+                    }
+                } else if name == "fileid" {
+                    listing
+                        .folder_infos
+                        .entry(current_href.clone())
+                        .or_default()
+                        .file_id = property_content.as_bytes().to_vec();
                 }
                 current_tmp_properties.insert(name.clone(), property_content);
             }

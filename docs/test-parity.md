@@ -8,11 +8,18 @@ is listed below. Rust tests keep the upstream name in snake_case. Status:
 
 - **ported**: every upstream assertion is ported and passes;
 - **adapted**: ported, but the mechanics had to change (noted);
-- **pending**: needs code from a later phase (noted);
+- **pending**: not passing yet or needs code not ported yet (noted; the Rust
+  test exists and is `#[ignore]`d);
 - **n/a**: does not apply to the port (reason given).
 
-Tests marked *derived* or *rust_only* are additions without an upstream
-counterpart; they are listed at the end of each section.
+Functions count every test slot, `initTestCase`/`init`/`cleanup` included;
+a `_data` function is counted with its test function, whose data rows all
+run inside the one Rust test. Tests marked *derived* or *rust_only* are
+additions without an upstream counterpart.
+
+Not counted here: test files of later phases (folder watcher, folder manager,
+sync file status tracker, push notifications, ...), GUI tests, and the
+virtual files / end-to-end encryption test files (out of scope).
 
 ## Summary
 
@@ -22,14 +29,43 @@ counterpart; they are listed at the end of each section.
 | test/testexcludedfiles.cpp | 23 | 22 | 0 | 1 |
 | test/testchecksumvalidator.cpp | 9 | 8 | 0 | 1 |
 | test/csync/std_tests/check_std_c_jhash.c | 6 | 6 | 0 | 0 |
-| test/testsyncconflict.cpp | 16 | 1 | 14 | 1 |
-| test/testutility.cpp | 17 | 1 | 0 | 16 |
 | test/testownsql.cpp | 12 | 0 | 0 | 12 |
-| **Total** | **97** | **50** | **14** | **33** |
+| test/testutility.cpp | 14 | 7 | 0 | 7 |
+| test/testnetrcparser.cpp | 6 | 4 | 0 | 2 |
+| test/testxmlparse.cpp | 13 | 10 | 0 | 3 |
+| test/testconcaturl.cpp | 2 | 1 | 0 | 1 |
+| test/testcapabilities.cpp | 27 | 26 | 0 | 1 |
+| test/testsyncfileitem.cpp | 3 | 1 | 0 | 2 |
+| test/testnextcloudpropagator.cpp | 7 | 4 | 2 | 1 |
+| test/testsyncengine.cpp | 57 | 49 | 0 | 8 |
+| test/testsyncmove.cpp | 30 | 28 | 1 | 1 |
+| test/testsyncconflict.cpp | 15 | 14 | 0 | 1 |
+| test/testremotediscovery.cpp | 7 | 6 | 0 | 1 |
+| test/testsyncdelete.cpp | 3 | 2 | 0 | 1 |
+| test/testselectivesync.cpp | 3 | 2 | 0 | 1 |
+| test/testallfilesdeleted.cpp | 8 | 7 | 0 | 1 |
+| test/testlocaldiscovery.cpp | 24 | 23 | 0 | 1 |
+| test/testpermissions.cpp | 18 | 17 | 0 | 1 |
+| test/testdatabaseerror.cpp | 2 | 1 | 0 | 1 |
+| test/testlockedfiles.cpp | 8 | 1 | 0 | 7 |
+| test/testlongpath.cpp | 3 | 1 | 0 | 2 |
+| test/testchunkingng.cpp | 18 | 17 | 0 | 1 |
+| test/testuploadreset.cpp | 2 | 1 | 0 | 1 |
+| test/testdownload.cpp | 6 | 5 | 0 | 1 |
+| test/testblacklist.cpp | 2 | 1 | 0 | 1 |
+| test/testasyncop.cpp | 2 | 1 | 0 | 1 |
+| **Total** | **344** | **277** | **3** | **64** |
 
-Phase 0 gate: every test function whose subject is a Phase 0 library
-(journal, jhash, exclude engine, checksums, remote permissions, conflict-name
-helpers) is ported and green. The 14 pending ones are FakeFolder sync tests.
+Phase 1 gate: every FakeFolder test file in the Phase 1 list
+(testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
+testlocaldiscovery, testremotediscovery, testpermissions,
+testallfilesdeleted, testblacklist, testdownload, testuploadreset,
+testselectivesync, testdatabaseerror, testlockedfiles, testlongpath,
+testsyncdelete) is ported. One function is pending
+(testsyncmove/testMovePropagation, a single assertion), plus the two
+`HAVE_QHTTPSERVER` tests of testnextcloudpropagator.
+
+# Phase 0 libraries
 
 ## test/testsyncjournaldb.cpp → `crates/nc-journal/src/journal/tests.rs`
 
@@ -143,40 +179,6 @@ four initial values each, plus 14 real-world paths incl. NFC/NFD and non-Latin
 names) printed by a C program compiled against upstream `c_jhash.h`
 (`tools/jhash-oracle/run.sh <upstream checkout>` regenerates them).
 
-## test/testsyncconflict.cpp
-
-| Upstream | Rust | Status |
-|---|---|---|
-| initTestCase | — | n/a |
-| testConflictFileBaseName_data + testConflictFileBaseName | `crates/nc-journal/tests/utility.rs::test_conflict_file_base_name` | ported (all 19 data rows) |
-| testNoUpload | — | pending (FakeFolder + nc-sync, Phase 1) |
-| testUploadAfterDownload | — | pending (Phase 1) |
-| testSeparateUpload | — | pending (Phase 1) |
-| testDownloadingConflictFile | — | pending (Phase 1) |
-| testConflictRecordRemoval1 | — | pending (Phase 1) |
-| testConflictRecordRemoval2 | — | pending (Phase 1) |
-| testLocalDirRemoteFileConflict | — | pending (Phase 1) |
-| testLocalFileRemoteDirConflict | — | pending (Phase 1) |
-| testTypeConflictWithMove | — | pending (Phase 1) |
-| testTypeChange | — | pending (Phase 1) |
-| testEtagChangeFileNotChangedGeneratesNoConflicts | — | pending (Phase 1) |
-| testEtagChangeFileChangedGeneratesConflicts | — | pending (Phase 1) |
-| testRemoveRemove | — | pending (Phase 1) |
-
-(`testConflictFileBaseName_data` is counted with its test function.)
-
-## test/testutility.cpp
-
-Only the parts of `utility.cpp` needed by the journal and the exclude engine
-are ported so far.
-
-| Upstream | Rust | Status |
-|---|---|---|
-| testFsCasePreserving | `crates/nc-journal/tests/utility.rs::test_fs_case_preserving` | ported |
-| initTestCase | — | n/a |
-| testFormatFingerprint, testOctetsToString, testLaunchOnStartup, testDurationToDescriptiveString, testTimeAgo, testSetupFavLink | — | n/a (GUI / desktop integration helpers, not ported) |
-| testFileNamesEqual, testSanitizeForFileName_data, testSanitizeForFileName, testNormalizeEtag, testIsPathWindowsDrivePartitionRoot, testFullRemotePathToRemoteSyncRootRelative, testExpandCommandLineOptionValues_data, testExpandCommandLineOptionValues | — | n/a for now: the functions are not ported yet; they become **pending** when the engine needs them (`normalizeEtag` and `fullRemotePathToRemoteSyncRootRelative` in Phase 1) |
-
 ## test/testownsql.cpp
 
 All 12 functions (initTestCase, testOpenDb, testCreate, testIsSelect,
@@ -188,6 +190,400 @@ bound as TEXT, null QString bound as NULL, `sqlite3_column_*` conversions,
 `exec()` not stepping PRAGMA/SELECT statements, quick_check + recreate on a
 broken database) are reproduced in `journal/mod.rs` and covered by the journal
 tests.
+
+## test/testutility.cpp
+
+The functions whose subject is ported are ported where that code lives.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a |
+| testFsCasePreserving | `crates/nc-journal/tests/utility.rs::test_fs_case_preserving` | ported |
+| testOctetsToString | `crates/nc-sync/src/utility.rs::tests::test_octets_to_string` | ported (C locale) |
+| testDurationToDescriptiveString | `nc-sync … test_duration_to_descriptive_string` | ported (untranslated plurals, as upstream without a translation loaded) |
+| testSanitizeForFileName_data + testSanitizeForFileName | `nc-sync … test_sanitize_for_file_name` | ported (3 rows) |
+| testNormalizeEtag | `nc-sync … test_normalize_etag` | ported |
+| testFullRemotePathToRemoteSyncRootRelative | `nc-sync … test_full_remote_path_to_remote_sync_root_relative` | ported |
+| testFormatFingerprint, testLaunchOnStartup, testTimeAgo, testSetupFavLink | — | n/a (GUI / desktop integration helpers) |
+| testFileNamesEqual | — | n/a (`fileNamesEqual` is only used by the GUI folder watcher) |
+| testIsPathWindowsDrivePartitionRoot | — | n/a (Windows only; the function is not needed on Linux) |
+| testExpandCommandLineOptionValues_data + testExpandCommandLineOptionValues | `crates/ncsync/src/main.rs::tests::test_expand_command_line_option_values` | ported (13 rows; `cmd.cpp` applies it before parsing, so does `ncsync`) |
+
+## test/testnetrcparser.cpp → `crates/ncsync/src/netrc.rs` (tests module)
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, cleanupTestCase | fixture helper | n/a (files are written to a tempdir per test) |
+| testValidNetrc | test_valid_netrc | ported (the `QEXPECT_FAIL` on quoted names asserts the known limitation) |
+| testEmptyNetrc | test_empty_netrc | ported |
+| testValidNetrcWithDefault | test_valid_netrc_with_default | ported |
+| testInvalidNetrc | test_invalid_netrc | ported |
+
+# Network layer and unit tests
+
+## test/testxmlparse.cpp → `crates/nc-dav/tests/testxmlparse.rs`
+
+Signal slots map onto the parse result: entries count as emitted even on
+failure (`LsColError::partial`); subfolders and success only on `Ok`.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, init, cleanup | — | n/a (Qt fixtures) |
+| testParser1 | test_parser1 | ported |
+| testParserBrokenXml | test_parser_broken_xml | ported |
+| testParserEmptyXmlNoDav | test_parser_empty_xml_no_dav | ported |
+| testParserEmptyXml | test_parser_empty_xml | ported |
+| testParserTruncatedXml | test_parser_truncated_xml | ported |
+| testParserBogfusHref1 | test_parser_bogfus_href1 | ported |
+| testParserBogfusHref2 | test_parser_bogfus_href2 | ported |
+| testParserDenormalizedPath | test_parser_denormalized_path | ported |
+| testParserDenormalizedPathOutsideNamespace | test_parser_denormalized_path_outside_namespace | ported |
+| testHrefUrlEncoding | test_href_url_encoding | ported |
+
+## test/testconcaturl.cpp → `crates/nc-dav/tests/testconcaturl.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a |
+| testFolder (+_data, 15 rows) | test_folder | ported |
+
+## test/testcapabilities.cpp → `crates/nc-dav/tests/testcapabilities.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a |
+| testPushNotificationsAvailable_* (7 functions) | test_push_notifications_available_* | ported |
+| testPushNotificationsWebSocketUrl_urlAvailable_returnUrl | same in snake_case | ported |
+| testUserStatus_* (3) | test_user_status_* | ported |
+| testUserStatusSupportsEmoji_* (3) | test_user_status_supports_emoji_* | ported |
+| testUserStatusSupportsBusy_* (4) | test_user_status_supports_busy_* | ported |
+| testShareDefaultPermissions_* (2) | test_share_default_permissions_* | ported |
+| testBulkUploadAvailable_bulkUploadAvailable_returnTrue | same in snake_case | ported |
+| testFilesLockAvailable_filesLockAvailable_returnTrue | same | ported |
+| testSupport_hasValidSubscription_returnTrue | same | ported |
+| testSupport_desktopEnterpriseChannel_returnString | same | adapted (`Option` accessor; the `ConfigFile::defaultUpdateChannel()` fallback is GUI updater config, not ported) |
+| testServerHasClientIntegration_returnTrue | same | ported |
+| testFileActionsByMimeType_returnContextMenu | same | adapted (`QMimeDatabase` lookups replaced by the shared-mime-info types they return, with Qt's implicit `text/plain` / `application/octet-stream` parents) |
+
+## test/testsyncfileitem.cpp → `crates/nc-sync/tests/testsyncfileitem.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, cleanupTestCase | — | n/a |
+| testComparator (+_data, 6 rows) | test_comparator | ported |
+
+## test/testnextcloudpropagator.cpp → `crates/nc-testutils/tests/testnextcloudpropagator.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a |
+| testUpdateErrorFromSession | test_update_error_from_session | ported (upstream body is `QVERIFY(true)`) |
+| testTmpDownloadFileNameGeneration | test_tmp_download_file_name_generation | ported |
+| testParseEtag | test_parse_etag | ported |
+| testParseException | test_parse_exception | ported |
+| testGETFileJobDecompressionThreshold (`HAVE_QHTTPSERVER`) | test_get_file_job_decompression_threshold | pending (no decompression-ratio safety check in the GET job yet) |
+| testDirectUrlCredentials (`HAVE_QHTTPSERVER`) | test_direct_url_credentials | pending (direct download URLs are not used yet) |
+
+## test/testasyncop.cpp → `crates/nc-testutils/tests/testasyncop.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a |
+| asyncUploadOperations | async_upload_operations | adapted (the abort inside the override goes through `AbortTrigger` + `sync_once_abortable`; about 57 s because the 5 s PollJob retry timer is kept) |
+
+# FakeFolder sync tests
+
+## test/testsyncengine.cpp → `crates/nc-testutils/tests/testsyncengine.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, init | — | n/a (logger setup, test mode, UTF-8 codec: always UTF-8 in the port) |
+| testFileDownload | test_file_download | ported |
+| testFileUpload | test_file_upload | ported |
+| testDirDownload | test_dir_download | ported |
+| testDirUpload | test_dir_upload | ported |
+| testDirUploadWithDelayedAlgorithm | — | n/a (bulk upload, `QSKIP` upstream) |
+| testDirUploadWithDelayedAlgorithmWithNewChecksum | — | n/a (bulk upload, `QSKIP` upstream) |
+| testLocalDelete | test_local_delete | ported |
+| testRemoteDelete | test_remote_delete | ported |
+| testEmlLocalChecksum | test_eml_local_checksum | ported |
+| testSelectiveSyncBug | test_selective_sync_bug | ported |
+| testDirEtagAfterIncompleteSync | test_dir_etag_after_incomplete_sync | ported |
+| testDirDownloadWithError | test_dir_download_with_error | ported |
+| testFakeConflict | test_fake_conflict | ported |
+| testSyncFileItemProperties | test_sync_file_item_properties | ported |
+| testInsufficientRemoteStorage | test_insufficient_remote_storage | ported |
+| testChecksumValidation | test_checksum_validation | ported |
+| testInvalidFilenameRegex | test_invalid_filename_regex | ported |
+| testDiscoveryHiddenFile | test_discovery_hidden_file | ported |
+| testNoLocalEncoding | test_no_local_encoding | adapted (UTF-8 part only: the port always uses UTF-8 file names, no `QTextCodec::setCodecForLocale`) |
+| testUploadV1Multiabort | test_upload_v1_multiabort | ported |
+| testPropagatePermissions | test_propagate_permissions | ported |
+| testEmptyLocalButHasRemote | test_empty_local_but_has_remote | ported |
+| testDirectoryInitialMtime | test_directory_initial_mtime | ported |
+| testLocalFileInitialMtime | test_local_file_initial_mtime | ported |
+| testErrorsWithBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
+| testNetworkErrorsWithBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
+| testNetworkErrorsWithSmallerBatchSizes | — | n/a (bulk upload, `QSKIP` upstream) |
+| testRemoteMoveFailedInsufficientStorageLocalMoveRolledBack | test_remote_move_failed_insufficient_storage_local_move_rolled_back | ported |
+| testRemoteMoveFailedForbiddenLocalMoveRolledBack | test_remote_move_failed_forbidden_local_move_rolled_back | ported |
+| testFolderWithFilesInError | test_folder_with_files_in_error | ported |
+| testInvalidMtimeRecoveryAtStart | test_invalid_mtime_recovery_at_start | ported |
+| testInvalidMtimeRecovery | test_invalid_mtime_recovery | ported |
+| testLocalInvalidMtimeCorrection | test_local_invalid_mtime_correction | ported |
+| testLocalInvalidMtimeCorrectionBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
+| testServerUpdatingMTimeShouldNotCreateConflicts | test_server_updating_mtime_should_not_create_conflicts | ported |
+| testFolderRemovalWithCaseClash | test_folder_removal_with_case_clash | ported (both _data rows) |
+| testServer_caseClash_createConflict | test_server_case_clash_create_conflict | ported |
+| testServer_subFolderCaseClash_createConflict | test_server_sub_folder_case_clash_create_conflict | ported |
+| testServer_caseClash_createConflictOnMove | test_server_case_clash_create_conflict_on_move | ported |
+| testServer_subFolderCaseClash_createConflictOnMove | test_server_sub_folder_case_clash_create_conflict_on_move | ported |
+| testServer_caseClash_createConflictAndSolveIt | test_server_case_clash_create_conflict_and_solve_it | ported (Linux branch: no case clash; the `CaseClashConflictSolver` branch does not run on Linux upstream either) |
+| testServer_subFolderCaseClash_createConflictAndSolveIt | test_server_sub_folder_case_clash_create_conflict_and_solve_it | ported (idem) |
+| testServer_caseClash_createConflict_thenRemoveOneRemoteFile | test_server_case_clash_create_conflict_then_remove_one_remote_file | ported |
+| testServer_caseClash_createDiverseConflictsInsideOneFolderAndSolveThem | test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_them | ported (Linux branch only builds the tree, like upstream) |
+| testExistingFolderBecameBig | test_existing_folder_became_big | adapted (`ConfigFile::setNotifyExistingFoldersOverLimit` → `SyncOptions::notify_existing_folders_over_limit`) |
+| testFileDownloadWithUnicodeCharacterInName | test_file_download_with_unicode_character_in_name | ported |
+| testRemoteTypeChangeExistingLocalMustGetRemoved | test_remote_type_change_existing_local_must_get_removed | ported |
+| testRemoveAllFilesWithNextcloudCmd | test_remove_all_files_with_nextcloud_cmd | adapted (`ConfigFile().setPromptDeleteFiles(true)` → `prompt_delete_files`) |
+| testRemoveAllFilesWithoutNextcloudCmd | test_remove_all_files_without_nextcloud_cmd | adapted (idem) |
+| testSyncReadOnlyLnkWindowsShortcuts | test_sync_read_only_lnk_windows_shortcuts | ported |
+| testSyncLongPaths | test_sync_long_paths | ported |
+| testCreateFileWithTrailingLeadingSpaces_local_automatedRenameBeforeUpload | test_create_file_with_trailing_leading_spaces_local_automated_rename_before_upload | ported |
+| testTouchedFilesWhenChangingFolderPermissionsDuringSync | test_touched_files_when_changing_folder_permissions_during_sync | adapted (`touchedFile` observed through the `propagator_event` callback) |
+| testSyncFolderNewDeleteConflictExpectDeletion | test_sync_folder_new_delete_conflict_expect_deletion | ported |
+| testUploadWhileFileIsChanging | test_upload_while_file_is_changing | adapted (`execUntilBeforePropagation` → `about_to_propagate` callback that grows the file) |
+
+## test/testsyncmove.cpp → `crates/nc-testutils/tests/testsyncmove.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger / QStandardPaths setup) |
+| testMoveCustomRemoteRoot | test_move_custom_remote_root | ported |
+| testRemoteChangeInMovedFolder | test_remote_change_in_moved_folder | ported |
+| testSelectiveSyncMovedFolder | test_selective_sync_moved_folder | ported |
+| testLocalMoveDetection | test_local_move_detection | ported |
+| testLocalExternalStorageRenameDetection | test_local_external_storage_rename_detection | ported |
+| testDuplicateFileId (+_data: first ordering, second ordering) | test_duplicate_file_id | ported |
+| testMovePropagation | test_move_propagation | pending (one assertion: after the folder rename/rename conflict, the journal keeps the local mtime of the re-uploaded folder `CML` while the fake MKCOL gives it the default now−7 days. Reading upstream discovery, MKCOL propagation and the harness, upstream should do the same; needs a run of the upstream test binary to settle) |
+| testRenameCaseOnly | test_rename_case_only | ported |
+| testMoveAndTypeChange | test_move_and_type_change | ported (the `QCOMPARE` is commented out upstream too, "BUG") |
+| testInvertFolderHierarchy | test_invert_folder_hierarchy | ported |
+| testDeepHierarchy (+_data: remote, local) | test_deep_hierarchy | ported |
+| renameOnBothSides | rename_on_both_sides | ported (a private slot, so QtTest runs it) |
+| moveFileToDifferentFolderOnBothSides | move_file_to_different_folder_on_both_sides | ported (idem) |
+| testRenameParallelism | test_rename_parallelism | ported |
+| testRenameParallelismWithBlacklist | test_rename_parallelism_with_blacklist | ported |
+| testMovedWithError (+_data) | test_moved_with_error | adapted (row `Vfs::Off` only; the `WithSuffix` and `WindowsCfApi` rows need VFS: n/a) |
+| testRenameDeepHierarchy | test_rename_deep_hierarchy | ported |
+| testRenameSameFileInMultiplePaths | test_rename_same_file_in_multiple_paths | ported |
+| testBlockRenameTopFolderFromGroupFolder | test_block_rename_top_folder_from_group_folder | ported |
+| testAllowRenameChildFolderFromGroupFolder | test_allow_rename_child_folder_from_group_folder | ported |
+| testMultipleRenameFromServer | test_multiple_rename_from_server | adapted (`aboutToPropagate` → `about_to_propagate` callback with the assertions inside) |
+| testMultipleRenameFromLocal | test_multiple_rename_from_local | ported |
+| testRenameComplexScenarioNoRecordLeak | test_rename_complex_scenario_no_record_leak | adapted (`itemCompleted` lambda → `item_completed` callback with a shared journal handle) |
+| testRenameFileThatExistsInMultiplePaths | test_rename_file_that_exists_in_multiple_paths | ported |
+| testLockTokenClearedOnServerInitiatedRename | test_lock_token_cleared_on_server_initiated_rename | ported |
+| testLockedStateClearedOnClientInitiatedRename | test_locked_state_cleared_on_client_initiated_rename | ported |
+| testUpload412SchedulesRediscovery | test_upload412_schedules_rediscovery | ported |
+| testUpload423ClearsStaleLockState | test_upload423_clears_stale_lock_state | ported |
+| testDeletedDirPrefixDoesNotMatchSibling | test_deleted_dir_prefix_does_not_match_sibling | ported |
+
+## test/testsyncconflict.cpp → `crates/nc-testutils/tests/testsyncconflict.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger setup) |
+| testNoUpload | test_no_upload | ported |
+| testUploadAfterDownload | test_upload_after_download | ported |
+| testSeparateUpload | test_separate_upload | ported |
+| testDownloadingConflictFile | test_downloading_conflict_file | ported |
+| testConflictRecordRemoval1 | test_conflict_record_removal1 | ported |
+| testConflictRecordRemoval2 | test_conflict_record_removal2 | ported |
+| testConflictFileBaseName_data + testConflictFileBaseName | `crates/nc-journal/tests/utility.rs::test_conflict_file_base_name` | ported (all 19 data rows) |
+| testLocalDirRemoteFileConflict | test_local_dir_remote_file_conflict | ported |
+| testLocalFileRemoteDirConflict | test_local_file_remote_dir_conflict | ported |
+| testTypeConflictWithMove | test_type_conflict_with_move | ported |
+| testTypeChange | test_type_change | ported |
+| testEtagChangeFileNotChangedGeneratesNoConflicts | test_etag_change_file_not_changed_generates_no_conflicts | ported (upstream `insert(path, 'W')` passes 'W' as the size: 87 bytes, kept) |
+| testEtagChangeFileChangedGeneratesConflicts | test_etag_change_file_changed_generates_conflicts | ported (idem) |
+| testRemoveRemove | test_remove_remove | ported |
+
+## test/testremotediscovery.cpp → `crates/nc-testutils/tests/testremotediscovery.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger setup; timeouts are always enabled in the port) |
+| testRemoteDiscoveryError_data + testRemoteDiscoveryError | test_remote_discovery_error | ported (27 rows; the Timeout row sets the process-wide HTTP timeout through `nc_dav::jobs::set_http_timeout`, like the static `httpTimeout`) |
+| testMissingData | test_missing_data | ported |
+| testQuotaReportedAsDouble | test_quota_reported_as_double | ported |
+| testRootFileIdReceived | test_root_file_id_received | ported |
+| testLsColJobDoesNotCrashWhenReplyIsDeletedDuringProcessEvents | test_ls_col_job_does_not_crash_when_reply_is_deleted_during_process_events | adapted (no Qt `deleteLater`: the pending-deletion reply is a plain PROPFIND reply; all assertions kept) |
+| testLsColJobSucceedsNormally | test_ls_col_job_succeeds_normally | ported |
+
+## test/testsyncdelete.cpp → `crates/nc-testutils/tests/testsyncdelete.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger setup) |
+| testDeleteDirectoryWithNewFile | test_delete_directory_with_new_file | ported |
+| issue1329 | issue1329 | ported |
+
+## test/testselectivesync.cpp → `crates/nc-testutils/tests/testselectivesync.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger setup) |
+| testSelectiveSyncBigFolders | test_selective_sync_big_folders | ported (`minimumFileAgeForUpload` is a static upstream and a `SyncOptions` field here: reset to 0 after replacing the options) |
+| testRestoreSubFolderForDataFingerPrint | test_restore_sub_folder_for_data_finger_print | ported |
+
+## test/testallfilesdeleted.cpp → `crates/nc-testutils/tests/testallfilesdeleted.rs`
+
+Upstream sets `ConfigFile().setPromptDeleteFiles(true)` once in
+testAllFilesDeletedKeep and it persists in the test config for the following
+functions (testResetServer depends on it); each Rust test sets
+`prompt_delete_files = true` itself.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger setup) |
+| testAllFilesDeletedKeep (+_data: local, remote) | test_all_files_deleted_keep | ported |
+| testAllFilesDeletedDelete (+_data: local, remote) | test_all_files_deleted_delete | ported |
+| testNotDeleteMetaDataChange | test_not_delete_meta_data_change | ported |
+| testResetServer | test_reset_server | ported |
+| testDataFingetPrint (+_data: initial finger print, no initial finger print) | test_data_finget_print | ported |
+| testSingleFileRenamed | test_single_file_renamed | ported |
+| testSelectiveSyncNoPopup | test_selective_sync_no_popup | ported |
+
+## test/testlocaldiscovery.cpp → `crates/nc-testutils/tests/testlocaldiscovery.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger / QStandardPaths setup) |
+| testFileOpenedAsDirectoryCompletesDiscoveryJob | test_file_opened_as_directory_completes_discovery_job | adapted (the job runs synchronously through `discovery_single_local_directory_job`, no thread pool and no 5 s `QTRY` wait) |
+| testSelectiveSyncQuotaExceededDataLoss | test_selective_sync_quota_exceeded_data_loss | ported |
+| testLocalDiscoveryStyle | test_local_discovery_style | ported |
+| testLocalDiscoveryDecision | test_local_discovery_decision | adapted (the `QEXPECT_FAIL` on `!shouldDiscoverLocally("A/X o")` asserts the known false positive, so a fix would fail like a Qt XPASS) |
+| testTrackerItemCompletion | test_tracker_item_completion | ported (`LocalDiscoveryTracker` driven from the engine callbacks) |
+| testDirectoryAndSubDirectory | test_directory_and_sub_directory | ported |
+| testServerBlacklist | test_server_blacklist | ported |
+| testServerForbiddenFilenames | test_server_forbidden_filenames | ported |
+| testRedownloadDeletedLivePhotoMov | test_redownload_deleted_live_photo_mov | ported |
+| testCreateFileWithTrailingSpaces_localAndRemoteTrimmedDoNotExist_renameAndUploadFile | test_create_file_with_trailing_spaces_local_and_remote_trimmed_do_not_exist_rename_and_upload_file | ported (non-Windows branch) |
+| testCreateFileWithTrailingSpaces_remoteDontGetRenamedAutomatically | test_create_file_with_trailing_spaces_remote_dont_get_renamed_automatically | ported (non-Windows branch) |
+| testCreateLocalPathsWithLeadingAndTrailingSpaces_syncOnSupportingOs | test_create_local_paths_with_leading_and_trailing_spaces_sync_on_supporting_os | ported |
+| testCreateFileWithTrailingSpaces_remoteGetRenamedManually | test_create_file_with_trailing_spaces_remote_get_renamed_manually | ported (non-Windows branch) |
+| testCreateFileWithTrailingSpaces_localTrimmedAlsoCreated_dontRenameAutomaticallyAndDontUploadFile | test_create_file_with_trailing_spaces_local_trimmed_also_created_dont_rename_automatically_and_dont_upload_file | ported |
+| testCreateFileWithTrailingSpaces_localTrimmedAlsoCreated_dontRenameAutomaticallyAndUploadBothFiles | test_create_file_with_trailing_spaces_local_trimmed_also_created_dont_rename_automatically_and_upload_both_files | ported |
+| testCreateFileWithTrailingSpaces_localAndRemoteTrimmedExists_renameFile | test_create_file_with_trailing_spaces_local_and_remote_trimmed_exists_rename_file | ported (non-Windows branch) |
+| testBlockInvalidMtimeSyncRemote | test_block_invalid_mtime_sync_remote | ported |
+| testBlockInvalidMtimeSyncLocal | test_block_invalid_mtime_sync_local | ported |
+| testDoNotSyncInvalidFutureMtime | test_do_not_sync_invalid_future_mtime | ported |
+| testInvalidFutureMtimeRecovery | test_invalid_future_mtime_recovery | ported |
+| testDiscoverLockChanges | test_discover_lock_changes | ported |
+| testDiscoveryUsesCorrectQuotaSource | test_discovery_uses_correct_quota_source | ported |
+| testMissingInodeAndFixThem | test_missing_inode_and_fix_them | ported |
+
+## test/testpermissions.cpp → `crates/nc-testutils/tests/testpermissions.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (test setup) |
+| t7pl (+_data: move to trash, delete) | t7pl | ported |
+| testForbiddenMoves | test_forbidden_moves | ported |
+| testNewLocalFileInReadOnlyFolderIsKept | test_new_local_file_in_read_only_folder_is_kept | ported |
+| testMoveSyncedFileIntoReadOnlyFolderRestoresContent | test_move_synced_file_into_read_only_folder_restores_content | ported |
+| testParentMoveNotAllowedChildrenRestored | test_parent_move_not_allowed_children_restored | ported |
+| testReadOnlyFolderIsReallyReadOnly | test_read_only_folder_is_really_read_only | ported |
+| testReadWriteFolderIsReallyReadWrite | test_read_write_folder_is_really_read_write | ported |
+| testChangePermissionsFolder | test_change_permissions_folder | ported |
+| testChangePermissionsForFolderHierarchy | test_change_permissions_for_folder_hierarchy | ported |
+| testDeleteChildItemsInReadOnlyFolder | test_delete_child_items_in_read_only_folder | ported |
+| testRenameChildItemsInReadOnlyFolder | test_rename_child_items_in_read_only_folder | ported |
+| testMoveChildItemsInReadOnlyFolder | test_move_child_items_in_read_only_folder | ported |
+| testModifyChildItemsInReadOnlyFolder | test_modify_child_items_in_read_only_folder | ported (upstream checks `readOnlyFolder/newFolder`, which does not exist; `std::filesystem::status` then reports all bits set, so the check passes; reproduced) |
+| testForbiddenDownload | test_forbidden_download | ported |
+| testExistingFileBecomeForbiddenDownload | test_existing_file_become_forbidden_download | ported |
+| testChangingPermissionsWithoutEtagChange | test_changing_permissions_without_etag_change | ported |
+| testFolderReadonlyWhenRemotePermissionsWithoutEtagChanged (+_data, 20 rows) | test_folder_readonly_when_remote_permissions_without_etag_changed | ported |
+
+## test/testdatabaseerror.cpp → `crates/nc-testutils/tests/testdatabaseerror.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (test setup) |
+| testDatabaseError | test_database_error | ported (134 iterations of the autotest fail counter: 54 failing and recovering syncs, 80 successful) |
+
+## test/testlockedfiles.cpp → `crates/nc-testutils/tests/testlockedfiles.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (test setup) |
+| testBasicLockFileWatcher | — | n/a (GUI `LockWatcher`; the rest is Windows-only) |
+| testLocalDirectoryDiscoveryReturnsAllEntries | test_local_directory_discovery_returns_all_entries | adapted (calls `discovery_single_local_directory_job` directly instead of a QThreadPool job + QSignalSpy) |
+| testLockDetectionUsesRealFileSystemCheck | — | n/a (Windows-only) |
+| testDirectoryLockChecks | — | n/a (Windows-only) |
+| testLockedFilePropagation | — | n/a (Windows-only) |
+| testPartialRecursiveRemoteRemovalNormalisesJournalPaths | — | n/a (Windows-only) |
+| testPartialRecursiveRemoteRemovalDoesNotDeleteRemoteFileOnNextSync | — | n/a (Windows-only) |
+
+## test/testlongpath.cpp → `crates/nc-testutils/tests/testlongpath.rs`
+
+The file keeps upstream's LGPL-2.1-or-later csync header.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (test setup) |
+| check_long_win_path | — | n/a (Windows-only, `FileSystem::pathtoUNC`) |
+| testLongPathStat (+_data: long, long emoji, long russian, long arabic, long chinese) | test_long_path_stat | ported (against `nc_sync::filesystem::csync_vio_local_stat`) |
+
+## test/testchunkingng.cpp → `crates/nc-testutils/tests/testchunkingng.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testChunkV2Restrictions | test_chunk_v2_restrictions | ported |
+| testFileUpload | test_file_upload | ported |
+| testDestinationHeaderPercentEncoding | test_destination_header_percent_encoding | ported |
+| testResume1 | test_resume1 | ported |
+| testResume2 | test_resume2 | ported |
+| testResume3 | test_resume3 | ported |
+| testResume4 | test_resume4 | ported |
+| testLateAbortHard | test_late_abort_hard | adapted (`QTimer::singleShot(50, abort)` inside the override → `FakeFolder::abort_timer()`; the delayed MOVE reply is `FakeReply::Delayed` + `chunk_move_reply`) |
+| testLateAbortRecoverable | test_late_abort_recoverable | adapted (idem) |
+| testRemoveStale1 | test_remove_stale1 | ported |
+| testRemoveStale2 | test_remove_stale2 | ported |
+| testCreateConflictWhileSyncing | test_create_conflict_while_syncing | adapted (the `transmissionProgress` handler changes the remote through a `FakeServer` clone; `disconnect` is a flag) |
+| testModifyLocalFileWhileUploading | test_modify_local_file_while_uploading | adapted (idem, with a `DiskFileModifier` clone) |
+| testResumeServerDeletedChunks | test_resume_server_deleted_chunks | ported |
+| connectionDroppedBeforeEtagRecieved (+_data: big file, small file) | connection_dropped_before_etag_recieved | adapted (`QScopedValueRollback(httpTimeout, 1)` → RAII guard over `nc_dav::jobs::set_http_timeout`) |
+| testPercentEncoding | test_percent_encoding | ported |
+| testVeryBigFiles | test_very_big_files | ported (2.5 GiB file, about 2 minutes) |
+
+## test/testuploadreset.cpp → `crates/nc-testutils/tests/testuploadreset.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testFileUploadNg | test_file_upload_ng | ported |
+
+## test/testdownload.cpp → `crates/nc-testutils/tests/testdownload.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testResume | test_resume | adapted (`BrokenFakeGetReply` = the fake GET reply with its full Content-Length but a body cut at `stopAfter`) |
+| testErrorMessage | test_error_message | adapted (the 10 s safety abort is an `AbortTimer`; `timedOut` comes from `fired_count()`) |
+| serverMaintenence | server_maintenence | ported |
+| testMoveFailsInAConflict | test_move_fails_in_a_conflict | adapted (`touchedFile` through the `propagator_event` callback, enabled once `transmissionProgress` reports Propagation; the `QTest::qFail` in the override becomes a flag asserted after the sync) |
+| testHttp2Resend | test_http2_resend | adapted (`ContentReSendError`, `Http2WasUsedAttribute` and the null status are set with a `ReplyOverride` on the fake error reply) |
+
+## test/testblacklist.cpp → `crates/nc-testutils/tests/testblacklist.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testBlacklistBasic (+_data: remote, local) | test_blacklist_basic | ported |
 
 ## test/syncenginetestutils.{h,cpp} (harness, no test functions)
 

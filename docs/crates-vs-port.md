@@ -53,6 +53,11 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | `~/.netrc` (`netrcparser.cpp`) | ported | — | Upstream's parser has its own quirks (no quoting support, `default` entry, whitespace splitting) covered by its test, ported 1:1. The `netrc` crates differ on those. |
 | Server URLs (`QUrl`) | ported subset (`nc_dav::account::ServerUrl`) | — | Only what the client needs: scheme/host/port/path, credentials in the URL, lower-cased host, percent-encoding of DAV paths like `QUrl::toPercentEncoding(path, "/")`, and `toString()` without credentials for `makeDbName`. The `url` crate normalises differently (e.g. IDNA, path dot segments), which would change journal names. |
 | Engine (discovery, reconcile, propagator, jobs) | ported | — | The behaviour under test. |
+| Progress (`ProgressInfo`, `progressdispatcher.cpp`) | ported (totals and per-item progress; no estimates) | — | Drives `transmissionProgress`, which several upstream tests use as their hook. |
+
+Build note: `[profile.dev.package."*"] opt-level = 3` optimises the
+dependencies (checksums, SQLite, TLS) in debug builds; the big-file chunking
+tests went from minutes to seconds. The first debug build takes longer.
 
 ## Planned (later phases), from the study
 
