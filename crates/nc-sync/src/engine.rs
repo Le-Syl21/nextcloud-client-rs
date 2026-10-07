@@ -127,6 +127,9 @@ pub struct SyncEngine {
     should_enforce_windows_file_name_compatibility: bool,
     filesystem_permissions_reliable: bool,
     remote_root_etag: Vec<u8>,
+    /// `_rootFileIdReceived` / `_rootFileId`: set once for the engine's
+    /// lifetime, so the signal is emitted only on the first sync.
+    root_file_id: Rc<std::cell::Cell<Option<i64>>>,
     /// `ConfigFile::promptDeleteFiles()` (default false).
     pub prompt_delete_files: bool,
     /// `ConfigFile::deleteFilesThreshold()` (default 100).
@@ -172,6 +175,7 @@ impl SyncEngine {
             should_enforce_windows_file_name_compatibility: false,
             filesystem_permissions_reliable: false,
             remote_root_etag: Vec::new(),
+            root_file_id: Rc::new(std::cell::Cell::new(None)),
             prompt_delete_files: false,
             delete_files_threshold: 100,
             callbacks: Rc::new(RefCell::new(EngineCallbacks::default())),
@@ -521,11 +525,13 @@ impl SyncEngine {
         }
         {
             let cbs2 = cbs.clone();
-            let received = Rc::new(std::cell::Cell::new(false));
+            // slotRootFileIdReceived: the flag is an engine member.
+            let received = self.root_file_id.clone();
             discovery.callbacks.root_file_id_received = Some(Box::new(move |id| {
-                if received.replace(true) {
+                if received.get().is_some() {
                     return;
                 }
+                received.set(Some(id));
                 if let Some(cb) = cbs2.borrow_mut().root_file_id_received.as_mut() {
                     cb(id);
                 }
