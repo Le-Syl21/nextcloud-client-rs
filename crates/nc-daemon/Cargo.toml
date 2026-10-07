@@ -12,14 +12,22 @@ publish.workspace = true
 nc-journal.workspace = true
 nc-dav.workspace = true
 nc-sync.workspace = true
+rustix.workspace = true
 log.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true
+ini-preserve.workspace = true
+keyring-core.workspace = true
+zbus-secret-service-keyring-store.workspace = true
+qrcode.workspace = true
+http.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

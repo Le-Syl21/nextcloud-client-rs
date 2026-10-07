@@ -4,3 +4,11 @@
 //! Daemon side of the sync client: what the official desktop client does in
 //! `src/gui` without a GUI (folder manager, folders, folder watcher, account
 //! state, configuration, credentials).
+
+pub mod account_config;
+pub mod config_file;
+pub mod credentials;
+pub mod flow2auth;
+pub mod folder_definition;
+pub mod settings;
+pub mod takeover;

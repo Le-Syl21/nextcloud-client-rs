@@ -44,6 +44,10 @@ env_logger = "0.11.11"
 rpassword = "7.5.4"
 trash = { version = "5.2.9", default-features = false }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
+ini-preserve = "0.1.3"
+keyring-core = "1.0.0"
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+qrcode = { version = "0.14.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
