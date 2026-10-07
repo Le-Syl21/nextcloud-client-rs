@@ -64,6 +64,43 @@ pub fn concat_url_path(path: &str, concat_path: &str) -> String {
     path
 }
 
+/// Characters `QUrlQuery` percent-encodes in a query item key or value
+/// (`QUrl::toEncoded()`): those of a path, minus `?` (allowed in a query),
+/// plus the item delimiters `&` and `=`.
+pub const QUERY_ITEM_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}')
+    .add(b'&')
+    .add(b'=');
+
+/// `QUrlQuery::setQueryItems(items)` then `query(QUrl::FullyEncoded)`:
+/// `key=value` pairs joined with `&`.
+pub fn encode_query_items(items: &[(String, String)]) -> String {
+    items
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                utf8_percent_encode(k, QUERY_ITEM_ENCODE_SET),
+                utf8_percent_encode(v, QUERY_ITEM_ENCODE_SET)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// A server URL split like `QUrl`: scheme, authority (without user info),
 /// decoded path, and the user info.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +187,29 @@ impl ServerUrl {
             self.authority,
             utf8_percent_encode(&self.path, PATH_ENCODE_SET)
         )
+    }
+
+    /// `Utility::concatUrlPath(url, concatPath, queryItems).toEncoded()`:
+    /// the path joined with [`concat_url_path`], the query replaced by
+    /// `query_items` (none when empty, like an empty `QUrlQuery`). The user
+    /// info is left out, as in [`Self::to_credential_free_string`].
+    pub fn concat_url_path_encoded(
+        &self,
+        concat_path: &str,
+        query_items: &[(String, String)],
+    ) -> String {
+        let path = concat_url_path(&self.path, concat_path);
+        let mut url = format!(
+            "{}://{}{}",
+            self.scheme,
+            self.authority,
+            utf8_percent_encode(&path, PATH_ENCODE_SET)
+        );
+        if !query_items.is_empty() {
+            url.push('?');
+            url.push_str(&encode_query_items(query_items));
+        }
+        url
     }
 
     /// The URI for a decoded absolute path on this server.
