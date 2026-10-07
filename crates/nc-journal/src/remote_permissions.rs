@@ -226,8 +226,9 @@ fn decode_share_attributes(raw: &str, perm: &mut RemotePermissions) {
             && obj.get("key").and_then(|v| v.as_str()) == Some("download")
         {
             // QJsonValue::toBool() is false for anything but `true`.
-            if let Some(v) = obj.get("value")
-                && !v.as_bool().unwrap_or(false)
+            if obj
+                .get("value")
+                .is_some_and(|v| !v.as_bool().unwrap_or(false))
             {
                 missing_download_permission = true;
             }

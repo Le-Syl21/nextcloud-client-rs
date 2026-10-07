@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 nc-journal = { path = "crates/nc-journal" }
+nc-dav = { path = "crates/nc-dav" }
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 regex = "1"
 thiserror = "2"

@@ -1,0 +1,17 @@
+[package]
+name = "nc-dav"
+description = "HTTP/WebDAV layer of nextcloud-client-rs (unofficial port of the Nextcloud desktop client network layer)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+http.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
