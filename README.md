@@ -50,7 +50,7 @@ The options are those of `nextcloudcmd` (`-u`, `-p`, `-n`, `--non-interactive`,
 `ncsync sync --help`. Prefer an app password, given with `--password-file`
 or `NC_PASSWORD` (with `--non-interactive`) rather than `-p`. Extensions: `--new-big-folder-size-limit`,
 `--confirm-external-storage`, `--abort-on-mass-deletion` and
-`--max-deletions`, `--password-file`. Not enforced yet: `--uplimit` / `--downlimit`.
+`--max-deletions`, `--password-file`.
 
 The journal is the official client's `.sync_xxxxxxxxxxxx.db`, named the same
 way, in the synchronized folder.

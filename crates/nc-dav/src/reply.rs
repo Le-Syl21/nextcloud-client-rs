@@ -90,6 +90,7 @@ impl NetworkError {
             TransportError::ConnectionRefused(_) => Self::ConnectionRefusedError,
             TransportError::HostNotFound(_) => Self::HostNotFoundError,
             TransportError::SslHandshakeFailed(_) => Self::SslHandshakeFailedError,
+            TransportError::UnknownContent(_) => Self::UnknownContentError,
             TransportError::Connection(_) | TransportError::Other(_) => Self::UnknownNetworkError,
         }
     }

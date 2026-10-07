@@ -64,6 +64,12 @@ pub struct JobOptions {
     pub cancel: Option<CancellationToken>,
     /// The job timeout (reset by network activity for streamed bodies).
     pub timeout: Duration,
+    /// `AbstractCredentials::DontAddCredentialsAttribute`: no
+    /// `Authorization` header (direct download URLs).
+    pub dont_add_credentials: bool,
+    /// `QNetworkRequest::setDecompressedSafetyCheckThreshold` (`None`: Qt's
+    /// default of 10 MiB).
+    pub decompressed_safety_check_threshold: Option<i64>,
 }
 
 impl Default for JobOptions {
@@ -71,6 +77,8 @@ impl Default for JobOptions {
         Self {
             cancel: None,
             timeout: http_timeout(),
+            dont_add_credentials: false,
+            decompressed_safety_check_threshold: None,
         }
     }
 }
@@ -93,17 +101,47 @@ pub enum Target {
     Account(String),
     /// A decoded absolute path on the server (an explicit `QUrl`).
     Absolute(String),
+    /// A full URL, possibly on another host (a direct download URL,
+    /// `QUrl::fromUserInput(url)`).
+    Url(String),
 }
 
 impl Target {
-    /// The decoded absolute path.
+    /// The decoded absolute path (the URL itself for [`Target::Url`]).
     pub fn path(&self, account: &Account) -> String {
         match self {
             Self::Dav(p) => account.dav_path_for(p),
             Self::Account(p) => account.account_path_for(p),
-            Self::Absolute(p) => p.clone(),
+            Self::Absolute(p) | Self::Url(p) => p.clone(),
         }
     }
+
+    /// The request URI.
+    pub fn uri(&self, account: &Account) -> Result<http::Uri, String> {
+        match self {
+            Self::Url(u) => crate::account::url_from_user_input(u).map_err(|e| e.to_string()),
+            _ => account.uri(&self.path(account)).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+/// Builds the request of a job: the account's common headers, the
+/// credentials unless `dont_add_credentials`, and the request attributes.
+fn build_job_request(
+    account: &Account,
+    method: Method,
+    uri: http::Uri,
+    headers: HeaderMap,
+    body: Body,
+    opts: &JobOptions,
+) -> (crate::transport::Request, String) {
+    let (mut req, request_id) =
+        account.build_request_with(method, uri, headers, body, !opts.dont_add_credentials);
+    if let Some(t) = opts.decompressed_safety_check_threshold {
+        req.extensions_mut()
+            .insert(crate::transport::DecompressedSafetyCheckThreshold(t));
+    }
+    (req, request_id)
 }
 
 /// `HttpError` (`HttpResult` failure): HTTP code (0 if none) and message.
@@ -166,22 +204,27 @@ pub async fn send(
     body: Body,
     opts: &JobOptions,
 ) -> Reply {
-    let path = target.path(account);
-    let uri = match account.uri(&path) {
+    let uri = match target.uri(account) {
         Ok(u) => u,
         Err(e) => {
-            return transport_failure(path, String::new(), &TransportError::Other(e.to_string()));
+            return transport_failure(
+                target.path(account),
+                String::new(),
+                &TransportError::Other(e),
+            );
         }
     };
     let url = uri.to_string();
     let mut resend = Http2Resend::new(&body);
     let mut body = Some(body);
     loop {
-        let (req, request_id) = account.build_request(
+        let (req, request_id) = build_job_request(
+            account,
             method.clone(),
             uri.clone(),
             headers.clone(),
             body.take().unwrap_or_default(),
+            opts,
         );
         let result = guarded(opts, async {
             let resp = account.send(req).await?;
@@ -189,7 +232,7 @@ pub async fn send(
             let bytes = body
                 .collect()
                 .await
-                .map_err(|e| TransportError::RemoteHostClosed(e.to_string()))?;
+                .map_err(|e| crate::transport::body_stream_error(&e))?;
             Ok((parts, bytes))
         })
         .await;
@@ -261,14 +304,13 @@ pub async fn send_streaming(
     body: Body,
     opts: &JobOptions,
 ) -> Result<StreamingReply, Reply> {
-    let path = target.path(account);
-    let uri = match account.uri(&path) {
+    let uri = match target.uri(account) {
         Ok(u) => u,
         Err(e) => {
             return Err(transport_failure(
-                path,
+                target.path(account),
                 String::new(),
-                &TransportError::Other(e.to_string()),
+                &TransportError::Other(e),
             ));
         }
     };
@@ -276,11 +318,13 @@ pub async fn send_streaming(
     let mut resend = Http2Resend::new(&body);
     let mut body = Some(body);
     loop {
-        let (req, request_id) = account.build_request(
+        let (req, request_id) = build_job_request(
+            account,
             method.clone(),
             uri.clone(),
             headers.clone(),
             body.take().unwrap_or_default(),
+            opts,
         );
         match guarded(opts, account.send(req)).await {
             Ok(resp) => {
@@ -308,7 +352,7 @@ pub async fn next_chunk(
     guarded(opts, async {
         match body.next().await {
             Some(Ok(b)) => Ok(Some(b)),
-            Some(Err(e)) => Err(TransportError::RemoteHostClosed(e.to_string())),
+            Some(Err(e)) => Err(crate::transport::body_stream_error(&e)),
             None => Ok(None),
         }
     })

@@ -39,7 +39,7 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 
 | Component (upstream) | Choice | Version | Why |
 |---|---|---|---|
-| HTTP client (`AbstractNetworkJob`, QNAM, `AccessManager`) | **reqwest** (`rustls`, `http2`, `stream`, `cookies`, `gzip`, `deflate`, `system-proxy`; no default features) | 0.13.5 | Implements `nc_dav::Transport` in `http_client.rs`, with streaming request and response bodies (downloads are written while received, chunk uploads stream from the file). Upstream's error model (`QNetworkReply::NetworkError`, `statusCodeFromHttp`, `networkReplyErrorString`, `OC-ErrorString`, timeouts) is ported in `reply.rs` on top: reqwest only supplies bytes and status. Cookies are kept like QNAM's cookie jar; `--trust` maps to accepting invalid certificates. |
+| HTTP client (`AbstractNetworkJob`, QNAM, `AccessManager`) | **reqwest** (`rustls`, `http2`, `stream`, `cookies`, `system-proxy`; no default features; `gzip`/`deflate` dropped in Phase 2, see below) | 0.13.5 | Implements `nc_dav::Transport` in `http_client.rs`, with streaming request and response bodies (downloads are written while received, chunk uploads stream from the file). Upstream's error model (`QNetworkReply::NetworkError`, `statusCodeFromHttp`, `networkReplyErrorString`, `OC-ErrorString`, timeouts) is ported in `reply.rs` on top: reqwest only supplies bytes and status. Cookies are kept like QNAM's cookie jar; `--trust` maps to accepting invalid certificates. |
 | Event loop, timers, cancellation | **tokio** (current-thread runtime), **tokio-util** (`CancellationToken`), **futures-util** (`FuturesUnordered`) | 1.53.2, 0.7.19, 0.3.34 | Only the primitives. Upstream's single-threaded Qt event loop ordering is ported: job arenas, posted-event queues, completions handled one at a time, `scheduleNextJob` as a flag drained after the ready completions, item jobs polled once at start so they register in `_activeJobList` synchronously like `start()`. Abort is a hard/soft token pair with upstream's 5 s timer. |
 | PROPFIND / XML (`LsColXMLParser`, `PropfindJob`, error bodies) | **quick-xml** (`NsReader`) | 0.42.0 | Tokenizer only; the parser (which props, href normalisation, the "expected path" check, `<s:message>` / `<s:exception>` extraction) is ported in `xml.rs`. |
 | Request ids (`X-Request-ID`), transfer ids | **uuid** (v4) | 1.27.0 | Upstream uses `QUuid::createUuid()`. |
@@ -54,6 +54,16 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | Server URLs (`QUrl`) | ported subset (`nc_dav::account::ServerUrl`) | — | Only what the client needs: scheme/host/port/path, credentials in the URL, lower-cased host, percent-encoding of DAV paths like `QUrl::toPercentEncoding(path, "/")`, and `toString()` without credentials for `makeDbName`. The `url` crate normalises differently (e.g. IDNA, path dot segments), which would change journal names. |
 | Engine (discovery, reconcile, propagator, jobs) | ported | — | The behaviour under test. |
 | Progress (`ProgressInfo`, `progressdispatcher.cpp`) | ported (totals and per-item progress; no estimates) | — | Drives `transmissionProgress`, which several upstream tests use as their hook. |
+
+## Phase 2 (in the tree)
+
+All versions are the latest on crates.io on 2026-10-07 (`cargo search`).
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| Transparent gzip/deflate decoding of replies with Qt's decompression safety check (`QNetworkRequest::setDecompressedSafetyCheckThreshold`, `QDecompressHelper`; used by `GETFileJob`) | **zlib-rs** (`std`; no default features), check ported in `nc-dav/src/decompress.rs` | 0.6.8 | reqwest's `gzip`/`deflate` decoding has no ratio check, so it is disabled and the transport decodes itself. zlib-rs is a memory-safe port of zlib with the same `inflateInit2(MAX_WBITS + 32)` zlib/gzip auto detection Qt uses (flate2 does not expose it). The Qt rules are reproduced: `Accept-Encoding: gzip, deflate` unless the caller set one, raw deflate retry, concatenated streams, eager decoding with the compressed/decompressed byte counts, ratio > 40 above the threshold (default 10 MiB, `-1` disables) → `UnknownContentError`, `Content-Length` removed for HTTP/1 only (QTBUG-73364). |
+| Bandwidth limits (`bandwidthmanager.cpp`, `UploadDevice`, `GETFileJob` quota) | ported (`nc-sync/src/propagator/bandwidth.rs`) on tokio timers and `Notify` | — | Upstream-specific quota scheme (limit split per registered transfer every second, 10 s switching timer). No crate does that; a token-bucket crate (`governor`, ...) would pace differently. |
+| Local HTTP servers of the `HAVE_QHTTPSERVER` tests (`QHttpServer`) | hand-written std `TcpListener` server in `nc-testutils/tests/common/http_server.rs` | — | About 150 lines for routes, recorded requests and fixed responses; a server framework would add a large dev-dependency for nothing the tests need. |
 
 Build note: `[profile.dev.package."*"] opt-level = 3` optimises the
 dependencies (checksums, SQLite, TLS) in debug builds; the big-file chunking

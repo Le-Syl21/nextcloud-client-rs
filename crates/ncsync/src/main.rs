@@ -83,12 +83,10 @@ struct SyncArgs {
     /// Retries maximum N times (default 3).
     #[arg(long = "max-sync-retries", value_name = "N", default_value_t = 3)]
     max_sync_retries: i32,
-    /// Limit the upload speed of files to N KB/s (not enforced yet: uploads
-    /// are serialized like upstream does under a limit).
+    /// Limit the upload speed of files to N KB/s.
     #[arg(long, value_name = "N", default_value_t = 0)]
     uplimit: i32,
-    /// Limit the download speed of files to N KB/s (not enforced yet:
-    /// downloads are serialized like upstream does under a limit).
+    /// Limit the download speed of files to N KB/s.
     #[arg(long, value_name = "N", default_value_t = 0)]
     downlimit: i32,
     /// Sync hidden files, do not ignore them (the default, as in nextcloudcmd).
@@ -223,11 +221,6 @@ fn run_sync(args: SyncArgs) -> ExitCode {
     if let Some(dir) = &args.confdir {
         log::warn!(
             "--confdir {dir} is ignored: ncsync does not read the desktop client configuration"
-        );
-    }
-    if args.uplimit != 0 || args.downlimit != 0 {
-        log::warn!(
-            "--uplimit/--downlimit: bandwidth limits are not enforced yet, transfers are serialized"
         );
     }
     let _ = args.sync_hidden; // the default: hidden files are synced

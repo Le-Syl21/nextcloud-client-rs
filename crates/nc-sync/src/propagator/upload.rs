@@ -25,6 +25,7 @@ use nc_dav::{Body, JobOptions, NetworkError, Reply, Target};
 use nc_journal::checksums::{make_checksum_header, parse_checksum_header, upload_checksum_enabled};
 use nc_journal::journal::{PollInfo, UploadInfo};
 
+use super::bandwidth::{BandwidthManager, BandwidthRegistration};
 use super::{
     Done, JobCtx, Outcome, PropagatorEvent, classify_error, get_etag_from_reply,
     get_exception_from_reply,
@@ -55,33 +56,60 @@ fn qfileinfo_path(file: &str) -> String {
     }
 }
 
-/// `UploadDevice`: `size` bytes of `path` from `start`, read while sending.
-fn upload_device(path: &str, start: i64, size: i64) -> Result<Body, String> {
+/// `UploadDevice`: `size` bytes of `path` from `start`, read while sending,
+/// registered in the bandwidth manager (`readData` only hands out the
+/// bandwidth quota when the upload is limited).
+fn upload_device(
+    path: &str,
+    start: i64,
+    size: i64,
+    bandwidth_manager: &BandwidthManager,
+) -> Result<Body, String> {
+    // Get the file size now: _file.fileName() is no longer reliable
+    // on all platforms after openAndSeekFileSharedRead().
     let disk_size = filesystem::get_size(path);
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     f.seek(SeekFrom::Start(start.max(0) as u64))
         .map_err(|e| e.to_string())?;
     let size = size.clamp(0, (disk_size - start).max(0));
-    let mut remaining = size as u64;
-    let stream = futures_util::stream::iter(std::iter::from_fn(move || {
-        if remaining == 0 {
+    let registration = bandwidth_manager.register_upload_device();
+    struct Device {
+        file: std::fs::File,
+        remaining: u64,
+        registration: BandwidthRegistration,
+    }
+    let device = Device {
+        file: f,
+        remaining: size as u64,
+        registration,
+    };
+    let stream = futures_util::stream::unfold(device, |mut d| async move {
+        if d.remaining == 0 {
+            // at end
+            d.registration.unregister();
             return None;
         }
-        let n = remaining.min(64 * 1024) as usize;
+        let max = d.remaining.min(64 * 1024) as usize;
+        // isChoked() / isBandwidthLimited(): wait for quota.
+        let n = d.registration.client().acquire(max).await;
         let mut buf = vec![0u8; n];
-        match f.read(&mut buf) {
-            Ok(0) => None,
+        match d.file.read(&mut buf) {
+            Ok(0) => {
+                d.registration.unregister();
+                None
+            }
             Ok(read) => {
                 buf.truncate(read);
-                remaining -= read as u64;
-                Some(Ok(Bytes::from(buf)))
+                d.remaining -= read as u64;
+                Some((Ok(Bytes::from(buf)), d))
             }
             Err(e) => {
-                remaining = 0;
-                Some(Err(e))
+                log::warn!(target: "nextcloud.sync.uploaddevice", "{e}");
+                d.remaining = 0;
+                Some((Err(e), d))
             }
         }
-    }));
+    });
     Ok(Body::from_stream(stream, Some(size as u64)))
 }
 
@@ -368,6 +396,7 @@ pub(crate) async fn poll_job(ctx: &JobCtx, path: &str) -> Option<()> {
         let opts = JobOptions {
             cancel: Some(ctx.shared.soft_abort.child_token()),
             timeout: Duration::from_secs(120),
+            ..JobOptions::default()
         };
         let reply = nc_dav::jobs::send(
             account,
@@ -816,7 +845,7 @@ async fn upload_v1(up: &mut Upload<'_>) -> Outcome {
                 if is_final_chunk && !up.transmission_checksum_header.is_empty() {
                     headers.push(("OC-Checksum", up.transmission_checksum_header.clone()));
                 }
-                let device = match upload_device(&up.file_to_upload.path, chunk_start, current_chunk_size) {
+                let device = match upload_device(&up.file_to_upload.path, chunk_start, current_chunk_size, &ctx.shared.bandwidth) {
                     Ok(d) => d,
                     Err(e) => {
                         log::warn!(target: "nextcloud.sync.propagator.upload.v1", "Could not prepare upload device: {e}");
@@ -1266,7 +1295,12 @@ async fn upload_ng(up: &mut Upload<'_>) -> Outcome {
         if current_chunk_size == 0 {
             break; // finishUpload
         }
-        let device = match upload_device(&up.file_to_upload.path, sent, current_chunk_size) {
+        let device = match upload_device(
+            &up.file_to_upload.path,
+            sent,
+            current_chunk_size,
+            &ctx.shared.bandwidth,
+        ) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(target: "nextcloud.sync.propagator.upload.ng", "Could not prepare upload device: {e}");

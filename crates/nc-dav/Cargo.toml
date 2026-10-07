@@ -23,6 +23,7 @@ futures-util.workspace = true
 quick-xml.workspace = true
 uuid.workspace = true
 base64.workspace = true
+zlib-rs.workspace = true
 
 [lints]
 workspace = true

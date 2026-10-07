@@ -181,9 +181,44 @@ pub enum TransportError {
     /// Other connection-level failure (`UnknownNetworkError`).
     #[error("connection error: {0}")]
     Connection(String),
+    /// The body could not be decoded (`UnknownContentError`), e.g. the
+    /// decompression safety check of a compressed reply.
+    #[error("{0}")]
+    UnknownContent(String),
     /// Anything else, with a human-readable message.
     #[error("{0}")]
     Other(String),
+}
+
+/// The error a body stream yields (wrapped in a [`std::io::Error`]) when the
+/// transparent decompression of a reply fails (`UnknownContentError`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct DecompressionError(pub String);
+
+impl DecompressionError {
+    /// Wraps the error for a body stream.
+    pub fn into_io(self) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, self)
+    }
+}
+
+/// A request extension: `QNetworkRequest::setDecompressedSafetyCheckThreshold`
+/// (bytes; `-1` disables the check). Without it the transport uses Qt's
+/// default, [`crate::decompress::DEFAULT_DECOMPRESSED_SAFETY_CHECK_THRESHOLD`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecompressedSafetyCheckThreshold(pub i64);
+
+/// Maps a body stream error: a failed decompression is
+/// [`TransportError::UnknownContent`], anything else a closed connection.
+pub fn body_stream_error(e: &std::io::Error) -> TransportError {
+    if let Some(d) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<DecompressionError>())
+    {
+        return TransportError::UnknownContent(d.0.clone());
+    }
+    TransportError::RemoteHostClosed(e.to_string())
 }
 
 /// Sends HTTP requests. Implemented by the real HTTP client and by the fake

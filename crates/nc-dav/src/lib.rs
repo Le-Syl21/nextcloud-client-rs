@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod capabilities;
+pub mod decompress;
 pub mod http_client;
 pub mod jobs;
 pub mod reply;
@@ -28,5 +29,6 @@ pub use http_client::{HttpClientOptions, HttpTransport};
 pub use jobs::{HttpError, JobOptions, Target};
 pub use reply::{NetworkError, Reply, ReplyOverride};
 pub use transport::{
-    Body, BodyStream, BoxFuture, Bytes, Request, Response, Transport, TransportError, method,
+    Body, BodyStream, BoxFuture, Bytes, DecompressedSafetyCheckThreshold, DecompressionError,
+    Request, Response, Transport, TransportError, method,
 };
