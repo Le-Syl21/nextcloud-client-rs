@@ -13,6 +13,7 @@
 //! Reference upstream: nextcloud/desktop tag `v34.0.5`.
 
 pub mod checksums;
+pub mod csync;
 pub mod exclude;
 pub mod jhash;
 pub mod journal;
