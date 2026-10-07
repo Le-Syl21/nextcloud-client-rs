@@ -84,6 +84,18 @@ impl std::ops::DerefMut for RemoteGuard<'_> {
     }
 }
 
+/// A `Send` handle that aborts the sync run by
+/// [`FakeFolder::sync_once_abortable`], usable from a server override.
+#[derive(Clone, Default)]
+pub struct AbortTrigger(Arc<tokio::sync::Notify>);
+
+impl AbortTrigger {
+    /// `SyncEngine::abort()`, queued to the event loop of the running sync.
+    pub fn abort(&self) {
+        self.0.notify_one();
+    }
+}
+
 /// Runs a future to completion on a fresh current-thread tokio runtime
 /// (the event loop of a test).
 pub fn run_event_loop<F: std::future::Future>(fut: F) -> F::Output {
@@ -192,6 +204,26 @@ impl FakeFolder {
                         fired = true;
                         abort.abort();
                     }
+                }
+            }
+        })
+    }
+
+    /// `syncOnce()` while `trigger` may abort the engine from a server
+    /// override (upstream:
+    /// `QTimer::singleShot(0, &fakeFolder.syncEngine(), &SyncEngine::abort)`
+    /// inside an override lambda; the engine's abort handle is not `Send`).
+    pub fn sync_once_abortable(&mut self, trigger: &AbortTrigger) -> bool {
+        let abort = self.engine.abort_handle();
+        let engine = &mut self.engine;
+        let notify = trigger.0.clone();
+        run_event_loop(async move {
+            let sync = engine.sync_once();
+            tokio::pin!(sync);
+            loop {
+                tokio::select! {
+                    r = &mut sync => return r,
+                    _ = notify.notified() => abort.abort(),
                 }
             }
         })
