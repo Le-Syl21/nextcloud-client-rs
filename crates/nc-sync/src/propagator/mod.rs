@@ -28,6 +28,7 @@
 //! Qt::QueuedConnection)`) go through a posted-event queue.
 
 mod download;
+pub use download::create_download_tmp_file_name;
 mod local;
 pub use local::is_path_inside_deleted_dir;
 mod remote;
