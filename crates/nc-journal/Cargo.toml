@@ -1,7 +1,7 @@
 [package]
 name = "nc-journal"
 description = "Sync journal, exclude engine, checksums and remote permissions of nextcloud-client-rs (unofficial port of the Nextcloud desktop client's src/common and src/csync)"
-license = "LGPL-2.1-or-later AND GPL-2.0-or-later"
+license = "GPL-2.0-or-later"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

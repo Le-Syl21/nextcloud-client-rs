@@ -35,11 +35,15 @@ Phase 0 (libraries and tests only, no binaries yet):
 ## Licensing
 
 The project as a whole is licensed under **GPL-2.0-or-later**, like the
-upstream client. Every ported file keeps the copyright lines and SPDX header of
-the upstream file it was ported from:
+upstream client, and every crate declares that licence (`nc-testutils`, which
+is never published, is CC0-1.0 like upstream `test/`). Every ported file keeps
+the copyright lines and SPDX header of the upstream file it was ported from:
 
 * files ported from upstream `src/common` and `src/csync` that are
-  LGPL-2.1-or-later stay LGPL-2.1-or-later (most of `nc-journal`);
+  LGPL-2.1-or-later keep their LGPL-2.1-or-later header (most of
+  `nc-journal`); LGPL-2.1-or-later code may be distributed under the GPL, so
+  the crate as a whole is GPL-2.0-or-later;
+* files ported from `src/libsync` and `src/cmd` are GPL-2.0-or-later;
 * a few upstream files in those directories are GPL-2.0-or-later
   (`c_jhash.h`, `checksumcalculator.*`, `checksumconsts.h`) and so are their ports;
 * ported tests and test utilities are CC0-1.0 like upstream `test/`.
