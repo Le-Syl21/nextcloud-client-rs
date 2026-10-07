@@ -1590,6 +1590,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "nc-daemon",
  "nc-dav",
  "nc-journal",
  "nc-sync",

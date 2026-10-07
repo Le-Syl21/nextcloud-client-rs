@@ -16,6 +16,7 @@ path = "src/main.rs"
 nc-journal.workspace = true
 nc-dav.workspace = true
 nc-sync.workspace = true
+nc-daemon.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true

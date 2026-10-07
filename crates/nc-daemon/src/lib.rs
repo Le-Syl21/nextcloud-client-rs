@@ -10,5 +10,6 @@ pub mod config_file;
 pub mod credentials;
 pub mod flow2auth;
 pub mod folder_definition;
+pub mod manage;
 pub mod settings;
 pub mod takeover;

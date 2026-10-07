@@ -404,15 +404,19 @@ fn load_folders_helper(
             continue;
         }
         let mut def = FolderDefinition::load(settings, &fg, &escaped_alias);
-        let default_journal_path = def.default_journal_path(account);
+        // Upstream computes the default journal name for every folder; it is
+        // only used by the migrations below, and computing it probes the
+        // folder with a test file, so it is computed only when needed.
+        let default_journal_path = |d: &FolderDefinition| d.default_journal_path(account);
         // Migration: Old settings don't have journalPath
         if def.journal_path.is_empty() {
-            def.journal_path = default_journal_path.clone();
+            def.journal_path = default_journal_path(&def);
         }
         // Migration #2: journalPath might be absolute (in DataAppDir most
         // likely): move it back to the root of the local tree.
         if !def.journal_path.starts_with('.') {
-            let old = std::mem::replace(&mut def.journal_path, default_journal_path);
+            let new = default_journal_path(&def);
+            let old = std::mem::replace(&mut def.journal_path, new);
             out.folders.push(LoadedFolder {
                 account_id: account.id.clone(),
                 group: g,
@@ -430,10 +434,12 @@ fn load_folders_helper(
         // the current default doesn't have the underscore, switch to the new
         // default if no db exists yet.
         if def.journal_path.starts_with("._sync_")
-            && default_journal_path.starts_with(".sync_")
             && !Path::new(&def.absolute_journal_path()).exists()
         {
-            def.journal_path = default_journal_path;
+            let new = default_journal_path(&def);
+            if new.starts_with(".sync_") {
+                def.journal_path = new;
+            }
         }
         out.folders.push(LoadedFolder {
             account_id: account.id.clone(),

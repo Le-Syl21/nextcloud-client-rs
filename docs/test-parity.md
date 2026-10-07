@@ -17,7 +17,7 @@ a `_data` function is counted with its test function, whose data rows all
 run inside the one Rust test. Tests marked *derived* or *rust_only* are
 additions without an upstream counterpart.
 
-Not counted here: test files of later phases (folder watcher, folder manager,
+Not counted here: test files of later phases not started yet (folder watcher,
 sync file status tracker, push notifications, ...), GUI tests, and the
 virtual files / end-to-end encryption test files (out of scope).
 
@@ -54,7 +54,10 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testdownload.cpp | 6 | 5 | 0 | 1 |
 | test/testblacklist.cpp | 2 | 1 | 0 | 1 |
 | test/testasyncop.cpp | 2 | 1 | 0 | 1 |
-| **Total** | **344** | **277** | **3** | **64** |
+| test/testfolderman.cpp | 10 | 2 | 2 | 6 |
+| test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
+| test/testaccount.cpp | 5 | 2 | 0 | 3 |
+| **Total** | **366** | **282** | **5** | **79** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -590,3 +593,50 @@ The file keeps upstream's LGPL-2.1-or-later csync header.
 Ported design and status per class: see the crate documentation of
 `crates/nc-testutils/src/lib.rs`. Its own unit tests (`file_info::tests`,
 `server::tests`, `disk::tests`, `folder::tests`, `path::tests`) are derived.
+
+# Phase 2 daemon configuration
+
+The configuration layer of `nc-daemon` (`settings`, `config_file`,
+`account_config`, `folder_definition`, `credentials`, `flow2auth`,
+`takeover`, `manage`) also has derived tests in each module (QSettings
+escaping and a round trip of a multi-account `nextcloud.cfg` fixture,
+`crates/nc-daemon/testdata/nextcloud.cfg`; ConfigFile defaults and clamps;
+account loading fix-ups and migrations; folder loading rules and
+migrations; credential resolution order and the QtKeychain lookup; Login
+Flow v2 against a scripted transport; takeover and hand-back).
+
+## test/testfolderman.cpp → `crates/nc-daemon/src/folder_definition/tests.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging / test-mode setup) |
+| testDeleteEncryptedFiles | — | n/a (end-to-end encryption, out of scope) |
+| testLeaveShare | — | n/a (`FolderMan::leaveShare`, a file manager context-menu action) |
+| testCheckPathValidityForNewFolder | test_check_path_validity_for_new_folder | adapted (the configured folders are an `ExistingFolder` list; the `.sync_*.db` file upstream's `Folder` creates when it opens its journal is created by the test helper) |
+| testFindGoodPathForNewSyncFolder | test_find_good_path_for_new_sync_folder | adapted (idem) |
+| testProcessingFileIdsPushNotification | — | pending (lead: FolderMan) |
+| testUnloadAndDeleteAllFolders | — | pending (lead: FolderMan) |
+| testMacFileProviderModeEnabledConfig | — | n/a (macOS File Provider) |
+| testFileProviderEtagPollingRequiresConnectedAccount | — | n/a (macOS File Provider) |
+| testAddFolderRefusedWhenFileProviderModeEnabled | — | n/a (macOS File Provider) |
+
+## test/testaccountmanager.cpp → `crates/nc-daemon/src/account_config/tests.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase, cleanup | — | n/a (test setup) |
+| testAccountFromUserId_asciiDomain_matchesByExactId | — | n/a (`accountFromUserId` serves the `nc://` URI handler and the File Provider, not the daemon) |
+| testAccountFromUserId_unknownId_returnsNull | — | n/a (idem) |
+| testAccountFromUserId_idnDomain (+_data) | — | n/a (idem) |
+| testAccountFromUserId_idnDomainWithPort (+_data) | — | n/a (idem) |
+| restoresPublicShareLinkWithBasicCredentials | restores_public_share_link_with_basic_credentials | ported (on the loaded `AccountDefinition`: auth type `http`, public share link, login name) |
+
+## test/testaccount.cpp → `crates/nc-daemon/src/account_config/tests.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logging setup) |
+| testAccountDavPath_unitialized_noCrash | — | n/a (`nc_dav::Account` is always built with its URL) |
+| testAccount_isPublicShareLink (+_data, 8 rows) | test_account_is_public_share_link | adapted (`Account::setUrl`'s detection is `public_share_link_parts`, used when an account is loaded) |
+| testAccount_setLimitSettings_globalNetworkLimitFallback | test_account_set_limit_settings_global_network_limit_fallback | adapted (the setters are on `AccountDefinition`) |
+| testAccount_listRemoteFolder (+_data) | — | n/a (`Account::listRemoteFolder` serves the GUI folder wizard) |
