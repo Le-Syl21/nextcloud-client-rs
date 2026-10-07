@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Port of the parts of upstream `src/libsync/capabilities.cpp` (nextcloud/desktop
-// v34.0.5) used by the sync engine.
+// v34.0.5) used by the sync engine and covered by upstream
+// `test/testcapabilities.cpp`.
 
 //! Server capabilities (`Capabilities`): the `ocs/v1.php/cloud/capabilities`
 //! data, read with upstream's `QVariant` conversion rules.
@@ -39,6 +40,68 @@ fn to_string_list(v: Option<&Value>) -> Vec<String> {
         Some(Value::Array(a)) => a.iter().map(|x| to_byte_array(Some(x))).collect(),
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
+    }
+}
+
+/// `QVariant::toInt()` of a JSON value.
+fn to_int(v: Option<&Value>) -> i32 {
+    match v {
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f.round() as i64))
+            .unwrap_or(0) as i32,
+        Some(Value::String(s)) => s.trim().parse().unwrap_or(0),
+        Some(Value::Bool(b)) => i32::from(*b),
+        _ => 0,
+    }
+}
+
+/// `QVariant::toMap()` of a JSON value (non-objects give an empty map).
+fn to_map(v: Option<&Value>) -> Map<String, Value> {
+    match v {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    }
+}
+
+/// `PushNotificationType` / `PushNotificationTypes` of `capabilities.h`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PushNotificationTypes(u8);
+
+impl PushNotificationTypes {
+    pub const NONE: Self = Self(0);
+    pub const FILES: Self = Self(1);
+    pub const ACTIVITIES: Self = Self(2);
+    pub const NOTIFICATIONS: Self = Self(4);
+
+    /// `QFlags::testFlag()`.
+    pub fn test_flag(self, flag: Self) -> bool {
+        if flag.0 == 0 {
+            self.0 == 0
+        } else {
+            self.0 & flag.0 == flag.0
+        }
+    }
+
+    /// `QFlags::setFlag()`.
+    pub fn set_flag(&mut self, flag: Self) {
+        self.0 |= flag.0;
+    }
+}
+
+/// The parts of `QMimeType` that [`Capabilities::file_actions_by_mime_type`]
+/// uses: the canonical name and every ancestor (`allAncestors()`, including
+/// the implicit `text/plain` of `text/*` and `application/octet-stream`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MimeType {
+    pub name: String,
+    pub ancestors: Vec<String>,
+}
+
+impl MimeType {
+    /// `QMimeType::inherits()`: true for the type itself and its ancestors.
+    pub fn inherits(&self, mime_type_name: &str) -> bool {
+        self.name == mime_type_name || self.ancestors.iter().any(|a| a == mime_type_name)
     }
 }
 
@@ -209,6 +272,146 @@ impl Capabilities {
             });
         }
         list
+    }
+
+    /// `shareDefaultPermissions()`: 0 when the server does not send them.
+    pub fn share_default_permissions(&self) -> i32 {
+        match self.get("files_sharing", "default_permissions") {
+            Some(v) => to_int(Some(v)),
+            None => 0,
+        }
+    }
+
+    /// `userStatus()`.
+    pub fn user_status(&self) -> bool {
+        if !self.caps.contains_key("user_status") {
+            return false;
+        }
+        to_bool(self.get("user_status", "enabled"))
+    }
+
+    /// `userStatusSupportsEmoji()`.
+    pub fn user_status_supports_emoji(&self) -> bool {
+        if !self.user_status() {
+            return false;
+        }
+        to_bool(self.get("user_status", "supports_emoji"))
+    }
+
+    /// `userStatusSupportsBusy()`.
+    pub fn user_status_supports_busy(&self) -> bool {
+        if !self.user_status() {
+            return false;
+        }
+        to_bool(self.get("user_status", "supports_busy"))
+    }
+
+    /// `availablePushNotifications()`.
+    pub fn available_push_notifications(&self) -> PushNotificationTypes {
+        if !self.caps.contains_key("notify_push") {
+            return PushNotificationTypes::NONE;
+        }
+        let types = to_string_list(self.get("notify_push", "type"));
+        let has = |t: &str| types.iter().any(|x| x == t);
+        let mut push_notification_types = PushNotificationTypes::NONE;
+        if has("files") {
+            push_notification_types.set_flag(PushNotificationTypes::FILES);
+        }
+        if has("activities") {
+            push_notification_types.set_flag(PushNotificationTypes::ACTIVITIES);
+        }
+        if has("notifications") {
+            push_notification_types.set_flag(PushNotificationTypes::NOTIFICATIONS);
+        }
+        push_notification_types
+    }
+
+    /// `pushNotificationsWebSocketUrl()`, as text.
+    pub fn push_notifications_web_socket_url(&self) -> String {
+        let endpoints = to_map(self.get("notify_push", "endpoints"));
+        to_byte_array(endpoints.get("websocket"))
+    }
+
+    /// `serverHasValidSubscription()`.
+    pub fn server_has_valid_subscription(&self) -> bool {
+        to_bool(self.get("support", "hasValidSubscription"))
+    }
+
+    /// `desktopEnterpriseChannel()`. Upstream falls back to
+    /// `ConfigFile().defaultUpdateChannel()` (updater configuration, not
+    /// ported) when the server sends none; that case is `None` here.
+    pub fn desktop_enterprise_channel(&self) -> Option<String> {
+        self.get("support", "desktopEnterpriseChannel")
+            .map(|v| to_byte_array(Some(v)))
+    }
+
+    /// `serverHasClientIntegration()`.
+    pub fn server_has_client_integration(&self) -> bool {
+        !to_map(self.caps.get("client_integration")).is_empty()
+    }
+
+    /// `fileActionsByMimeType()`: the `context-menu` entries of every
+    /// `client_integration` app whose `mimetype_filters` match the type.
+    ///
+    /// Upstream quirk kept: a filter ending with `/` (e.g. `text/`) has an
+    /// empty alias, which every type name "starts with", so it matches all
+    /// types; and an entry is added once per matching filter.
+    pub fn file_actions_by_mime_type(&self, file_mime_type: &MimeType) -> Vec<Map<String, Value>> {
+        let file_actions_map = to_map(self.caps.get("client_integration"));
+        // `QVariantMap` iterates in key order.
+        let mut apps: Vec<(&String, &Value)> = file_actions_map.iter().collect();
+        apps.sort_by(|a, b| a.0.cmp(b.0));
+        let mut context_menu_map_list: Vec<Value> = Vec::new();
+        for (_, file_context_menu) in apps {
+            let file_context_menu_map = to_map(Some(file_context_menu));
+            let Some(context_menu) = file_context_menu_map.get("context-menu") else {
+                continue;
+            };
+            if let Value::Array(a) = context_menu {
+                context_menu_map_list.extend(a.iter().cloned());
+            }
+        }
+
+        if context_menu_map_list.is_empty() {
+            log::debug!(target: "nextcloud.sync.server.capabilities", "There is no context menu available in the capabilities.");
+            return Vec::new();
+        }
+
+        let file_mime_type_name = file_mime_type.name.as_str();
+        let mut file_actions_by_mime_type = Vec::new();
+        for context_menu in &context_menu_map_list {
+            let context_menu_map = to_map(Some(context_menu));
+            let mimetype_filters = to_byte_array(context_menu_map.get("mimetype_filters"));
+            let files_mime_type_filter_list: Vec<&str> = mimetype_filters
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if files_mime_type_filter_list.is_empty() {
+                file_actions_by_mime_type.push(context_menu_map);
+                continue;
+            }
+
+            for mime_type in files_mime_type_filter_list {
+                let capabilities_mime_type = mime_type.trim();
+                let mime_type_alias = capabilities_mime_type.split('/').next_back().unwrap_or("");
+
+                if !capabilities_mime_type.is_empty()
+                    && !file_mime_type_name.starts_with(capabilities_mime_type)
+                    && !file_mime_type_name.contains(capabilities_mime_type)
+                    && !file_mime_type.inherits(capabilities_mime_type)
+                    && !file_mime_type_name.starts_with(mime_type_alias)
+                    && !file_mime_type_name.contains(mime_type_alias)
+                    && !file_mime_type.inherits(mime_type_alias)
+                {
+                    continue;
+                }
+
+                file_actions_by_mime_type.push(context_menu_map.clone());
+            }
+        }
+
+        file_actions_by_mime_type
     }
 
     /// `clientSideEncryptionAvailable()`. E2EE is not supported by this port;
