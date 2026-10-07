@@ -20,7 +20,9 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use http::{HeaderValue, StatusCode};
-use nc_dav::{BoxFuture, Request, Response, Transport, TransportError};
+use nc_dav::{
+    Body, BoxFuture, NetworkError, ReplyOverride, Request, Response, Transport, TransportError,
+};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
 use crate::file_info::{EtagsAction, FileInfo, LockState};
@@ -77,6 +79,8 @@ pub enum FakeReply {
     Error(TransportError),
     /// Never completes (`FakeHangingReply`); the client must abort or time out.
     Hang,
+    /// A response delivered after a delay (`DelayedReply<T>`).
+    Delayed(std::time::Duration, Response),
 }
 
 impl From<Response> for FakeReply {
@@ -224,10 +228,40 @@ impl FakeServer {
 
 impl Transport for FakeServer {
     fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
-        match self.handle(request) {
+        // Streamed request bodies (uploads) are collected first: the fake
+        // replies, like upstream's, look at the whole payload.
+        let request = match request.body() {
+            Body::Full(_) => Ok(request),
+            Body::Stream { .. } => Err(request),
+        };
+        match request {
+            Ok(request) => Self::reply_future(self.handle(request)),
+            Err(request) => {
+                let server = self.clone();
+                Box::pin(async move {
+                    let (parts, body) = request.into_parts();
+                    let bytes = body
+                        .collect()
+                        .await
+                        .map_err(|e| TransportError::Other(e.to_string()))?;
+                    let request = http::Request::from_parts(parts, Body::Full(bytes));
+                    Self::reply_future(server.handle(request)).await
+                })
+            }
+        }
+    }
+}
+
+impl FakeServer {
+    fn reply_future(reply: FakeReply) -> BoxFuture<'static, Result<Response, TransportError>> {
+        match reply {
             FakeReply::Response(r) => Box::pin(std::future::ready(Ok(r))),
             FakeReply::Error(e) => Box::pin(std::future::ready(Err(e))),
             FakeReply::Hang => Box::pin(std::future::pending()),
+            FakeReply::Delayed(delay, r) => Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                Ok(r)
+            }),
         }
     }
 }
@@ -248,20 +282,36 @@ fn response(status: StatusCode) -> http::response::Builder {
 }
 
 fn status_reply(status: StatusCode) -> Response {
-    response(status).body(Bytes::new()).unwrap()
+    response(status).body(Body::empty()).unwrap()
 }
 
 /// `FakeErrorReply`: the given status with an optional body.
 pub fn error_reply(code: u16, body: Bytes) -> Response {
     let status = StatusCode::from_u16(code).expect("valid HTTP status");
-    response(status).body(body).unwrap()
+    // Upstream: `setError(InternalServerError, ...)` whatever the status.
+    with_override(
+        response(status).body(Body::from(body)).unwrap(),
+        NetworkError::InternalServerError,
+        Some(code),
+    )
+}
+
+/// Attaches the `QNetworkReply` error upstream's fake reply reports.
+pub fn with_override(
+    mut resp: Response,
+    error: NetworkError,
+    http_status: Option<u16>,
+) -> Response {
+    resp.extensions_mut()
+        .insert(ReplyOverride { error, http_status });
+    resp
 }
 
 /// `FakeJsonErrorReply` / `FakeJsonReply`: a JSON body with a status.
 pub fn json_reply(code: u16, json: &str) -> Response {
     let status = StatusCode::from_u16(code).expect("valid HTTP status");
     response(status)
-        .body(Bytes::copy_from_slice(json.as_bytes()))
+        .body(Body::from(Bytes::copy_from_slice(json.as_bytes())))
         .unwrap()
 }
 
@@ -269,7 +319,7 @@ pub fn json_reply(code: u16, json: &str) -> Response {
 pub fn payload_reply(body: Bytes) -> Response {
     response(StatusCode::OK)
         .header("Content-Length", body.len())
-        .body(body)
+        .body(Body::from(body))
         .unwrap()
 }
 
@@ -417,7 +467,8 @@ fn request_prefix(request: &Request, file_name: &str) -> String {
 /// `FakePropfindReply`: 207 with the multistatus body, or 404.
 fn propfind_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> Response {
     let Some(fi) = root.find(file_name) else {
-        return status_reply(StatusCode::NOT_FOUND);
+        // `respond404`: status 404 with `InternalServerError`.
+        return error_reply(404, Bytes::new());
     };
     let body = propfind_body(fi, &request_prefix(request, file_name));
     raw_propfind_reply(Bytes::from(body))
@@ -428,7 +479,7 @@ pub fn raw_propfind_reply(body: Bytes) -> Response {
     response(StatusCode::MULTI_STATUS)
         .header("Content-Length", body.len())
         .header("Content-Type", "application/xml; charset=utf-8")
-        .body(body)
+        .body(Body::from(body))
         .unwrap()
 }
 
@@ -446,12 +497,17 @@ fn with_file_headers(builder: http::response::Builder, fi: &FileInfo) -> http::r
 fn get_reply(root: &mut FileInfo, file_name: &str) -> Response {
     assert!(!file_name.is_empty(), "GET on the root");
     let Some(fi) = root.find(file_name) else {
-        return status_reply(StatusCode::NOT_FOUND);
+        // Release build behaviour: `ContentNotFoundError` without HTTP status.
+        return with_override(
+            status_reply(StatusCode::NOT_FOUND),
+            NetworkError::ContentNotFoundError,
+            None,
+        );
     };
     let size = usize::try_from(fi.size).unwrap_or(0);
     with_file_headers(response(StatusCode::OK), fi)
         .header("Content-Length", size)
-        .body(Bytes::from(vec![fi.content_char; size]))
+        .body(Body::from(vec![fi.content_char; size]))
         .unwrap()
 }
 
@@ -477,7 +533,7 @@ pub fn get_with_data_reply(root: &FileInfo, data: &[u8], request: &Request) -> R
     }
     with_file_headers(response(StatusCode::OK), fi)
         .header("Content-Length", payload.len())
-        .body(Bytes::copy_from_slice(payload))
+        .body(Body::from(Bytes::copy_from_slice(payload)))
         .unwrap()
 }
 
@@ -498,7 +554,7 @@ pub fn put_perform<'a>(
     file_name: &str,
 ) -> Option<&'a mut FileInfo> {
     assert!(!file_name.is_empty(), "PUT on the root");
-    let payload = request.body();
+    let payload: &[u8] = request.body().as_bytes().map_or(&[], |b| b.as_ref());
     let size = payload.len() as i64;
     // Upstream reads at(0) of a possibly empty payload for existing files
     // (undefined); use ' ' like for new files.
@@ -521,12 +577,17 @@ pub fn put_perform<'a>(
 /// could not be created.
 fn put_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> Response {
     let Some(fi) = put_perform(root, request, file_name) else {
-        return status_reply(StatusCode::PRECONDITION_FAILED);
+        // Upstream sets the 412 status but no error.
+        return with_override(
+            status_reply(StatusCode::PRECONDITION_FAILED),
+            NetworkError::NoError,
+            Some(412),
+        );
     };
     with_file_headers(response(StatusCode::OK), fi)
         // Prevents the propagator from issuing a separate mtime update.
         .header("X-OC-MTime", "accepted")
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap()
 }
 
@@ -541,7 +602,7 @@ fn mkcol_reply(root: &mut FileInfo, file_name: &str) -> Response {
     };
     response(StatusCode::CREATED)
         .header("OC-FileId", fi.file_id.as_str())
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap()
 }
 
@@ -639,9 +700,10 @@ fn chunk_move_reply(
 ) -> Response {
     match chunk_move_perform(uploads, remote_root, request, source) {
         Some(fi) => with_file_headers(response(StatusCode::CREATED), fi)
-            .body(Bytes::new())
+            .body(Body::empty())
             .unwrap(),
-        None => status_reply(StatusCode::PRECONDITION_FAILED),
+        // `respondPreconditionFailed`: 412 with `InternalServerError`.
+        None => error_reply(412, Bytes::new()),
     }
 }
 

@@ -3,14 +3,30 @@
 
 //! `nc-dav`: the HTTP / WebDAV / OCS layer of the (unofficial) Rust port of
 //! the Nextcloud desktop client (upstream `src/libsync` network jobs,
-//! account, capabilities, credentials, push notifications).
+//! account, capabilities, credentials).
 //!
-//! Phase 0 only contains the [`transport`] abstraction: every request the
-//! future sync engine makes goes through a [`Transport`], so the engine can
-//! run against a real server (a `reqwest` implementation, Phase 1) or
-//! in-process against the FakeFolder harness (`nc-testutils`), which plays
-//! the role of upstream's `FakeQNAM` (a `QNetworkAccessManager` subclass).
+//! Every request goes through a [`Transport`]: [`HttpTransport`] (reqwest)
+//! for a real server, or the in-process fake server of `nc-testutils`, which
+//! plays the role of upstream's `FakeQNAM`.
 
+// A failed request is an ordinary outcome carrying the whole reply (status,
+// headers, body), like a finished `QNetworkReply`; boxing it would only add
+// noise at every call site.
+#![allow(clippy::result_large_err)]
+
+pub mod account;
+pub mod capabilities;
+pub mod http_client;
+pub mod jobs;
+pub mod reply;
 pub mod transport;
+pub mod xml;
 
-pub use transport::{Body, BoxFuture, Request, Response, Transport, TransportError, method};
+pub use account::{Account, Credentials, ServerUrl};
+pub use capabilities::Capabilities;
+pub use http_client::{HttpClientOptions, HttpTransport};
+pub use jobs::{HttpError, JobOptions, Target};
+pub use reply::{NetworkError, Reply, ReplyOverride};
+pub use transport::{
+    Body, BodyStream, BoxFuture, Bytes, Request, Response, Transport, TransportError, method,
+};

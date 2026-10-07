@@ -201,7 +201,7 @@ mod tests {
         ff.server_error_paths().append("A/a1", 500);
         let r = http::Request::builder()
             .uri(format!("{}A/a1", crate::server::ROOT_URL2))
-            .body(bytes::Bytes::new())
+            .body(nc_dav::Body::empty())
             .unwrap();
         assert_eq!(block_on(ff.transport().send(r)).unwrap().status(), 500);
         ff.server_error_paths().clear();

@@ -57,7 +57,7 @@ fn propfind_root_lists_children() {
         &server,
         req(method::propfind(), "")
             .header("Depth", "1")
-            .body(Bytes::new())
+            .body(Body::empty())
             .unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
@@ -66,7 +66,7 @@ fn propfind_root_lists_children() {
         "application/xml; charset=utf-8"
     );
     assert!(resp.headers().contains_key("Date"));
-    let body = std::str::from_utf8(resp.body()).unwrap();
+    let body = std::str::from_utf8(resp.body().as_bytes().unwrap()).unwrap();
     assert!(
         body.starts_with(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><d:multistatus xmlns:d=\"DAV:\""
@@ -101,9 +101,9 @@ fn propfind_file_and_dir_props() {
     let server = FakeServer::new(root);
     let resp = send(
         &server,
-        req(method::propfind(), "A").body(Bytes::new()).unwrap(),
+        req(method::propfind(), "A").body(Body::empty()).unwrap(),
     );
-    let body = String::from_utf8(resp.body().to_vec()).unwrap();
+    let body = String::from_utf8(resp.body().as_bytes().unwrap().to_vec()).unwrap();
     assert_eq!(body.matches("<d:response>").count(), 3);
     assert!(body.contains("<oc:size>8</oc:size>"));
     assert!(body.contains("<d:href>/owncloud/remote.php/dav/files/admin/A/a1/</d:href>"));
@@ -115,7 +115,7 @@ fn propfind_file_and_dir_props() {
 
     let missing = send(
         &server,
-        req(method::propfind(), "nope").body(Bytes::new()).unwrap(),
+        req(method::propfind(), "nope").body(Body::empty()).unwrap(),
     );
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
@@ -128,9 +128,11 @@ fn propfind_href_percent_encoding() {
     let server = FakeServer::new(root);
     let resp = send(
         &server,
-        req(method::propfind(), "a%20b").body(Bytes::new()).unwrap(),
+        req(method::propfind(), "a%20b")
+            .body(Body::empty())
+            .unwrap(),
     );
-    let body = String::from_utf8(resp.body().to_vec()).unwrap();
+    let body = String::from_utf8(resp.body().as_bytes().unwrap().to_vec()).unwrap();
     assert!(body.contains("<d:href>/owncloud/remote.php/dav/files/admin/a%20b/</d:href>"));
     assert!(
         body.contains("<d:href>/owncloud/remote.php/dav/files/admin/a%20b/%C3%A9%26.txt/</d:href>")
@@ -142,10 +144,10 @@ fn get_returns_content() {
     let server = FakeServer::new(FileInfo::A12_B12_C12_S12());
     let resp = send(
         &server,
-        req(method::GET, "B/b1").body(Bytes::new()).unwrap(),
+        req(method::GET, "B/b1").body(Body::empty()).unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.body().as_ref(), &[b'W'; 16]);
+    assert_eq!(resp.body().as_bytes().unwrap().as_ref(), &[b'W'; 16]);
     assert_eq!(resp.headers()["Content-Length"], "16");
     let state = server.state();
     let b1 = state.remote_root.find("B/b1").unwrap();
@@ -155,7 +157,7 @@ fn get_returns_content() {
     drop(state);
     let missing = send(
         &server,
-        req(method::GET, "B/nope").body(Bytes::new()).unwrap(),
+        req(method::GET, "B/nope").body(Body::empty()).unwrap(),
     );
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
@@ -170,7 +172,7 @@ fn put_creates_and_updates() {
         req(method::PUT, "A/new")
             .header("X-OC-Mtime", "1791368496")
             .header("OC-Checksum", "SHA1:whatever")
-            .body(Bytes::from_static(b"QQQ"))
+            .body(Body::from(Bytes::from_static(b"QQQ")))
             .unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::OK);
@@ -200,7 +202,7 @@ fn put_creates_and_updates() {
         &server,
         req(method::PUT, "A/a1")
             .header("X-OC-Mtime", "5")
-            .body(Bytes::from_static(b"ZZ"))
+            .body(Body::from(Bytes::from_static(b"ZZ")))
             .unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::OK);
@@ -219,7 +221,7 @@ fn put_errors() {
         &server,
         req(method::PUT, "A/x")
             .header("X-OC-Mtime", "0")
-            .body(Bytes::from_static(b"W"))
+            .body(Body::from(Bytes::from_static(b"W")))
             .unwrap(),
     );
     assert_eq!(bad_mtime.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -227,7 +229,7 @@ fn put_errors() {
         &server,
         req(method::PUT, "Z/x")
             .header("X-OC-Mtime", "1")
-            .body(Bytes::from_static(b"W"))
+            .body(Body::from(Bytes::from_static(b"W")))
             .unwrap(),
     );
     assert_eq!(no_parent.status(), StatusCode::PRECONDITION_FAILED);
@@ -238,7 +240,7 @@ fn mkcol_delete_move() {
     let server = FakeServer::new(FileInfo::A12_B12_C12_S12());
     let resp = send(
         &server,
-        req(method::mkcol(), "D").body(Bytes::new()).unwrap(),
+        req(method::mkcol(), "D").body(Body::empty()).unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert_eq!(
@@ -254,7 +256,7 @@ fn mkcol_delete_move() {
     assert_eq!(
         send(
             &server,
-            req(method::mkcol(), "X/Y").body(Bytes::new()).unwrap()
+            req(method::mkcol(), "X/Y").body(Body::empty()).unwrap()
         )
         .status(),
         StatusCode::CONFLICT
@@ -264,7 +266,7 @@ fn mkcol_delete_move() {
         &server,
         req(method::move_(), "A/a1")
             .header("Destination", format!("{ROOT_URL2}D/moved%20a1"))
-            .body(Bytes::new())
+            .body(Body::empty())
             .unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -282,7 +284,7 @@ fn mkcol_delete_move() {
     assert_eq!(
         send(
             &server,
-            req(method::DELETE, "B").body(Bytes::new()).unwrap()
+            req(method::DELETE, "B").body(Body::empty()).unwrap()
         )
         .status(),
         StatusCode::NO_CONTENT
@@ -297,7 +299,10 @@ fn chunked_upload_move() {
     assert_eq!(
         send(
             &server,
-            up("t1").method(method::mkcol()).body(Bytes::new()).unwrap()
+            up("t1")
+                .method(method::mkcol())
+                .body(Body::empty())
+                .unwrap()
         )
         .status(),
         StatusCode::CREATED
@@ -305,7 +310,7 @@ fn chunked_upload_move() {
     for chunk in ["00001", "00002"] {
         let r = up(&format!("t1/{chunk}"))
             .method(method::PUT)
-            .body(Bytes::from_static(b"CCCC"))
+            .body(Body::from(Bytes::from_static(b"CCCC")))
             .unwrap();
         assert_eq!(send(&server, r).status(), StatusCode::OK);
     }
@@ -313,7 +318,7 @@ fn chunked_upload_move() {
         .method(method::move_())
         .header("Destination", format!("{ROOT_URL2}A/big"))
         .header("X-OC-Mtime", "100")
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap();
     assert_eq!(send(&server, r).status(), StatusCode::CREATED);
     let big = server.state().remote_root.find("A/big").unwrap().clone();
@@ -325,7 +330,7 @@ fn chunked_upload_move() {
         .method(method::move_())
         .header("Destination", dest.as_str())
         .header("If", format!("<{dest}> ([\"wrong\"])"))
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap();
     assert_eq!(send(&server, r).status(), StatusCode::PRECONDITION_FAILED);
 }
@@ -335,18 +340,18 @@ fn lock_reply() {
     let server = FakeServer::new(FileInfo::A12_B12_C12_S12());
     let resp = send(
         &server,
-        req(method::lock(), "A/a1").body(Bytes::new()).unwrap(),
+        req(method::lock(), "A/a1").body(Body::empty()).unwrap(),
     );
     assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
-    let body = String::from_utf8(resp.body().to_vec()).unwrap();
+    let body = String::from_utf8(resp.body().as_bytes().unwrap().to_vec()).unwrap();
     assert!(body.contains("<nc:lock>1</nc:lock>"));
     assert!(body.contains("<nc:lock-owner>admin</nc:lock-owner>"));
     let resp = send(
         &server,
-        req(method::unlock(), "A/a1").body(Bytes::new()).unwrap(),
+        req(method::unlock(), "A/a1").body(Body::empty()).unwrap(),
     );
     assert!(
-        String::from_utf8(resp.body().to_vec())
+        String::from_utf8(resp.body().as_bytes().unwrap().to_vec())
             .unwrap()
             .contains("<nc:lock>0</nc:lock>")
     );
@@ -359,7 +364,7 @@ fn error_paths_and_override() {
     assert_eq!(
         send(
             &server,
-            req(method::GET, "A/a1").body(Bytes::new()).unwrap()
+            req(method::GET, "A/a1").body(Body::empty()).unwrap()
         )
         .status(),
         StatusCode::FORBIDDEN
@@ -383,15 +388,15 @@ fn error_paths_and_override() {
     });
     let resp = send(
         &server,
-        req(method::GET, "B/b1").body(Bytes::new()).unwrap(),
+        req(method::GET, "B/b1").body(Body::empty()).unwrap(),
     );
-    assert_eq!(resp.body().as_ref(), b"over");
+    assert_eq!(resp.body().as_bytes().unwrap().as_ref(), b"over");
     assert_eq!(server.state().remote_root.find("B/b1").unwrap().size, 17);
     // falls through to the default handler
     assert_eq!(
         send(
             &server,
-            req(method::GET, "C/c1").body(Bytes::new()).unwrap()
+            req(method::GET, "C/c1").body(Body::empty()).unwrap()
         )
         .status(),
         StatusCode::OK
@@ -399,7 +404,7 @@ fn error_paths_and_override() {
     assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
 
     // a hanging reply never completes
-    let mut fut = server.send(req(method::GET, "hang").body(Bytes::new()).unwrap());
+    let mut fut = server.send(req(method::GET, "hang").body(Body::empty()).unwrap());
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(fut.as_mut().poll(&mut cx).is_pending());
 }
@@ -409,30 +414,30 @@ fn get_with_data_range() {
     let root = FileInfo::A12_B12_C12_S12();
     let r = req(method::GET, "A/a1")
         .header("Range", "bytes=2-4")
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap();
     let resp = get_with_data_reply(&root, b"0123456789", &r);
-    assert_eq!(resp.body().as_ref(), b"234");
+    assert_eq!(resp.body().as_bytes().unwrap().as_ref(), b"234");
 }
 
 #[test]
 fn unsupported_methods() {
     let server = FakeServer::new(FileInfo::A12_B12_C12_S12());
     assert_eq!(
-        send(&server, req(method::POST, "").body(Bytes::new()).unwrap()).status(),
+        send(&server, req(method::POST, "").body(Body::empty()).unwrap()).status(),
         StatusCode::NOT_IMPLEMENTED
     );
     assert_eq!(
         send(
             &server,
-            req(method::copy(), "A").body(Bytes::new()).unwrap()
+            req(method::copy(), "A").body(Body::empty()).unwrap()
         )
         .status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
     let ocs = http::Request::builder()
         .uri("owncloud://somehost/ocs/v2.php/cloud/capabilities")
-        .body(Bytes::new())
+        .body(Body::empty())
         .unwrap();
     assert_eq!(send(&server, ocs).status(), StatusCode::NOT_FOUND);
 }

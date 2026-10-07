@@ -38,7 +38,7 @@
 //! | `FakeFileLockReply` (LOCK/UNLOCK) | handler | ported |
 //! | `FakeErrorReply`, `FakeJsonErrorReply`, `FakePayloadReply`, `FakeJsonReply` | [`server::error_reply`], [`server::payload_reply`], [`server::json_reply`] | ported (no delays) |
 //! | `FakeHangingReply` | [`FakeReply::Hang`] | ported |
-//! | `DelayedReply<T>` | — | pending (needs a timer, i.e. tokio) |
+//! | `DelayedReply<T>` | [`FakeReply::Delayed`] | ported |
 //! | `FakePutMultiFileReply`, `forEachReplyPart` (bulk upload) | — | pending (Phase 3), answers 501 |
 //! | `FakeCredentials` | — | pending (nc-dav credentials) |
 //! | `FakeFolder` | [`FakeFolder`] | partial: trees, modifiers, server, error paths, override; no engine |
