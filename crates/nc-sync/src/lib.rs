@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod engine;
 pub mod filesystem;
 pub mod item;
+pub mod local_discovery_tracker;
 pub mod options;
 pub mod propagator;
 pub mod utility;
@@ -20,4 +21,5 @@ pub use item::{
     Direction, ErrorCategory, Instruction, LockOwnerType, LockStatus, Status, SyncFileItem,
     SyncFileItemPtr, SyncFileItemVector,
 };
+pub use local_discovery_tracker::LocalDiscoveryTracker;
 pub use options::SyncOptions;
