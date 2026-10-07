@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Throw-away Nextcloud for the nextcloud-client-rs integration test.
+# Separate project, network, volume and a loopback-only port; never shares
+# anything with the production Nextcloud of this machine.
+name: ncrs-itest
+services:
+  nc:
+    image: nextcloud:34-apache
+    container_name: ncrs-itest-nc
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      SQLITE_DATABASE: ncrs
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: ncrs-itest-admin-pw
+      NEXTCLOUD_TRUSTED_DOMAINS: "127.0.0.1 localhost"
+    ports:
+      - "127.0.0.1:18080:80"
+    volumes:
+      - ncrs-itest-data:/var/www/html
+    networks:
+      - ncrs-itest-net
+volumes:
+  ncrs-itest-data:
+    name: ncrs-itest-data
+networks:
+  ncrs-itest-net:
+    name: ncrs-itest-net

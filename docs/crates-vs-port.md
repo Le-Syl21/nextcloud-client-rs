@@ -33,6 +33,27 @@ needs (let-chains, `slice::as_chunks`).
 | `Utility::rand()` in the fake server (etags, file ids, request ids) | **fastrand** | 2.5.0 | Replaced a hand-written xorshift. |
 | Temporary directories in tests | **tempfile** | 3.27.0 | — |
 
+## Phase 1 (in the tree)
+
+All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| HTTP client (`AbstractNetworkJob`, QNAM, `AccessManager`) | **reqwest** (`rustls`, `http2`, `stream`, `cookies`, `gzip`, `deflate`, `system-proxy`; no default features) | 0.13.5 | Implements `nc_dav::Transport` in `http_client.rs`, with streaming request and response bodies (downloads are written while received, chunk uploads stream from the file). Upstream's error model (`QNetworkReply::NetworkError`, `statusCodeFromHttp`, `networkReplyErrorString`, `OC-ErrorString`, timeouts) is ported in `reply.rs` on top: reqwest only supplies bytes and status. Cookies are kept like QNAM's cookie jar; `--trust` maps to accepting invalid certificates. |
+| Event loop, timers, cancellation | **tokio** (current-thread runtime), **tokio-util** (`CancellationToken`), **futures-util** (`FuturesUnordered`) | 1.53.2, 0.7.19, 0.3.34 | Only the primitives. Upstream's single-threaded Qt event loop ordering is ported: job arenas, posted-event queues, completions handled one at a time, `scheduleNextJob` as a flag drained after the ready completions, item jobs polled once at start so they register in `_activeJobList` synchronously like `start()`. Abort is a hard/soft token pair with upstream's 5 s timer. |
+| PROPFIND / XML (`LsColXMLParser`, `PropfindJob`, error bodies) | **quick-xml** (`NsReader`) | 0.42.0 | Tokenizer only; the parser (which props, href normalisation, the "expected path" check, `<s:message>` / `<s:exception>` extraction) is ported in `xml.rs`. |
+| Request ids (`X-Request-ID`), transfer ids | **uuid** (v4) | 1.27.0 | Upstream uses `QUuid::createUuid()`. |
+| Basic auth header, `OC-Checksum` / share attribute decoding | **base64** | 0.23.1 | — |
+| Conflict and case-clash file names (local time `yyyy-MM-dd hhmmss`), RFC 2822 `Last-Modified`/`Date` parsing | **jiff** | 0.2.38 | Preferred over chrono for time zones. Checked against the conflict-name tests. |
+| `utimensat`, `lstat`-based local discovery, `statvfs` (`Utility::freeDiskSpace`), umask | **rustix** (`fs`, `process`) | 1.1.5 | Safe wrappers (the workspace forbids `unsafe`). Replaces the planned fs4 for free disk space. |
+| Move to trash (`FileSystem::moveToTrash`, `SyncOptions::_moveFilesToTrash`) | **trash** (no default features) | 5.2.9 | freedesktop.org trash spec, the same as upstream's Linux implementation. Used only where upstream calls it (the `MoveToClientTrashBin` list). |
+| CLI options (`src/cmd/cmd.cpp`, hand-written `parseOptions`) | **clap** (`derive`, `env`) | 4.6.7 | The nextcloudcmd option names and semantics are kept (`-s`, `--httpproxy`, `--trust`, `--exclude`, `--unsyncedfolders`, `-u`, `-p`, `-n`, `--non-interactive`, `--max-sync-retries`, `-h`, `--logdebug`, `--path`, ...). Upstream's own `-h` (sync hidden files) is kept, so clap's help is `--help` only. |
+| Log backend (Qt message pattern) | **env_logger** | 0.11.11 | Output format mirrors upstream's `[ level category ]:\tmessage` lines; targets are the upstream logging categories (`nextcloud.sync.propagator`, ...). |
+| Password prompt | **rpassword** | 7.5.4 | Upstream reads stdin with echo off (`EchoDisabler`). |
+| `~/.netrc` (`netrcparser.cpp`) | ported | — | Upstream's parser has its own quirks (no quoting support, `default` entry, whitespace splitting) covered by its test, ported 1:1. The `netrc` crates differ on those. |
+| Server URLs (`QUrl`) | ported subset (`nc_dav::account::ServerUrl`) | — | Only what the client needs: scheme/host/port/path, credentials in the URL, lower-cased host, percent-encoding of DAV paths like `QUrl::toPercentEncoding(path, "/")`, and `toString()` without credentials for `makeDbName`. The `url` crate normalises differently (e.g. IDNA, path dot segments), which would change journal names. |
+| Engine (discovery, reconcile, propagator, jobs) | ported | — | The behaviour under test. |
+
 ## Planned (later phases), from the study
 
 All of these are to be re-checked for the latest version when they are added
@@ -40,15 +61,9 @@ All of these are to be re-checked for the latest version when they are added
 
 | Component (upstream) | Planned crate | Latest seen 2026-10-07 | Notes |
 |---|---|---|---|
-| HTTP client (`AbstractNetworkJob`, QNAM) | **reqwest** (rustls) | 0.13.5 | Implements `nc_dav::Transport`. Streaming bodies are needed for chunked uploads. |
-| Async runtime, timers, cancellation | **tokio** (+ tokio-util `CancellationToken`) | 1.53.2 | Propagator scheduling (`scheduleNextJob`, composite jobs) stays a port; only the primitives come from tokio. |
-| PROPFIND / XML (`LsColJob` parser, OCS) | **quick-xml** | 0.42.0 | The parser logic (which props, how errors are handled) is ported on top. Existing WebDAV client crates do not expose `oc:`/`nc:` props or the error semantics. |
 | inotify watcher (`folderwatcher_linux.cpp`) | **inotify** | 0.11.5 | Exact upstream mask and `IN_Q_OVERFLOW` → full local discovery. `notify` 9.0.0 is still an RC and hides the raw mask. |
 | notify_push websocket (`pushnotifications.cpp`) | **tokio-tungstenite** | 0.30.0 | — |
 | `nextcloud.cfg` takeover / hand-back (QSettings ini) | **ini-preserve** (our crate) | 0.1.3 | Format-preserving, needed to write the official client's config back. `rust-ini` 0.21.3 loses formatting. |
 | Credentials | **keyring** | 4.2.0 | Plus systemd `LoadCredential` for the root daemon. |
 | systemd `Type=notify` and watchdog | **sd-notify** | 0.5.0 | — |
-| Conflict file timestamps (`yyyy-MM-dd hhmmss`, local time), RFC 1123 dates | **jiff** | 0.2.38 | Preferred over chrono 0.4.45 for correct time zone handling. To be validated against upstream conflict-name tests. |
 | NFC/NFD (macOS `getPHash`, server names) | **unicode-normalization** | 0.1.25 | Only where upstream normalizes. |
-| URLs (`QUrl`) | **url** | 2.5.8 | `makeDbName` needs upstream's `QUrl::toString()` rendering exactly. That needs a check (or a small adapter) before it is relied on. |
-| File locking / free disk space (`Utility::freeDiskSpace`, used by `openOrCreateReadWrite`) | **fs4** | 1.1.0 | The free-space check is a TODO in `journal/mod.rs`. |
