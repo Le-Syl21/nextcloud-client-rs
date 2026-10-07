@@ -255,7 +255,8 @@ impl<'a> ConfigFile<'a> {
 }
 
 /// How the daemon runs: as a user service (credentials in the keyring) or
-/// as a system instance `ncsyncd@NAME` (credentials from systemd).
+/// as a system instance `ncsyncd@USER` running as USER (credentials from
+/// systemd or a password file).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceMode {
     User,
@@ -304,8 +305,12 @@ impl ConfigLocation {
         })
     }
 
-    /// The system instance `ncsyncd@NAME`: `/etc/ncsyncd/NAME.cfg`, state in
-    /// `/var/lib/ncsyncd/NAME`.
+    /// The system instance `ncsyncd@USER`, which runs as the user USER
+    /// (`User=%i`): state in `/var/lib/ncsyncd/USER` (the unit's
+    /// `StateDirectory=`, owned by USER), configuration
+    /// `/var/lib/ncsyncd/USER/ncsyncd.cfg` there too, since the daemon
+    /// rewrites it (pause state, migrations) and needs a writable directory
+    /// for its lock file and atomic writes.
     pub fn system(instance: &str) -> Result<Self, LocationError> {
         let valid = !instance.is_empty()
             && !instance.starts_with('.')
@@ -319,7 +324,7 @@ impl ConfigLocation {
             mode: ServiceMode::System {
                 instance: instance.to_owned(),
             },
-            config_file: PathBuf::from(format!("/etc/ncsyncd/{instance}.cfg")),
+            config_file: PathBuf::from(format!("/var/lib/ncsyncd/{instance}/ncsyncd.cfg")),
             state_dir: PathBuf::from(format!("/var/lib/ncsyncd/{instance}")),
         })
     }
@@ -401,7 +406,7 @@ mod tests {
     #[test]
     fn derived_locations() {
         let sys = ConfigLocation::system("work").unwrap();
-        assert_eq!(sys.config_file, PathBuf::from("/etc/ncsyncd/work.cfg"));
+        assert_eq!(sys.config_file, PathBuf::from("/var/lib/ncsyncd/work/ncsyncd.cfg"));
         assert_eq!(sys.state_dir, PathBuf::from("/var/lib/ncsyncd/work"));
         assert!(ConfigLocation::system("../x").is_err());
         assert!(ConfigLocation::system("").is_err());

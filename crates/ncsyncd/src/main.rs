@@ -24,12 +24,13 @@ use nc_daemon::startup::{self, FileSettingsStore, Options, ReloadHooks};
 #[derive(Parser, Debug)]
 #[command(name = "ncsyncd", version, about, long_about = None)]
 struct Cli {
-    /// Run the system instance NAME (/etc/ncsyncd/NAME.cfg, credentials from
-    /// systemd or password files).
-    #[arg(long, value_name = "NAME")]
+    /// Run the system instance ncsyncd@USER, as the user USER
+    /// (/var/lib/ncsyncd/USER/ncsyncd.cfg, credentials from systemd or
+    /// password files).
+    #[arg(long, value_name = "USER")]
     instance: Option<String>,
     /// Configuration file (default ~/.config/ncsyncd/ncsyncd.cfg, or
-    /// /etc/ncsyncd/NAME.cfg with --instance).
+    /// /var/lib/ncsyncd/USER/ncsyncd.cfg with --instance USER).
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
     /// Control socket (default $XDG_RUNTIME_DIR/ncsyncd/control.sock, or
@@ -109,6 +110,10 @@ fn main() -> ExitCode {
     };
     if let Some(c) = &cli.config {
         location = location.with_config_file(c);
+    }
+    if let Err(e) = nc_daemon::instance::check_daemon_user(&location) {
+        eprintln!("ncsyncd: {e}");
+        return ExitCode::FAILURE;
     }
     let instance = match &location.mode {
         ServiceMode::System { instance } => Some(instance.clone()),

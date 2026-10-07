@@ -13,9 +13,13 @@
 //!
 //! Resolution order for [`CredentialResolver::app_password`]:
 //!
-//! 1. systemd credentials: `$CREDENTIALS_DIRECTORY/ncsyncd-<accountId>`
-//!    (`LoadCredential=ncsyncd-0:/path` or `LoadCredentialEncrypted=`), when
-//!    the daemon runs with `CREDENTIALS_DIRECTORY` set;
+//! 1. systemd credentials, when the daemon runs with `CREDENTIALS_DIRECTORY`
+//!    set: `$CREDENTIALS_DIRECTORY/ncsyncd-<user>-<accountId>` for the system
+//!    instance `ncsyncd@<user>` (its unit imports them from the credential
+//!    store with `ImportCredential=ncsyncd-%i-*`: `/etc/credstore`,
+//!    `/etc/credstore.encrypted`, ...; the user name in the credential name
+//!    keeps one user's instance from receiving another user's secrets),
+//!    `$CREDENTIALS_DIRECTORY/ncsyncd-<accountId>` for the user daemon;
 //! 2. the account's `ncsyncd_passwordFile` key (a file whose first line is
 //!    the app password);
 //! 3. for the user daemon only, the Secret Service (keyring): service
@@ -41,7 +45,7 @@ use crate::config_file::{APP_NAME, ServiceMode};
 
 /// Our Secret Service / keyring service name.
 pub const KEYRING_SERVICE: &str = "ncsyncd";
-/// The prefix of systemd credential names: `ncsyncd-<accountId>`.
+/// The prefix of systemd credential names (see [`systemd_credential_name`]).
 pub const SYSTEMD_CREDENTIAL_PREFIX: &str = "ncsyncd-";
 /// `app_password` of account.cpp: suffix of the user part of the key under
 /// which `Account::writeAppPasswordOnce` keeps a copy of the app password.
@@ -131,8 +135,21 @@ pub fn account_keychain_key(acc: &AccountDefinition) -> Option<String> {
     keychain_key(&acc.url_string(), &acc.credentials_user(), &acc.id)
 }
 
-/// The systemd credential name of an account: `ncsyncd-<accountId>`.
-pub fn systemd_credential_name(account_id: &str) -> String {
+/// The systemd credential name of an account: `ncsyncd-<user>-<accountId>`
+/// for the system instance `ncsyncd@<user>`, `ncsyncd-<accountId>` for the
+/// user daemon.
+pub fn systemd_credential_name(mode: &ServiceMode, account_id: &str) -> String {
+    match mode {
+        ServiceMode::System { instance } => {
+            format!("{SYSTEMD_CREDENTIAL_PREFIX}{instance}-{account_id}")
+        }
+        ServiceMode::User => format!("{SYSTEMD_CREDENTIAL_PREFIX}{account_id}"),
+    }
+}
+
+/// The name of the password file `account add` writes when there is no
+/// keyring: `ncsyncd-<accountId>`, in the per-user state directory.
+pub fn password_file_name(account_id: &str) -> String {
     format!("{SYSTEMD_CREDENTIAL_PREFIX}{account_id}")
 }
 
@@ -364,7 +381,7 @@ impl<'a> CredentialResolver<'a> {
     ) -> Result<(AppPassword, CredentialSource), CredentialsError> {
         let mut tried = Vec::new();
         if let Some(dir) = &self.credentials_directory {
-            let path = dir.join(systemd_credential_name(&acc.id));
+            let path = dir.join(systemd_credential_name(&self.mode, &acc.id));
             if path.exists() {
                 return Ok((
                     read_secret_file(&path)?,
@@ -440,7 +457,7 @@ impl<'a> CredentialResolver<'a> {
             );
         }
         let dir = state_dir.join("credentials");
-        let path = dir.join(systemd_credential_name(&acc.id));
+        let path = dir.join(password_file_name(&acc.id));
         write_secret_file(&dir, &path, secret)?;
         acc.password_file = Some(path.to_string_lossy().into_owned());
         Ok(CredentialSource::PasswordFile(path))
@@ -556,7 +573,17 @@ mod tests {
         );
         assert_eq!(keychain_key("", "bob", "0"), None);
         assert_eq!(keychain_key("https://h", "", "0"), None);
-        assert_eq!(systemd_credential_name("0"), "ncsyncd-0");
+        assert_eq!(systemd_credential_name(&ServiceMode::User, "0"), "ncsyncd-0");
+        assert_eq!(
+            systemd_credential_name(
+                &ServiceMode::System {
+                    instance: "alice".into()
+                },
+                "0"
+            ),
+            "ncsyncd-alice-0"
+        );
+        assert_eq!(password_file_name("0"), "ncsyncd-0");
         assert_eq!(
             format!("{:?}", AppPassword::new("s3cret")),
             "AppPassword(<redacted>)"
@@ -640,6 +667,24 @@ mod tests {
             credentials_directory: None,
         };
         assert!(sys.app_password(&acc).is_err());
+        // The system instance reads ncsyncd-<instance>-<id> only.
+        let creds = dir.path().join("creds");
+        std::fs::create_dir(&creds).unwrap();
+        std::fs::write(creds.join("ncsyncd-3"), "other\n").unwrap();
+        let sys_sd = CredentialResolver {
+            mode: sys.mode.clone(),
+            store: None,
+            credentials_directory: Some(creds.clone()),
+        };
+        assert!(sys_sd.app_password(&acc).is_err());
+        std::fs::write(creds.join("ncsyncd-x-3"), "mine\n").unwrap();
+        assert_eq!(
+            sys_sd.app_password(&acc).unwrap(),
+            (
+                AppPassword::new("mine"),
+                CredentialSource::SystemdCredential(creds.join("ncsyncd-x-3"))
+            )
+        );
         let src = sys
             .store_app_password(&mut acc, &AppPassword::new("pw"), dir.path())
             .unwrap();

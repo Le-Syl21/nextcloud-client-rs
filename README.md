@@ -129,33 +129,41 @@ Edit the file while the daemon is stopped, or reload it with
 `systemctl --user restart ncsyncd`; `systemctl --user reload ncsyncd`
 (SIGHUP) re-reads the credentials only.
 
-### Setting it up (system service, as root)
+### Setting it up (system service, one per user)
 
-The template `ncsyncd@.service` runs one daemon per configuration
-`/etc/ncsyncd/<instance>.cfg`, as root unless a drop-in sets `User=`:
+The template `ncsyncd@.service` runs one daemon per user, as that user
+(`User=%i`, never as root): `ncsyncd@alice` runs as `alice`, with its
+configuration and state in `/var/lib/ncsyncd/alice/` (owned by `alice`).
+It needs no login session and no keyring. Set it up as root:
 
 ```sh
 install -Dm644 contrib/systemd/ncsyncd@.service /etc/systemd/system/ncsyncd@.service
-ncsync account add https://cloud.example.com -u backup --app-password-file /root/app-password --instance srv
-ncsync folder add /srv/data --remote /Server --instance srv
-systemctl daemon-reload && systemctl enable --now ncsyncd@srv
+ncsync account add https://cloud.example.com -u alice --app-password-file /root/app-password --instance alice
+ncsync folder add /srv/data --remote /Server --instance alice
+systemctl daemon-reload && systemctl enable --now ncsyncd@alice
 ```
+
+The synchronized folders must belong to the user (`folder add` gives a
+folder it creates to the user; everything `ncsync ... --instance alice`
+writes in `/var/lib/ncsyncd/alice/` is given to `alice` too).
 
 For a system instance the app password is never put in a keyring. It is
-read, in this order, from the systemd credential `ncsyncd-<account id>`
+read, in this order, from the systemd credential `ncsyncd-<user>-<account id>`
 (`$CREDENTIALS_DIRECTORY`), then from the account's `ncsyncd_passwordFile`
-(`account add --instance` writes `/var/lib/ncsyncd/<instance>/credentials/ncsyncd-<id>`,
-mode 0600). With systemd credentials (encrypted at rest with
-`systemd-creds`), the password file is not needed:
+(`account add --instance alice` writes `/var/lib/ncsyncd/alice/credentials/ncsyncd-<id>`,
+mode 0600). The unit imports the user's credentials from the systemd
+credential store (`ImportCredential=ncsyncd-%i-*`, systemd 254 or later),
+so with a credential, encrypted at rest with `systemd-creds`, the password
+file is not needed:
 
 ```sh
-systemd-creds encrypt --name=ncsyncd-0 /root/app-password /etc/credstore.encrypted/ncsyncd-0
-systemctl edit ncsyncd@srv
-#   [Service]
-#   LoadCredentialEncrypted=ncsyncd-0:/etc/credstore.encrypted/ncsyncd-0
-#   User=backup         # optional: run as this user (it must own the folders)
-#   Group=backup
+systemd-creds encrypt --name=ncsyncd-alice-0 /root/app-password /etc/credstore.encrypted/ncsyncd-alice-0
+# then remove the account's ncsyncd_passwordFile key and the file
+systemctl restart ncsyncd@alice
 ```
+
+The user name is part of the credential name so that one user's instance
+never receives another user's secrets.
 
 ### Controlling it
 
@@ -164,11 +172,11 @@ ncsync status                 # accounts and folders (--json for the daemon's JS
 ncsync pause [ALIAS|PATH]     # all folders without an argument
 ncsync resume [ALIAS|PATH]
 ncsync sync-now [ALIAS|PATH]  # like the tray's "Sync now"
-ncsync status --instance srv  # a system instance (as root)
+ncsync status --instance alice  # a system instance (as root or alice)
 ```
 
 The control socket is `$XDG_RUNTIME_DIR/ncsyncd/control.sock` (user) or
-`/run/ncsyncd/<instance>/control.sock` (system), mode 0600. The daemon
+`/run/ncsyncd/<user>/control.sock` (system), mode 0600. The daemon
 reports `READY`, a one-line `STATUS` and the watchdog to systemd
 (`Type=notify`, `WatchdogSec=120`); the watchdog is fed from the event loop.
 
@@ -188,6 +196,19 @@ client's keyring entry when it can be read, otherwise Login Flow v2 or
 journal, and removes the folder from the official configuration (a backup
 of the official file is kept as `nextcloud.cfg.ncsyncd-bak`). Both commands
 refuse while the official client runs.
+
+## Divergences from upstream
+
+One deliberate behavioural difference with the official client v34.0.5:
+
+* **inotify queue overflow.** When the kernel's inotify queue overflows
+  (`IN_Q_OVERFLOW`, more events than `fs.inotify.max_queued_events` before
+  they are read), events are lost. Upstream's Linux folder watcher ignores
+  that event, so changes made during the overflow go unnoticed until the
+  next periodic full local discovery (`fullLocalDiscoveryInterval`, one
+  hour by default). `ncsyncd` treats the overflow as lost changes: the next
+  sync does a full local discovery, and a sync is scheduled right away
+  (after the usual short delay), so nothing waits for the hourly scan.
 
 ## Licensing
 

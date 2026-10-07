@@ -23,6 +23,7 @@ serde.workspace = true
 http.workspace = true
 fastrand.workspace = true
 rustix.workspace = true
+nix.workspace = true
 sd-notify = "0.5.0"
 ini-preserve.workspace = true
 keyring-core.workspace = true

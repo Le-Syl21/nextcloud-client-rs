@@ -821,6 +821,11 @@ impl Folder {
             WatcherEvent::PathChanged(p) => self.slot_watched_path_changed(&p, false),
             WatcherEvent::LostChanges => {
                 self.slot_next_sync_full_local_discovery();
+                // Divergence (README, "Divergences from upstream"): only our
+                // Linux watcher reports lost changes (IN_Q_OVERFLOW, which
+                // upstream ignores), and the full local discovery must not
+                // wait for an unrelated trigger, so a sync is scheduled.
+                self.schedule_this_folder_soon();
                 Vec::new()
             }
             WatcherEvent::BecameUnreliable(m) => {

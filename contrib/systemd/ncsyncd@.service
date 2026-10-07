@@ -1,23 +1,21 @@
 # SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# System service template, one instance per configuration:
-#   /etc/ncsyncd/<instance>.cfg       the configuration (nextcloud.cfg format)
-#   credentials, one per account, either
-#     - a systemd credential named ncsyncd-<account id> (drop-in below), or
-#     - the password file `ncsync account add --instance <instance>` writes
-#       to /var/lib/ncsyncd/<instance>/credentials/ncsyncd-<account id>
-#   /var/lib/ncsyncd/<instance>/      state (journals live in the folders)
-#   /run/ncsyncd/<instance>/control.sock  the control socket
-#   systemctl enable --now ncsyncd@<instance>
-# The daemon runs as root unless a drop-in sets User= (the synchronized
-# folders must then belong to that user, and so must the state directory):
-#   systemctl edit ncsyncd@<instance>   ->   [Service] User=alice Group=alice
-# systemd credentials (plain file, or encrypted with
-# `systemd-creds encrypt --name=ncsyncd-0 secret.txt /etc/credstore.encrypted/ncsyncd-0`):
-#   systemctl edit ncsyncd@<instance>   ->   [Service]
-#                                            LoadCredential=ncsyncd-0:/etc/ncsyncd/<instance>/ncsyncd-0
-#                                            (or LoadCredentialEncrypted=ncsyncd-0:/etc/credstore.encrypted/ncsyncd-0)
+# System service template, one instance per user, running as that user
+# (never as root): ncsyncd@alice runs as alice.
+#   /var/lib/ncsyncd/<user>/ncsyncd.cfg   the configuration (nextcloud.cfg format)
+#   /var/lib/ncsyncd/<user>/              state, owned by <user> (journals live in the folders)
+#   /run/ncsyncd/<user>/control.sock      the control socket
+# Credentials, one per account, either
+#   - a systemd credential ncsyncd-<user>-<account id> in the credential store
+#     (/etc/credstore.encrypted, /etc/credstore, ...), imported below:
+#       systemd-creds encrypt --name=ncsyncd-alice-0 app-password.txt \
+#           /etc/credstore.encrypted/ncsyncd-alice-0
+#   - or the password file `ncsync account add --instance <user>` writes to
+#     /var/lib/ncsyncd/<user>/credentials/ncsyncd-<account id> (mode 0600).
+# Set up as root with `ncsync ... --instance <user>`, then
+#   systemctl enable --now ncsyncd@<user>
+# ImportCredential= needs systemd 254 or later.
 [Unit]
 Description=Nextcloud sync daemon for %i (ncsyncd, unofficial)
 Documentation=https://github.com/Le-Syl21/nextcloud-client-rs
@@ -27,9 +25,12 @@ Wants=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
+User=%i
 ExecStart=/usr/bin/ncsyncd --instance %i
 ExecReload=/bin/kill -HUP $MAINPID
+ImportCredential=ncsyncd-%i-*
 StateDirectory=ncsyncd/%i
+StateDirectoryMode=0700
 RuntimeDirectory=ncsyncd/%i
 RuntimeDirectoryMode=0700
 Restart=on-failure

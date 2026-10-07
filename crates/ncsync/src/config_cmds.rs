@@ -20,12 +20,13 @@ use nc_dav::HttpClientOptions;
 #[derive(Args, Debug, Clone)]
 pub struct ConfigArgs {
     /// Configuration file (default: ~/.config/ncsyncd/ncsyncd.cfg, or
-    /// /etc/ncsyncd/NAME.cfg with --instance).
+    /// /var/lib/ncsyncd/USER/ncsyncd.cfg with --instance USER).
     #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
-    /// Work on the system instance ncsyncd@NAME (credentials from systemd
-    /// or a password file, never the keyring).
-    #[arg(long, value_name = "NAME", global = true)]
+    /// Work on the system instance ncsyncd@USER, which runs as USER
+    /// (credentials from systemd or a password file, never the keyring).
+    /// Run as root, the command gives what it writes to USER.
+    #[arg(long, value_name = "USER", global = true)]
     instance: Option<String>,
 }
 
@@ -163,6 +164,16 @@ fn fail(msg: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The end of a command that wrote the configuration: on a system instance,
+/// run as root, gives the state directory (and `extra`, a local folder the
+/// command created) to the instance user.
+fn hand_over(ctx: &Context, extra: Option<&std::path::Path>) -> ExitCode {
+    match nc_daemon::instance::hand_to_instance_user(&ctx.location, extra) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
+    }
+}
+
 fn read_app_password(path: &PathBuf) -> Result<AppPassword, String> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
@@ -276,12 +287,15 @@ pub fn run_account(cmd: AccountCommand, config: ConfigArgs) -> ExitCode {
                         added.credentials
                     );
                     if let ServiceMode::System { .. } = ctx.location.mode {
+                        let name = nc_daemon::credentials::systemd_credential_name(
+                            &ctx.location.mode,
+                            &added.account.id,
+                        );
                         println!(
-                            "For a system instance, prefer a systemd credential: LoadCredential={}:<file> (or LoadCredentialEncrypted=) in the unit, then remove ncsyncd_passwordFile from the account.",
-                            nc_daemon::credentials::systemd_credential_name(&added.account.id)
+                            "For a system instance, prefer a systemd credential (the unit imports ncsyncd-<user>-*): systemd-creds encrypt --name={name} <file> /etc/credstore.encrypted/{name}, then remove ncsyncd_passwordFile from the account."
                         );
                     }
-                    ExitCode::SUCCESS
+                    hand_over(&ctx, None)
                 }
                 Err(e) => fail(e),
             }
@@ -343,13 +357,15 @@ pub fn run_folder(cmd: FolderCommand, config: ConfigArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
         FolderCommand::Add(args) => {
+            let local = std::path::absolute(&args.local_dir).ok();
+            let created = local.as_ref().filter(|p| !p.exists()).cloned();
             match manage::add_folder(&ctx, &args.local_dir, &args.remote, args.account.as_deref()) {
                 Ok(def) => {
                     println!(
                         "Added folder {}: {} -> {}",
                         def.alias, def.local_path, def.target_path
                     );
-                    ExitCode::SUCCESS
+                    hand_over(&ctx, created.as_deref())
                 }
                 Err(e) => fail(e),
             }
@@ -360,7 +376,7 @@ pub fn run_folder(cmd: FolderCommand, config: ConfigArgs) -> ExitCode {
                     "Removed folder {} ({}); its files are kept.",
                     args.alias, def.local_path
                 );
-                ExitCode::SUCCESS
+                hand_over(&ctx, None)
             }
             Err(e) => fail(e),
         },
@@ -428,7 +444,7 @@ pub fn run_takeover(args: TakeoverArgs, config: ConfigArgs) -> ExitCode {
         }
     }
     println!("Hand it back with: ncsync handback {}", out.alias);
-    ExitCode::SUCCESS
+    hand_over(&ctx, None)
 }
 
 pub fn run_handback(args: HandbackArgs, config: ConfigArgs) -> ExitCode {
@@ -447,7 +463,7 @@ pub fn run_handback(args: HandbackArgs, config: ConfigArgs) -> ExitCode {
             if let Some(acc) = out.removed_account {
                 println!("Removed account {} (it had no other folder).", acc.id);
             }
-            ExitCode::SUCCESS
+            hand_over(&ctx, None)
         }
         Err(e) => fail(e),
     }
