@@ -5,4 +5,13 @@
 //! `src/gui` without a GUI (folder manager, folders, folder watcher, account
 //! state, configuration, credentials).
 
+pub mod account_state;
+pub mod connection_validator;
+pub mod control;
+pub mod event;
+pub mod folder;
+pub mod folder_man;
 pub mod folder_watcher;
+pub mod network_limits;
+pub mod sync_result;
+pub mod timer;
