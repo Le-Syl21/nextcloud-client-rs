@@ -19,6 +19,16 @@ fn generic(status: Status, msg: impl Into<String>) -> Outcome {
     Some(Done::new(status, msg, ErrorCategory::GenericError))
 }
 
+/// `isPathInsideDeletedDir(path, deletedDir)`: whether `path` sits inside the
+/// already removed directory `deleted_dir`. Compares with a trailing slash so
+/// a sibling such as "A/BC" is not mistaken for a child of "A/B".
+pub fn is_path_inside_deleted_dir(path: &str, deleted_dir: &str) -> bool {
+    !deleted_dir.is_empty()
+        && path.len() > deleted_dir.len()
+        && path.as_bytes()[deleted_dir.len()] == b'/'
+        && path.starts_with(deleted_dir)
+}
+
 /// `journalRelativePath(syncRoot, filesystemPath)`.
 fn journal_relative_path(sync_root: &str, filesystem_path: &str) -> Option<String> {
     let root = sync_root.trim_end_matches('/');
@@ -75,7 +85,7 @@ fn remove_recursively(ctx: &JobCtx, file: &str, trash: &[String]) -> bool {
         // Do it while avoiding redundant delete calls to the journal.
         let mut deleted_dir = String::new();
         for (path, is_dir) in &deleted {
-            if !deleted_dir.is_empty() && path.starts_with(&format!("{deleted_dir}/")) {
+            if is_path_inside_deleted_dir(path, &deleted_dir) {
                 continue;
             }
             if ctx.shared.journal.delete_file_record(path, *is_dir).is_ok() {
