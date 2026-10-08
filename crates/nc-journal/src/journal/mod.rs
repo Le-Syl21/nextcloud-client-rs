@@ -40,7 +40,7 @@ use std::sync::{Mutex, MutexGuard};
 use log::{debug, error, info, warn};
 use md5::{Digest, Md5};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::types::{Null, ToSqlOutput, Value, ValueRef};
+use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{Connection, OpenFlags, Row, Statement, ToSql, ffi};
 
 use crate::checksums::parse_checksum_header;
@@ -1734,7 +1734,10 @@ impl SyncJournalDb {
             &content_checksum_type_id,
             &BaText(&record.e2e_mangled_name),
             &(record.e2e_encryption_status as i32),
-            &Null,
+            // `bindValue(19, {})` picks the QByteArray overload: an empty
+            // QByteArray is bound as TEXT '' (sqlite3_bind_text with
+            // constData() ""), not NULL. Found by the side-by-side bench.
+            &BaText(b""),
             &i32::from(lock.locked),
             &lock.lock_owner_type,
             &QStr(&lock.lock_owner_display_name),
