@@ -114,7 +114,7 @@ fn upload_device(
 }
 
 /// `fileIsStillChanging(item)`.
-fn file_is_still_changing(modtime: i64, minimum_age: Duration) -> bool {
+pub(super) fn file_is_still_changing(modtime: i64, minimum_age: Duration) -> bool {
     let now_ms = jiff::Timestamp::now().as_millisecond();
     let ms_since_mod = now_ms - modtime * 1000;
     ms_since_mod < minimum_age.as_millis() as i64
@@ -123,7 +123,7 @@ fn file_is_still_changing(modtime: i64, minimum_age: Duration) -> bool {
 }
 
 /// `adjustLastJobTimeout(job, fileSize)`.
-fn adjust_last_job_timeout(opts: &mut JobOptions, file_size: i64) {
+pub(super) fn adjust_last_job_timeout(opts: &mut JobOptions, file_size: i64) {
     const THREE_MINUTES: f64 = 3.0 * 60.0 * 1000.0;
     const THIRTY_MINUTES: i64 = 30 * 60 * 1000;
     let lo = (THIRTY_MINUTES - 1).min((THREE_MINUTES * file_size as f64 / 1e9).round() as i64);

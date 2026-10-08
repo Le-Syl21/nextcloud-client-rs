@@ -34,15 +34,20 @@ folder takeover and hand-back, and systemd services.
 |---|---|---|
 | `nc-journal` | `src/common`, `src/csync` | journal (`SyncJournalDb`), `c_jhash64`, exclude engine, checksums, remote permissions |
 | `nc-dav` | `src/libsync` (network layer) | HTTP transport (reqwest), `QNetworkReply` error model, PROPFIND parser, account, capabilities, network jobs |
-| `nc-sync` | `src/libsync` (engine) | discovery, reconciliation, propagator (downloads with resume, uploads v1 and chunked v2, remote and local operations, conflicts), sync engine |
+| `nc-sync` | `src/libsync` (engine) | discovery, reconciliation, propagator (downloads with resume, uploads v1 and chunked v2, bulk upload (off by default), remote and local operations, conflicts), sync engine, sync file status tracker |
 | `nc-daemon` | `src/gui` (sync logic, no GUI) | folder manager, folders, inotify folder watcher, account state and connection validator, `nextcloud.cfg` settings, credentials, Login Flow v2, takeover, control socket, event loop |
 | `ncsync` | `src/cmd` | `ncsync sync` (the `nextcloudcmd` equivalent), configuration commands, daemon control |
 | `ncsyncd` | `src/gui/application.cpp` | the daemon |
 | `nc-testutils` | `test/syncenginetestutils.*` | FakeFolder harness (in-memory server behind the transport trait) and the ported FakeFolder tests |
 
+Phase 3 (in progress): bulk upload (`BulkPropagatorJob`, one
+`POST /remote.php/dav/bulk` for many small files) is ported but **off by
+default, like upstream v34.0.5**, which disables it; the experimental
+`SyncOptions::bulk_upload` opt-in (not exposed by `ncsync`) enables it. The
+sync file status tracker (the overlay icon statuses) is ported in `nc-sync`.
+
 Out of scope for now: virtual files, end-to-end encryption (encrypted folders
-are skipped like the official client does without E2EE), bulk upload (also
-disabled upstream), the GUI.
+are skipped like the official client does without E2EE), the GUI.
 
 ## Usage
 

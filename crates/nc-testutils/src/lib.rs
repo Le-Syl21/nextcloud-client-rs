@@ -39,7 +39,7 @@
 //! | `FakeErrorReply`, `FakeJsonErrorReply`, `FakePayloadReply`, `FakeJsonReply` | [`server::error_reply`], [`server::payload_reply`], [`server::json_reply`] | ported (no delays) |
 //! | `FakeHangingReply` | [`FakeReply::Hang`] | ported |
 //! | `DelayedReply<T>` | [`FakeReply::Delayed`] | ported |
-//! | `FakePutMultiFileReply`, `forEachReplyPart` (bulk upload) | — | pending (Phase 3), answers 501 |
+//! | `FakePutMultiFileReply`, `forEachReplyPart` (bulk upload) | POST handler ([`server::put_multi_file_reply`]), [`server::for_each_reply_part`] (for overrides) | ported (other POSTs answer 501) |
 //! | `FakeCredentials` | — | pending (nc-dav credentials) |
 //! | `FakeFolder` | [`FakeFolder`] | partial: trees, modifiers, server, error paths, override; no engine |
 //! | `FakeFolder::syncOnce`, `scheduleSync`, `execUntil*`, `syncEngine()`, `account()`, `switchToVfs`, `enableEnforceWindowsFileNameCompatibility` | — | pending (needs `nc-sync`) |

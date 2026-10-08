@@ -16,6 +16,8 @@ pub mod options;
 pub mod progress;
 pub mod propagator;
 pub mod scheduled_sync;
+pub mod sync_file_status;
+pub mod sync_file_status_tracker;
 pub mod touched_files;
 pub mod utility;
 
@@ -27,3 +29,5 @@ pub use item::{
 pub use local_discovery_tracker::LocalDiscoveryTracker;
 pub use options::SyncOptions;
 pub use progress::{ProgressInfo, ProgressStatus};
+pub use sync_file_status::{SyncFileStatus, SyncFileStatusTag};
+pub use sync_file_status_tracker::SyncFileStatusTracker;

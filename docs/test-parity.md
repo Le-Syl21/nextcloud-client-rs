@@ -17,8 +17,7 @@ a `_data` function is counted with its test function, whose data rows all
 run inside the one Rust test. Tests marked *derived* or *rust_only* are
 additions without an upstream counterpart.
 
-Not counted here: test files of later phases not ported yet (sync file
-status tracker, ...), GUI tests, and the
+Not counted here: test files of later phases not ported yet, GUI tests, and the
 virtual files / end-to-end encryption test files (out of scope).
 
 ## Summary
@@ -37,7 +36,7 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testcapabilities.cpp | 27 | 26 | 0 | 1 |
 | test/testsyncfileitem.cpp | 3 | 1 | 0 | 2 |
 | test/testnextcloudpropagator.cpp | 7 | 6 | 0 | 1 |
-| test/testsyncengine.cpp | 57 | 49 | 0 | 8 |
+| test/testsyncengine.cpp | 57 | 55 | 0 | 2 |
 | test/testsyncmove.cpp | 30 | 28 | 1 | 1 |
 | test/testsyncconflict.cpp | 15 | 14 | 0 | 1 |
 | test/testremotediscovery.cpp | 7 | 6 | 0 | 1 |
@@ -61,7 +60,8 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testforcesyncnow.cpp | 3 | 2 | 0 | 1 |
 | test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
 | test/testaccount.cpp | 5 | 2 | 0 | 3 |
-| **Total** | **403** | **319** | **1** | **83** |
+| test/testsyncfilestatustracker.cpp | 14 | 13 | 0 | 1 |
+| **Total** | **417** | **338** | **1** | **78** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -310,8 +310,8 @@ failure (`LsColError::partial`); subfolders and success only on `Ok`.
 | testFileUpload | test_file_upload | ported |
 | testDirDownload | test_dir_download | ported |
 | testDirUpload | test_dir_upload | ported |
-| testDirUploadWithDelayedAlgorithm | — | n/a (bulk upload, `QSKIP` upstream) |
-| testDirUploadWithDelayedAlgorithmWithNewChecksum | — | n/a (bulk upload, `QSKIP` upstream) |
+| testDirUploadWithDelayedAlgorithm | test_dir_upload_with_delayed_algorithm | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`) |
+| testDirUploadWithDelayedAlgorithmWithNewChecksum | test_dir_upload_with_delayed_algorithm_with_new_checksum | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`) |
 | testLocalDelete | test_local_delete | ported |
 | testRemoteDelete | test_remote_delete | ported |
 | testEmlLocalChecksum | test_eml_local_checksum | ported |
@@ -330,16 +330,16 @@ failure (`LsColError::partial`); subfolders and success only on `Ok`.
 | testEmptyLocalButHasRemote | test_empty_local_but_has_remote | ported |
 | testDirectoryInitialMtime | test_directory_initial_mtime | ported |
 | testLocalFileInitialMtime | test_local_file_initial_mtime | ported |
-| testErrorsWithBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
-| testNetworkErrorsWithBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
-| testNetworkErrorsWithSmallerBatchSizes | — | n/a (bulk upload, `QSKIP` upstream) |
+| testErrorsWithBulkUpload | test_errors_with_bulk_upload | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`, also set in the fresh `SyncOptions`, with `minimum_file_age_for_upload` 0 since that is a `SyncEngine` static upstream) |
+| testNetworkErrorsWithBulkUpload | test_network_errors_with_bulk_upload | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`, also set in the fresh `SyncOptions`, with `minimum_file_age_for_upload` 0 since that is a `SyncEngine` static upstream) |
+| testNetworkErrorsWithSmallerBatchSizes | test_network_errors_with_smaller_batch_sizes | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`; upstream's reply lambda looks up `X-File-Path` in lower-cased headers, so no part fails, kept as is) |
 | testRemoteMoveFailedInsufficientStorageLocalMoveRolledBack | test_remote_move_failed_insufficient_storage_local_move_rolled_back | ported |
 | testRemoteMoveFailedForbiddenLocalMoveRolledBack | test_remote_move_failed_forbidden_local_move_rolled_back | ported |
 | testFolderWithFilesInError | test_folder_with_files_in_error | ported |
 | testInvalidMtimeRecoveryAtStart | test_invalid_mtime_recovery_at_start | ported |
 | testInvalidMtimeRecovery | test_invalid_mtime_recovery | ported |
 | testLocalInvalidMtimeCorrection | test_local_invalid_mtime_correction | ported |
-| testLocalInvalidMtimeCorrectionBulkUpload | — | n/a (bulk upload, `QSKIP` upstream) |
+| testLocalInvalidMtimeCorrectionBulkUpload | test_local_invalid_mtime_correction_bulk_upload | adapted (`QSKIP("bulk upload is disabled")` upstream; runs with the experimental opt-in `SyncOptions::bulk_upload`) |
 | testServerUpdatingMTimeShouldNotCreateConflicts | test_server_updating_mtime_should_not_create_conflicts | ported |
 | testFolderRemovalWithCaseClash | test_folder_removal_with_case_clash | ported (both _data rows) |
 | testServer_caseClash_createConflict | test_server_case_clash_create_conflict | ported |
@@ -361,6 +361,12 @@ failure (`LsColError::partial`); subfolders and success only on `Ok`.
 | testTouchedFilesWhenChangingFolderPermissionsDuringSync | test_touched_files_when_changing_folder_permissions_during_sync | adapted (`touchedFile` observed through the `propagator_event` callback) |
 | testSyncFolderNewDeleteConflictExpectDeletion | test_sync_folder_new_delete_conflict_expect_deletion | ported |
 | testUploadWhileFileIsChanging | test_upload_while_file_is_changing | adapted (`execUntilBeforePropagation` → `about_to_propagate` callback that grows the file) |
+
+Bulk upload (`BulkPropagatorJob`, `PutMultiFileJob`) is ported but off by
+default: upstream v34.0.5's `isDelayedUploadItem()` returns `false`. The six
+bulk upload tests run with the opt-in; `FakePutMultiFileReply` and
+`forEachReplyPart` are in the harness (`server::put_multi_file_reply`,
+`server::for_each_reply_part`).
 
 ## test/testsyncmove.cpp → `crates/nc-testutils/tests/testsyncmove.rs`
 
@@ -765,3 +771,38 @@ pause (a remote change is not applied), resume and sync-now.
 | testAccount_isPublicShareLink (+_data, 8 rows) | test_account_is_public_share_link | adapted (`Account::setUrl`'s detection is `public_share_link_parts`, used when an account is loaded) |
 | testAccount_setLimitSettings_globalNetworkLimitFallback | test_account_set_limit_settings_global_network_limit_fallback | adapted (the setters are on `AccountDefinition`) |
 | testAccount_listRemoteFolder (+_data) | — | n/a (`Account::listRemoteFolder` serves the GUI folder wizard) |
+
+# Phase 3
+
+## test/testsyncfilestatustracker.cpp → `crates/nc-testutils/tests/testsyncfilestatustracker.rs`
+
+The tracker (`SyncFileStatusTracker`, `SyncFileStatus`) is in
+`crates/nc-sync/src/sync_file_status_tracker.rs` and `sync_file_status.rs`;
+the engine owns it and calls its slots before its own callbacks. Upstream
+pauses the sync (`scheduleSync()`, `execUntilBeforePropagation()`,
+`execUntilItemCompleted(path)`, `execUntilFinished()`); the port's sync is
+one future borrowing the engine, so the checks of a pause point run in the
+engine's `about_to_propagate` / `item_completed` callbacks at that point
+(adapted). `QEXPECT_FAIL` comparisons become `assert_ne!` (an unexpected
+pass fails upstream too).
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger / QStandardPaths test mode) |
+| parentsGetSyncStatusUploadDownload | parents_get_sync_status_upload_download | adapted (pause point in `about_to_propagate`) |
+| parentsGetSyncStatusNewFileUploadDownload | parents_get_sync_status_new_file_upload_download | adapted (idem) |
+| parentsGetSyncStatusNewDirDownload | parents_get_sync_status_new_dir_download | adapted (idem, and `item_completed` of `D`) |
+| parentsGetSyncStatusNewDirUpload | parents_get_sync_status_new_dir_upload | adapted (idem) |
+| parentsGetSyncStatusDeleteUpDown | parents_get_sync_status_delete_up_down | adapted (pause point in `about_to_propagate`) |
+| warningStatusForExcludedFile | warning_status_for_excluded_file | adapted (idem; 3 `QEXPECT_FAIL`) |
+| warningStatusForExcludedFile_CasePreserving | warning_status_for_excluded_file_case_preserving | ported |
+| parentsGetWarningStatusForError | parents_get_warning_status_for_error | adapted (pause points in `about_to_propagate`) |
+| parentsGetWarningStatusForError_SibblingStartsWithPath | parents_get_warning_status_for_error_sibbling_starts_with_path | adapted (idem) |
+| childOKEmittedBeforeParent | child_ok_emitted_before_parent | ported |
+| sharedStatus | shared_status | adapted (pause point in `about_to_propagate`; 1 `QEXPECT_FAIL`) |
+| renameError | rename_error | adapted (idem) |
+| silentlyExcludedFilesRemovedFromExclude | silently_excluded_files_removed_from_exclude | ported |
+
+derived: `sync_file_status::tests::derived_socket_api_string`,
+`sync_file_status_tracker::tests::derived_lookup_problem`,
+`propagator::put_multi_file::tests::derived_multipart_format`.

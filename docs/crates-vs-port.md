@@ -90,6 +90,15 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | systemd `Type=notify`, watchdog, status | **sd-notify** | 0.5.0 | `READY=1`, `STATUS=`, `STOPPING=1`, and `WATCHDOG=1` sent from the event loop itself (half of `WatchdogSec`), so a stuck loop gets the service restarted. |
 | Control socket (no upstream counterpart: the GUI) | tokio `UnixListener`, one JSON line per request, **serde** (`derive`) + **serde_json** | 1.0.229, 1.0.151 | Mode 0600 in a 0700 runtime directory. |
 
+## Phase 3 (in the tree)
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| Bulk upload (`bulkpropagatorjob.cpp`, `putmultifilejob.cpp`, the delayed tasks of `owncloudpropagator.cpp`) | ported (`nc-sync/src/propagator/bulk.rs`, `put_multi_file.rs`) | — | Off by default like upstream v34.0.5 (`isDelayedUploadItem()` returns `false`); `SyncOptions::bulk_upload` is an experimental opt-in. The pre-v34 `isDelayedUploadItem` condition is not in the shallow v34.0.5 clone; it is written from upstream's earlier releases and checked against the bulk job's requirements and the six upstream tests. |
+| `multipart/related` body (`QHttpMultiPart`, `RelatedType`) | hand-written (`put_multi_file.rs`), boundary from **fastrand** + **base64** | 2.5.0, 0.23.1 | About 30 lines. The multipart crates (`multipart`, `common-multipart-rfc7578`, reqwest's `multipart` feature) write `multipart/form-data` with `Content-Disposition` parts and their own boundaries, not Qt's `related` body with raw per-file headers (`X-File-Path`, `X-File-Mtime`, `OC-Checksum`, `X-File-MD5`) and `boundary_.oOo._` boundary that the server's bulk endpoint and upstream's fake server parse. Both crates were already dependencies of the workspace. |
+| JSON reply of the bulk endpoint | **serde_json** | 1.0.151 | `QJsonObject` semantics kept: a non-string value reads as an empty string, only a JSON `true` is true. |
+| `SyncFileStatusTracker`, `SyncFileStatus` (`syncfilestatustracker.cpp`, `src/common/syncfilestatus.cpp`) | ported (`nc-sync/src/sync_file_status_tracker.rs`, `sync_file_status.rs`) | — | Upstream-specific counting and problem lookup; no crate. |
+
 ## Planned (later phases), from the study
 
 All of these are to be re-checked for the latest version when they are added
