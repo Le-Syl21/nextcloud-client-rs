@@ -170,8 +170,8 @@ struct SyncArgs {
     #[arg(long, value_name = "USER", help_heading = PROVISIONING)]
     userid: Option<String>,
     /// The app password for authentication (optional; without it the
-    /// account is stored without credentials: log in later with
-    /// `ncsync account add URL`).
+    /// login is done with Login Flow v2: open the link shown, or scan its
+    /// QR code; with --non-interactive an app password is required).
     #[arg(long, value_name = "PASS", help_heading = PROVISIONING)]
     apppassword: Option<String>,
     /// The base URL of the Nextcloud server.

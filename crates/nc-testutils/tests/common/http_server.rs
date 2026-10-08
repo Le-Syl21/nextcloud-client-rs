@@ -58,11 +58,20 @@ impl HttpResponse {
     }
 }
 
-type Route = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync>;
+pub type Route = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync>;
+
+/// A connection the server reads a request from and writes the response to.
+pub trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send> Stream for T {}
+
+/// Turns an accepted connection into the stream to serve (a TLS
+/// handshake, say); `None` drops the connection.
+pub type Wrap = Box<dyn Fn(TcpStream) -> Option<Box<dyn Stream>> + Send + Sync>;
 
 /// The server; stops when dropped.
 pub struct HttpServer {
     port: u16,
+    scheme: &'static str,
     stop: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<HttpRequest>>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -79,11 +88,11 @@ fn reason(status: u16) -> &'static str {
 }
 
 fn handle(
-    mut stream: TcpStream,
+    stream: Box<dyn Stream>,
     routes: &HashMap<String, Route>,
     requests: &Mutex<Vec<HttpRequest>>,
 ) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -133,6 +142,7 @@ fn handle(
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.body.len()
     ));
+    let stream = reader.get_mut();
     stream.write_all(head.as_bytes())?;
     stream.write_all(&response.body)?;
     stream.flush()
@@ -141,6 +151,12 @@ fn handle(
 impl HttpServer {
     /// Listens on a free port of 127.0.0.1 with `routes` (path → handler).
     pub fn start(routes: Vec<(&str, Route)>) -> Self {
+        Self::start_wrapped(routes, "http", Box::new(|s| Some(Box::new(s))))
+    }
+
+    /// Like [`Self::start`], each connection going through `wrap` first;
+    /// `scheme` is the one of [`Self::base_url`].
+    pub fn start_wrapped(routes: Vec<(&str, Route)>, scheme: &'static str, wrap: Wrap) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
         let port = listener.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -155,7 +171,7 @@ impl HttpServer {
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    if let Ok(stream) = stream {
+                    if let Some(stream) = stream.ok().and_then(&wrap) {
                         let _ = handle(stream, &routes, &requests);
                     }
                 }
@@ -163,15 +179,16 @@ impl HttpServer {
         };
         Self {
             port,
+            scheme,
             stop,
             requests,
             thread: Some(thread),
         }
     }
 
-    /// `http://127.0.0.1:<port>`.
+    /// `http://127.0.0.1:<port>` (the scheme of [`Self::start_wrapped`]).
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!("{}://127.0.0.1:{}", self.scheme, self.port)
     }
 
     /// The requests received so far.

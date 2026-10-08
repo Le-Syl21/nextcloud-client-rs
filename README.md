@@ -90,14 +90,20 @@ ncsync sync --userid alice --serverurl https://cloud.example.com --apppassword "
   instead of the command line);
 * the folder is `--localdirpath` (default `~/Nextcloud`, made unique), which
   must be missing or empty, synced with `--remotedirpath` (default `/`);
-* without `--apppassword` the account is stored without credentials, like
-  upstream; log in later with `ncsync account add <server_url>`;
+* without `--apppassword` the login is done with **Login Flow v2** in the
+  terminal: the link (with the login name prefilled) and its QR code are
+  printed, and the setup goes on once access is granted in a browser,
+  which must log in as the `--userid`; with `--non-interactive` an app
+  password is required instead (exit 255, nothing written). This differs
+  from upstream, see [Divergences from upstream](#divergences-from-upstream);
 * `--isvfsenabled 1` is refused (exit 255, nothing written): virtual files
   are not supported;
 * a rejected command line or setup (missing `--userid`/`--serverurl`,
   existing account, non-empty local folder) exits with 255, like
-  `nextcloudcmd`'s `return -1`; `--trust` and `--httpproxy` do not apply
-  to the setup, as upstream.
+  `nextcloudcmd`'s `return -1`;
+* `--trust` applies to the setup (a server with a self-signed certificate
+  can be provisioned), unlike upstream; `--httpproxy` does not, as
+  upstream.
 
 `--confdir DIR` also applies to the sync mode: the client status reporting
 database (below) goes there.
@@ -222,8 +228,15 @@ systemd-creds encrypt --name=ncsyncd-alice-0 /root/app-password /etc/credstore.e
 systemctl restart ncsyncd@alice
 ```
 
-The user name is part of the credential name so that one user's instance
-never receives another user's secrets.
+The user name is part of the credential name for isolation between users:
+`ImportCredential=ncsyncd-%i-*` makes systemd hand `ncsyncd@alice` only the
+credentials whose name starts with `ncsyncd-alice-`, so one user's instance
+(which runs as that user) never receives another user's app passwords, even
+though all of them sit in the same system credential store. With a name
+without the user (`ncsyncd-<account id>`), every instance would import
+every user's credentials, since account ids are only unique within one
+configuration. The account id then picks the account within the user's
+configuration.
 
 ### Controlling it
 
@@ -259,7 +272,7 @@ refuse while the official client runs.
 
 ## Divergences from upstream
 
-One deliberate behavioural difference with the official client v34.0.5:
+Deliberate behavioural differences with the official client v34.0.5:
 
 * **inotify queue overflow.** When the kernel's inotify queue overflows
   (`IN_Q_OVERFLOW`, more events than `fs.inotify.max_queued_events` before
@@ -269,6 +282,19 @@ One deliberate behavioural difference with the official client v34.0.5:
   hour by default). `ncsyncd` treats the overflow as lost changes: the next
   sync does a full local discovery, and a sync is scheduled right away
   (after the usual short delay), so nothing waits for the hourly scan.
+* **Provisioning without an app password.** `nextcloudcmd --userid ...
+  --serverurl ...` without `--apppassword` stores the account without
+  credentials, for the desktop client's GUI to ask for a login later. A
+  command line has no such later, and an account without credentials would
+  only be signed out by `ncsyncd`; so `ncsync sync --userid ...` logs in
+  right away with Login Flow v2 (link and QR code in the terminal), and
+  with `--non-interactive` refuses the setup (exit 255) with an error
+  asking for an app password.
+* **`--trust` in provisioning mode.** Upstream parses `--trust` but does
+  not apply it to the account setup, so a server with a self-signed
+  certificate cannot be provisioned from the command line; `ncsync`
+  applies it to every request of the setup (`--httpproxy` is still
+  ignored there, as upstream).
 
 ## Licensing
 

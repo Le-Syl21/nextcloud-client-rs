@@ -902,9 +902,24 @@ account, the folder `0` with the remote path, the password file without a
 keyring, the folder's journal, then "Account alice already exists!" with
 255), `rust_only_provisioning_refuses_virtual_files_and_writes_nothing`,
 `rust_only_provisioning_wrong_app_password_writes_nothing` (no account,
-no local folder), `rust_only_provisioning_without_app_password_stores_the_account_only`,
+no local folder),
 `rust_only_provisioning_non_empty_local_folder_is_rejected`,
 `rust_only_provisioning_unknown_option_shows_help` (`HelpMode`, exit 0).
+For the two documented divergences (README, "Divergences from upstream"):
+without an app password, Login Flow v2 instead of an account stored
+without credentials —
+`rust_only_provisioning_without_app_password_logs_in_with_login_flow_v2`
+(the link printed with `?user=alice`, `login/v2` then the poll then
+`ocs/v1.php/cloud/user`, the account and the app password stored),
+`rust_only_provisioning_non_interactive_without_app_password_is_refused`
+(255, an error naming `--apppassword`, no request sent, nothing written),
+`rust_only_provisioning_login_flow_as_another_user_writes_nothing` (the
+browser logged in as another user: 1, nothing written),
+`rust_only_provisioning_login_flow_unreachable_server_writes_nothing`;
+`--trust` applied to the setup —
+`rust_only_provisioning_trust_accepts_an_invalid_certificate` (a TLS
+server with a self-signed certificate: 1 and nothing written without
+`--trust`, 0 with it).
 Derived unit tests: `account_setup::tests::derived_qurl_validity`,
 `derived_display_name`.
 

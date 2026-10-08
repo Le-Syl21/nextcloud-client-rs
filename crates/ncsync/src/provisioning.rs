@@ -19,6 +19,12 @@
 //! by clap: an option it does not know, or one without its value, prints
 //! the help and exits with 0 (`HelpMode`).
 //!
+//! Two deliberate divergences: without an app password the account is
+//! not stored without credentials (the GUI's "log in later"), the user
+//! logs in with Login Flow v2 in the terminal instead, and
+//! `--non-interactive` then refuses the setup; `--trust` applies to the
+//! setup's requests (upstream ignores it there).
+//!
 //! Exit codes: 255 for a rejected command line or setup (`return -1`), 1
 //! when the setup fails once it reached the server, 0 on success.
 
@@ -26,7 +32,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nc_daemon::account_config::load_accounts;
-use nc_daemon::account_setup::{AccountSetupFromCommandLineJob, SetupParams, qurl_is_valid};
+use nc_daemon::account_setup::{
+    AccountSetupFromCommandLineJob, MissingAppPassword, SetupParams, qurl_is_valid,
+};
 use nc_daemon::config_file::ConfigLocation;
 use nc_daemon::credentials::SecretStore;
 use nc_daemon::folder_definition::load_folders;
@@ -94,6 +102,12 @@ struct CmdOptions {
     silent: bool,
     logdebug: bool,
     config_directory: Option<String>,
+    /// `--trust`: accept an invalid TLS certificate (divergence: upstream
+    /// ignores it in provisioning mode).
+    trust: bool,
+    /// `--non-interactive`: without an app password, refuse instead of
+    /// starting Login Flow v2.
+    non_interactive: bool,
     /// `--password-file` (an ncsync extension): the app password, so that
     /// it does not have to be on the command line.
     password_file: Option<String>,
@@ -143,7 +157,9 @@ pub fn run(args: &[String]) -> ExitCode {
                 options.password_file = it.next().cloned();
             }
             "-s" | "--silent" => options.silent = true,
-            "--trust" | "-n" | "-h" | "--non-interactive" => {}
+            "--trust" => options.trust = true,
+            "--non-interactive" => options.non_interactive = true,
+            "-n" | "-h" => {}
             "--logdebug" => options.logdebug = true,
             "--confdir" if it.peek().is_some_and(|n| !n.starts_with("--")) => {
                 options.config_directory = it.next().cloned();
@@ -184,10 +200,14 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(f) => location.with_config_file(f),
         None => location,
     };
-    // Upstream's provisioning does not apply --trust nor --httpproxy.
+    // Upstream's provisioning applies neither --trust nor --httpproxy; --trust
+    // is applied here (divergence), --httpproxy is not.
     let ctx = Context {
         location,
-        http: HttpClientOptions::default(),
+        http: HttpClientOptions {
+            trust_invalid_certificates: options.trust,
+            ..HttpClientOptions::default()
+        },
     };
     let settings = match ctx.load() {
         Ok(s) => s,
@@ -241,7 +261,6 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(255);
         }
     };
-    let has_app_password = !manager.app_password.is_empty();
     let params = SetupParams {
         app_password: manager.app_password,
         user_id: manager.user_id,
@@ -249,24 +268,26 @@ pub fn run(args: &[String]) -> ExitCode {
         local_dir_path: manager.local_dir_path,
         remote_dir_path: manager.remote_dir_path,
     };
-    let server_url = params.server_url.clone();
-    let status = runtime.block_on(AccountSetupFromCommandLineJob::new(&ctx, store, params).run());
+    let show_link = |url: &str| crate::config_cmds::print_login_link(url);
+    let on_error = |e: &nc_daemon::flow2auth::Flow2Error| eprintln!("Warning: {e}");
+    let missing_app_password = if options.non_interactive {
+        MissingAppPassword::Refuse
+    } else {
+        MissingAppPassword::LoginFlow {
+            show_link: &show_link,
+            on_error: &on_error,
+            timeout: nc_daemon::flow2auth::DEFAULT_LOGIN_TIMEOUT,
+        }
+    };
+    let job = AccountSetupFromCommandLineJob::new(&ctx, store, params)
+        .with_missing_app_password(missing_app_password);
+    let status = runtime.block_on(job.run());
     if status.is_failure {
         log::warn!(target: "nextcloud.gui.accountsetupcommandlinejob", "{}", status.message);
         eprintln!("{}", status.message);
     } else {
         log::info!(target: "nextcloud.gui.accountsetupcommandlinejob", "{}", status.message);
         println!("{}", status.message);
-        if !has_app_password {
-            println!(
-                "The account has no credentials yet: log in with `ncsync account add {server_url}`{}.",
-                options
-                    .config_directory
-                    .as_deref()
-                    .map(|d| format!(" --config {d}/ncsyncd.cfg"))
-                    .unwrap_or_default()
-            );
-        }
     }
     if status.rejected {
         log::warn!("Creation of the account failed. See prior messages for a detailed error.");

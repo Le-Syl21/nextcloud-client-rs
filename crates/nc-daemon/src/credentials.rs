@@ -573,7 +573,10 @@ mod tests {
         );
         assert_eq!(keychain_key("", "bob", "0"), None);
         assert_eq!(keychain_key("https://h", "", "0"), None);
-        assert_eq!(systemd_credential_name(&ServiceMode::User, "0"), "ncsyncd-0");
+        assert_eq!(
+            systemd_credential_name(&ServiceMode::User, "0"),
+            "ncsyncd-0"
+        );
         assert_eq!(
             systemd_credential_name(
                 &ServiceMode::System {

@@ -188,6 +188,17 @@ fn read_app_password(path: &PathBuf) -> Result<AppPassword, String> {
     Ok(AppPassword::new(first))
 }
 
+/// Shows a Login Flow v2 link in the terminal, with its QR code.
+pub(crate) fn print_login_link(login_url: &str) {
+    println!("Open this link in a browser and grant access (Login Flow v2):\n");
+    println!("  {login_url}\n");
+    if let Some(qr) = flow2auth::render_qr(login_url) {
+        println!("{qr}");
+    }
+    println!("Waiting for the login (Ctrl+C to cancel)...");
+    let _ = std::io::stdout().flush();
+}
+
 /// Runs Login Flow v2 in the terminal: prints the link and its QR code,
 /// waits for the browser.
 async fn login_in_terminal(
@@ -195,13 +206,7 @@ async fn login_in_terminal(
     server_url: &str,
 ) -> Result<flow2auth::LoginResult, ManageError> {
     let flow = manage::start_login(ctx, server_url).await?;
-    println!("Open this link in a browser and grant access (Login Flow v2):\n");
-    println!("  {}\n", flow.login_url);
-    if let Some(qr) = flow2auth::render_qr(&flow.login_url) {
-        println!("{qr}");
-    }
-    println!("Waiting for the login (Ctrl+C to cancel)...");
-    let _ = std::io::stdout().flush();
+    print_login_link(&flow.login_url);
     manage::finish_login(ctx, &flow, |e| eprintln!("Warning: {e}")).await
 }
 

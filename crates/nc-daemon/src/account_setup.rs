@@ -18,6 +18,13 @@
 //! false: `nextcloudcmd` returns -1, exit code 255); the others end the
 //! event loop with exit code 1 (failure) or 0 (success).
 //!
+//! Without an app password, upstream stores the account without
+//! credentials, for the GUI to log in later; a command line has no such
+//! later, so the job logs in with Login Flow v2 instead (the link and its
+//! QR code are shown by the caller), or, when the caller cannot ask the
+//! user ([`MissingAppPassword::Refuse`], `--non-interactive`), refuses
+//! before anything is sent. This is a documented divergence.
+//!
 //! Not ported: the File Provider mode (macOS), `Utility::setupFavLink` (the
 //! GTK bookmark of the folder: desktop integration), virtual files (the
 //! caller refuses `--isvfsenabled 1`), the keychain wait (our credential
@@ -26,7 +33,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nc_dav::{Account, Credentials, HttpTransport, JobOptions, NetworkError, ServerUrl};
+use nc_dav::{Account, Credentials, HttpTransport, JobOptions, NetworkError, ServerUrl, Transport};
 use nc_journal::journal::{SelectiveSyncListType, SyncJournalDb};
 
 use crate::account_config::{
@@ -34,6 +41,7 @@ use crate::account_config::{
 };
 use crate::config_file::ConfigFile;
 use crate::credentials::{AppPassword, CredentialResolver, SecretStore};
+use crate::flow2auth::{self, Flow2Error};
 use crate::folder_definition::{
     ExistingFolder, FolderDefinition, GoodPathStrategy, ServerIdentity, all_aliases,
     allocate_alias, choose_group, clean_path, find_good_path_for_new_sync_folder,
@@ -232,16 +240,95 @@ fn dir_is_empty(path: &Path) -> bool {
     std::fs::read_dir(path).map_or(true, |mut d| d.next().is_none())
 }
 
+/// What the job does when no app password was given.
+pub enum MissingAppPassword<'a> {
+    /// Refuse the setup ([`SetupStatus::rejected`]) before anything is
+    /// sent: nobody can open the login link (`--non-interactive`).
+    Refuse,
+    /// Log in with Login Flow v2: `show_link` gets the login link to show
+    /// to the user, `on_error` the server errors met while polling (the
+    /// polling goes on), `timeout` bounds the wait.
+    LoginFlow {
+        show_link: &'a dyn Fn(&str),
+        on_error: &'a dyn Fn(&Flow2Error),
+        timeout: std::time::Duration,
+    },
+}
+
 /// The account setup job.
 pub struct AccountSetupFromCommandLineJob<'a> {
     ctx: &'a Context,
     store: Option<&'a dyn SecretStore>,
     params: SetupParams,
+    missing_app_password: MissingAppPassword<'a>,
 }
 
 impl<'a> AccountSetupFromCommandLineJob<'a> {
+    /// A job that refuses to run without an app password; see
+    /// [`Self::with_missing_app_password`].
     pub fn new(ctx: &'a Context, store: Option<&'a dyn SecretStore>, params: SetupParams) -> Self {
-        Self { ctx, store, params }
+        Self {
+            ctx,
+            store,
+            params,
+            missing_app_password: MissingAppPassword::Refuse,
+        }
+    }
+
+    /// What to do when `params.app_password` is empty.
+    pub fn with_missing_app_password(mut self, missing: MissingAppPassword<'a>) -> Self {
+        self.missing_app_password = missing;
+        self
+    }
+
+    /// Gets an app password with Login Flow v2 (the login name prefilled
+    /// with the `--userid`), which must log in as that user.
+    async fn login_with_flow2(
+        &mut self,
+        account: &Account,
+        transport: &Arc<dyn Transport>,
+    ) -> Result<(), SetupStatus> {
+        let MissingAppPassword::LoginFlow {
+            show_link,
+            on_error,
+            timeout,
+        } = &self.missing_app_password
+        else {
+            return Err(SetupStatus::rejected(format!(
+                "No app password for account {}: pass one with --apppassword (or --password-file), or leave out --non-interactive to log in with Login Flow v2 in a browser.",
+                self.params.user_id
+            )));
+        };
+        let failed = |e: Flow2Error| {
+            SetupStatus::failure(format!(
+                "Account {} setup from command line failed with error: {}.",
+                display_name(&self.params.user_id, account.url()),
+                e.to_string().trim_end_matches('.')
+            ))
+        };
+        // The server version decides whether the login name can be prefilled.
+        if let Ok(status) = nc_dav::jobs::check_server(account, &JobOptions::default()).await
+            && let Some(v) = status.get("version").and_then(|v| v.as_str())
+        {
+            account.set_server_version(v);
+        }
+        let flow = flow2auth::start_login(account, Some(&self.params.user_id))
+            .await
+            .map_err(failed)?;
+        show_link(&flow.login_url);
+        let result = flow2auth::wait_for_login(transport, &flow, *timeout, |e| on_error(e))
+            .await
+            .map_err(failed)?;
+        if result.login_name != self.params.user_id {
+            return Err(SetupStatus::failure(format!(
+                "Account {} setup from command line failed with error: the browser logged in as {}, not as {}.",
+                display_name(&self.params.user_id, account.url()),
+                result.login_name,
+                self.params.user_id
+            )));
+        }
+        self.params.app_password = result.app_password.expose().to_owned();
+        Ok(())
     }
 
     /// `defaultLocalDirPath()`: `overrideLocalDir`, else `~/Nextcloud`,
@@ -339,13 +426,21 @@ impl<'a> AccountSetupFromCommandLineJob<'a> {
             ));
         }
 
-        let transport = match HttpTransport::new(&self.ctx.http) {
-            Ok(t) => t,
+        let transport: Arc<dyn Transport> = match HttpTransport::new(&self.ctx.http) {
+            Ok(t) => Arc::new(t),
             Err(e) => {
                 return SetupStatus::failure(format!("Could not set up the HTTP client: {e}"));
             }
         };
-        let account = Arc::new(Account::new(url.clone(), Arc::new(transport)));
+        let account = Arc::new(Account::new(url.clone(), transport.clone()));
+
+        if self.params.app_password.is_empty() {
+            // Upstream stores the account without credentials, for the GUI to log in
+            // later on; there is no later here (divergence): log in now.
+            if let Err(status) = self.login_with_flow2(&account, &transport).await {
+                return status;
+            }
+        }
         account.set_credentials(Credentials::new(
             self.params.user_id.clone(),
             self.params.app_password.clone(),
@@ -353,12 +448,6 @@ impl<'a> AccountSetupFromCommandLineJob<'a> {
 
         // The account is only added, saved and given a sync folder once the credentials have
         // been checked against the server, so that a failed setup leaves nothing behind.
-        if self.params.app_password.is_empty() {
-            // Nothing to authenticate with, so the server cannot be asked for the dav user
-            // either. Store what was given and let the user log in from the client later on.
-            account.set_dav_user(&self.params.user_id);
-            return self.handle_success(&account, &url);
-        }
 
         // fetchUserName()
         let (json, status_code, _reply) =
