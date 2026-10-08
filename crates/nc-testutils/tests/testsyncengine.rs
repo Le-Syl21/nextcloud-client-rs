@@ -73,6 +73,74 @@ fn test_dir_upload() {
     );
 }
 
+/// Port addition: upstream v34.0.5 disables bulk upload
+/// (`isDelayedUploadItem()` returns false) and `QSKIP`s its tests; they run
+/// here with the experimental opt-in `SyncOptions::bulk_upload`.
+fn enable_bulk_upload(fake_folder: &mut FakeFolder) {
+    let mut options = fake_folder.sync_engine().sync_options().clone();
+    options.bulk_upload = true;
+    fake_folder.sync_engine().set_sync_options(options);
+}
+
+/// `setCapabilities({ { "dav", QVariantMap{ {"bulkupload", "1.0"} } } })`.
+fn set_bulk_upload_capability(fake_folder: &FakeFolder) {
+    fake_folder.set_capabilities(serde_json::json!({ "dav": { "bulkupload": "1.0" } }));
+}
+
+fn dir_upload_with_delayed_algorithm(server_version: Option<&str>) {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    enable_bulk_upload(&mut fake_folder);
+    if let Some(v) = server_version {
+        fake_folder.set_server_version(v);
+    }
+    set_bulk_upload_capability(&fake_folder);
+
+    let complete_spy = ItemCompletedSpy::new(&mut fake_folder);
+    fake_folder.local_modifier().mkdir("Y");
+    fake_folder.local_modifier().insert("Y/d0", 64, b'W');
+    fake_folder.local_modifier().mkdir("Z");
+    fake_folder.local_modifier().insert("Z/d0", 64, b'W');
+    fake_folder.local_modifier().insert("A/a0", 64, b'W');
+    fake_folder.local_modifier().insert("B/b0", 64, b'W');
+    fake_folder.local_modifier().insert("r0", 64, b'W');
+    fake_folder.local_modifier().insert("r1", 64, b'W');
+    fake_folder.sync_once();
+    assert!(item_did_complete_successfully_with_expected_rank(
+        &complete_spy,
+        "Y",
+        0
+    ));
+    assert!(item_did_complete_successfully_with_expected_rank(
+        &complete_spy,
+        "Z",
+        1
+    ));
+    for path in ["Y/d0", "Z/d0", "A/a0", "B/b0", "r0", "r1"] {
+        assert!(
+            item_did_complete_successfully(&complete_spy, path),
+            "{path}"
+        );
+        assert!(
+            item_successfully_completed_get_rank(&complete_spy, path) > 1,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_dir_upload_with_delayed_algorithm() {
+    dir_upload_with_delayed_algorithm(None);
+}
+
+#[test]
+fn test_dir_upload_with_delayed_algorithm_with_new_checksum() {
+    dir_upload_with_delayed_algorithm(Some("32.0.0"));
+}
+
 fn local_delete(move_to_trash_enabled: bool) {
     let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
     let mut sync_options = fake_folder.sync_engine().sync_options().clone();
@@ -1077,6 +1145,279 @@ fn remote_move_failed_local_move_rolled_back(error_code: u16) {
     );
 }
 
+/// Names of the files the bulk upload error tests make fail.
+fn ends_with_any(file_name: &str, suffixes: &[&str]) -> bool {
+    suffixes.iter().any(|s| file_name.ends_with(s))
+}
+
+fn content_type_of(request: &nc_dav::Request) -> String {
+    request
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Checks whether subsequent large uploads are skipped after a 507 error
+#[test]
+fn test_errors_with_bulk_upload() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    set_bulk_upload_capability(&fake_folder);
+
+    // Disable parallel uploads
+    let mut sync_options = nc_sync::SyncOptions::default();
+    sync_options.parallel_network_jobs = 0;
+    // (SyncEngine::minimumFileAgeForUpload is not a sync option upstream.)
+    sync_options.minimum_file_age_for_upload = std::time::Duration::ZERO;
+    sync_options.bulk_upload = true;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    const FAILING: &[&str] = &["A/big2", "A/big3", "A/big4", "A/big5", "A/big7", "B/big8"];
+    let n_put = Arc::new(AtomicUsize::new(0));
+    let n_post = Arc::new(AtomicUsize::new(0));
+    {
+        let (n_put, n_post) = (n_put.clone(), n_post.clone());
+        fake_folder.set_server_override(move |request, _| {
+            let content_type = content_type_of(request);
+            if request.method() == http::Method::POST {
+                n_post.fetch_add(1, Ordering::SeqCst);
+                if content_type.starts_with("multipart/related; boundary=") {
+                    let mut has_an_error = false;
+                    let json_reply_object = nc_testutils::server::for_each_reply_part(
+                        request,
+                        &content_type,
+                        |all_headers| {
+                            let mut reply = serde_json::Map::new();
+                            let file_name = String::from_utf8_lossy(
+                                all_headers.get("x-file-path").map_or(&[][..], |v| v),
+                            )
+                            .into_owned();
+                            if ends_with_any(&file_name, FAILING) {
+                                has_an_error = true;
+                                reply.insert("error".into(), true.into());
+                                reply.insert("etag".into(), serde_json::Value::Null);
+                                return reply;
+                            } else {
+                                reply.insert("error".into(), false.into());
+                                reply.insert("etag".into(), serde_json::Value::Null);
+                            }
+                            reply
+                        },
+                    );
+                    if !json_reply_object.is_empty() {
+                        let json_reply = serde_json::Value::Object(json_reply_object).to_string();
+                        return Some(if has_an_error {
+                            // FakeJsonErrorReply
+                            nc_testutils::server::error_reply(200, json_reply.into()).into()
+                        } else {
+                            // FakeJsonReply
+                            nc_testutils::server::json_reply(200, &json_reply).into()
+                        });
+                    }
+                    return None;
+                }
+            } else if request.method() == http::Method::PUT {
+                n_put.fetch_add(1, Ordering::SeqCst);
+                let file_name =
+                    nc_testutils::server::file_path_from_url(request.uri()).unwrap_or_default();
+                if ends_with_any(&file_name, FAILING) {
+                    return Some(nc_testutils::server::error_reply(412, Default::default()).into());
+                }
+                return None;
+            }
+            None
+        });
+    }
+
+    fake_folder.local_modifier().insert("A/big", 1, b'W');
+    assert!(fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 0);
+    assert_eq!(n_post.load(Ordering::SeqCst), 1);
+    n_put.store(0, Ordering::SeqCst);
+    n_post.store(0, Ordering::SeqCst);
+
+    fake_folder.local_modifier().insert("A/big1", 1, b'W'); // ok
+    fake_folder.local_modifier().insert("A/big2", 1, b'W'); // ko
+    fake_folder.local_modifier().insert("A/big3", 1, b'W'); // ko
+    fake_folder.local_modifier().insert("A/big4", 1, b'W'); // ko
+    fake_folder.local_modifier().insert("A/big5", 1, b'W'); // ko
+    fake_folder.local_modifier().insert("A/big6", 1, b'W'); // ok
+    fake_folder.local_modifier().insert("A/big7", 1, b'W'); // ko
+    fake_folder.local_modifier().insert("A/big8", 1, b'W'); // ok
+    fake_folder.local_modifier().insert("B/big8", 1, b'W'); // ko
+
+    assert!(!fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 0);
+    assert_eq!(n_post.load(Ordering::SeqCst), 1);
+    n_put.store(0, Ordering::SeqCst);
+    n_post.store(0, Ordering::SeqCst);
+
+    assert!(!fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 6);
+    assert_eq!(n_post.load(Ordering::SeqCst), 0);
+}
+
+/// Checks whether subsequent large uploads are skipped after a 507 error
+#[test]
+fn test_network_errors_with_bulk_upload() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    set_bulk_upload_capability(&fake_folder);
+
+    // Disable parallel uploads
+    let mut sync_options = nc_sync::SyncOptions::default();
+    sync_options.parallel_network_jobs = 0;
+    // (SyncEngine::minimumFileAgeForUpload is not a sync option upstream.)
+    sync_options.minimum_file_age_for_upload = std::time::Duration::ZERO;
+    sync_options.bulk_upload = true;
+    fake_folder.sync_engine().set_sync_options(sync_options);
+
+    let n_put = Arc::new(AtomicUsize::new(0));
+    let n_post = Arc::new(AtomicUsize::new(0));
+    {
+        let (n_put, n_post) = (n_put.clone(), n_post.clone());
+        fake_folder.set_server_override(move |request, _| {
+            let content_type = content_type_of(request);
+            if request.method() == http::Method::POST {
+                n_post.fetch_add(1, Ordering::SeqCst);
+                if content_type.starts_with("multipart/related; boundary=") {
+                    return Some(nc_testutils::server::error_reply(400, Default::default()).into());
+                }
+                return None;
+            } else if request.method() == http::Method::PUT {
+                n_put.fetch_add(1, Ordering::SeqCst);
+            }
+            None
+        });
+    }
+
+    for f in [
+        "A/big1", "A/big2", "A/big3", "A/big4", "A/big5", "A/big6", "A/big7", "A/big8", "B/big8",
+    ] {
+        fake_folder.local_modifier().insert(f, 1, b'W');
+    }
+
+    assert!(!fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 0);
+    assert_eq!(n_post.load(Ordering::SeqCst), 1);
+    n_put.store(0, Ordering::SeqCst);
+    n_post.store(0, Ordering::SeqCst);
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 9);
+    assert_eq!(n_post.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_network_errors_with_smaller_batch_sizes() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    nc_testutils::set_temp_root(env!("CARGO_TARGET_TMPDIR"));
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    enable_bulk_upload(&mut fake_folder);
+    set_bulk_upload_capability(&fake_folder);
+
+    const FAILING: &[&str] = &["B/small30", "B/small60", "B/big30", "B/big60"];
+    let n_put = Arc::new(AtomicUsize::new(0));
+    let n_post = Arc::new(AtomicUsize::new(0));
+    {
+        let (n_put, n_post) = (n_put.clone(), n_post.clone());
+        fake_folder.set_server_override(move |request, _| {
+            let content_type = content_type_of(request);
+            if request.method() == http::Method::POST {
+                n_post.fetch_add(1, Ordering::SeqCst);
+                if content_type.starts_with("multipart/related; boundary=") {
+                    let json_reply_object = nc_testutils::server::for_each_reply_part(
+                        request,
+                        &content_type,
+                        |all_headers| {
+                            let mut reply = serde_json::Map::new();
+                            // Upstream looks the header up as "X-File-Path" while the
+                            // names are lower-cased: the name is always empty, so no
+                            // part fails.
+                            let file_name = String::from_utf8_lossy(
+                                all_headers.get("X-File-Path").map_or(&[][..], |v| v),
+                            )
+                            .into_owned();
+                            if ends_with_any(&file_name, FAILING) {
+                                reply.insert("error".into(), true.into());
+                                reply.insert("etag".into(), serde_json::Value::Null);
+                                return reply;
+                            } else {
+                                reply.insert("error".into(), false.into());
+                                reply.insert("etag".into(), serde_json::Value::Null);
+                            }
+                            reply
+                        },
+                    );
+                    if !json_reply_object.is_empty() {
+                        let json_reply = serde_json::Value::Object(json_reply_object).to_string();
+                        // FakeJsonErrorReply
+                        return Some(
+                            nc_testutils::server::error_reply(200, json_reply.into()).into(),
+                        );
+                    }
+                    return None;
+                }
+            } else if request.method() == http::Method::PUT {
+                n_put.fetch_add(1, Ordering::SeqCst);
+                let file_name =
+                    nc_testutils::server::file_path_from_url(request.uri()).unwrap_or_default();
+                if ends_with_any(&file_name, FAILING) {
+                    return Some(nc_testutils::server::error_reply(504, Default::default()).into());
+                }
+                return None;
+            }
+            None
+        });
+    }
+
+    let small_size = 500 * 1000; // 0.5 * 1000 * 1000
+    let big_size = 10 * 1000 * 1000;
+
+    for i in 0..120 {
+        fake_folder
+            .local_modifier()
+            .insert(&format!("A/small{i}"), small_size, b'W');
+    }
+
+    assert!(fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 0);
+    assert_eq!(n_post.load(Ordering::SeqCst), 1);
+    n_put.store(0, Ordering::SeqCst);
+    n_post.store(0, Ordering::SeqCst);
+
+    for i in 0..120 {
+        fake_folder
+            .local_modifier()
+            .insert(&format!("B/small{i}"), small_size, b'W');
+        fake_folder
+            .local_modifier()
+            .insert(&format!("B/big{i}"), big_size, b'W');
+    }
+
+    assert!(!fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 120);
+    assert_eq!(n_post.load(Ordering::SeqCst), 1);
+    n_put.store(0, Ordering::SeqCst);
+    n_post.store(0, Ordering::SeqCst);
+
+    assert!(!fake_folder.sync_once());
+    assert_eq!(n_put.load(Ordering::SeqCst), 0);
+    assert_eq!(n_post.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn test_remote_move_failed_insufficient_storage_local_move_rolled_back() {
     remote_move_failed_local_move_rolled_back(507);
@@ -1285,6 +1626,83 @@ fn test_local_invalid_mtime_correction() {
     );
 
     assert!(fake_folder.sync_once());
+
+    // verify that the mtime of "invalid" hasn't changed since the last sync that fixed it
+    assert_eq!(
+        fake_folder
+            .current_local_state()
+            .find("invalid")
+            .unwrap()
+            .last_modified,
+        current_mtime
+    );
+
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+}
+
+#[test]
+fn test_local_invalid_mtime_correction_bulk_upload() {
+    let t = nc_testutils::from_secs;
+    let invalid_mtime = t(0);
+    let recent_mtime = t(1743004783); // 2025-03-26T16:59:43+0100
+
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
+    enable_bulk_upload(&mut fake_folder);
+    assert_eq!(
+        fake_folder.current_local_state(),
+        fake_folder.current_remote_state()
+    );
+    set_bulk_upload_capability(&fake_folder);
+
+    fake_folder.local_modifier().insert("invalid", 64, b'W');
+    fake_folder
+        .local_modifier()
+        .set_mod_time("invalid", invalid_mtime);
+    fake_folder.local_modifier().insert("recent", 64, b'W');
+    fake_folder
+        .local_modifier()
+        .set_mod_time("recent", recent_mtime);
+
+    assert!(fake_folder.sync_once()); // this will use the BulkPropagatorJob
+
+    // "invalid" file had a mtime of 0, so it's been updated to the current time during testing
+    let current_mtime = fake_folder
+        .current_local_state()
+        .find("invalid")
+        .unwrap()
+        .last_modified;
+    assert!(current_mtime > recent_mtime);
+    assert!(
+        fake_folder
+            .current_remote_state()
+            .find("invalid")
+            .unwrap()
+            .last_modified
+            > recent_mtime
+    );
+
+    // "recent" file had a mtime of RECENT_MTIME, so it shouldn't have been changed
+    assert_eq!(
+        fake_folder
+            .current_local_state()
+            .find("recent")
+            .unwrap()
+            .last_modified,
+        recent_mtime
+    );
+    assert_eq!(
+        fake_folder
+            .current_remote_state()
+            .find("recent")
+            .unwrap()
+            .last_modified,
+        recent_mtime
+    );
+
+    assert!(fake_folder.sync_once()); // this will not propagate anything
 
     // verify that the mtime of "invalid" hasn't changed since the last sync that fixed it
     assert_eq!(

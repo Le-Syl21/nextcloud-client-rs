@@ -540,6 +540,12 @@ impl Account {
         self.server_version_int() >= make_server_version(CHECKSUM_RECALCULATE_MIN_MAJOR, 0, 0)
     }
 
+    /// `bulkUploadNeedsLegacyChecksumHeader()`: servers before 32 want an
+    /// `X-File-MD5` header on every part of a bulk upload.
+    pub fn bulk_upload_needs_legacy_checksum_header(&self) -> bool {
+        self.server_version_int() < make_server_version(32, 0, 0)
+    }
+
     pub fn capabilities(&self) -> Capabilities {
         self.state().capabilities.clone()
     }

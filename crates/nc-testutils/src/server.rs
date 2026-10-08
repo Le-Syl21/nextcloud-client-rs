@@ -13,7 +13,7 @@
 //! The remote side: `FakeQNAM` and the `Fake*Reply` classes, as an
 //! in-process [`Transport`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -199,8 +199,10 @@ impl FakeServer {
         let ServerState {
             remote_root,
             upload_root,
+            server_version,
             ..
         } = state;
+        let state_server_version = server_version.clone();
         let info = if is_upload {
             &mut *upload_root
         } else {
@@ -224,8 +226,22 @@ impl FakeServer {
             "DELETE" => delete_reply(info, &file_name).into(),
             "MOVE" if !is_upload => move_reply(info, &request, &file_name).into(),
             "MOVE" => chunk_move_reply(upload_root, remote_root, &request, &file_name).into(),
-            // Bulk upload (FakePutMultiFileReply) is pending (Phase 3).
-            "POST" => status_reply(StatusCode::NOT_IMPLEMENTED).into(),
+            "POST" => {
+                let content_type = request
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                if content_type.starts_with("multipart/related; boundary=") {
+                    put_multi_file_reply(info, &request, &content_type, &state_server_version)
+                        .into()
+                } else {
+                    // Upstream creates no reply for other POSTs (a null
+                    // reply); answer 501 instead.
+                    status_reply(StatusCode::NOT_IMPLEMENTED).into()
+                }
+            }
             "LOCK" | "UNLOCK" => file_lock_reply(info, &request, &file_name).into(),
             // Upstream: Q_UNREACHABLE().
             _ => status_reply(StatusCode::METHOD_NOT_ALLOWED).into(),
@@ -761,3 +777,210 @@ fn file_lock_reply(root: &mut FileInfo, request: &Request, file_name: &str) -> R
 
 #[cfg(test)]
 mod tests;
+
+/// One part of a bulk upload body: its headers (names lower-cased) and its
+/// data.
+pub type MultiPart = (BTreeMap<String, Vec<u8>>, Vec<u8>);
+
+fn split_bytes<'a>(data: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i + sep.len() <= data.len() {
+        if &data[i..i + sep.len()] == sep {
+            out.push(&data[start..i]);
+            i += sep.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push(&data[start..]);
+    out
+}
+
+fn find_bytes(data: &[u8], pattern: &[u8]) -> Option<usize> {
+    data.windows(pattern.len()).position(|w| w == pattern)
+}
+
+/// The parsing shared by `FakePutMultiFileReply::performMultiPart` and
+/// `FakeQNAM::forEachReplyPart`: the boundary is read from the content type
+/// (`multipart/related; boundary="..."`), the payload is split on
+/// `--boundary\r\n` (empty parts skipped) after dropping the closing
+/// delimiter, each part's headers end at the first blank line and its data
+/// at the last `\r\n`.
+pub fn multipart_parts(payload: &[u8], content_type: &str) -> Vec<MultiPart> {
+    // sizeof("multipart/related; boundary="), so the opening quote is skipped too
+    const BOUNDARY_POSITION: usize = "multipart/related; boundary=".len() + 1;
+    let boundary = content_type
+        .get(BOUNDARY_POSITION..content_type.len().saturating_sub(1))
+        .unwrap_or_default();
+    let boundary_value = format!("--{boundary}\r\n");
+    let payload_ref = &payload[..payload.len().saturating_sub(2 + boundary_value.len())];
+    let mut result = Vec::new();
+    for one_part in split_bytes(payload_ref, boundary_value.as_bytes()) {
+        if one_part.is_empty() {
+            continue;
+        }
+        let header_end_position = find_bytes(one_part, b"\r\n\r\n").unwrap_or(one_part.len());
+        let header_part = &one_part[..header_end_position];
+        let body_start = (header_end_position + 4).min(one_part.len());
+        let body_end = one_part.len().saturating_sub(2).max(body_start);
+        let body = one_part[body_start..body_end].to_vec();
+        let mut all_headers = BTreeMap::new();
+        for one_header in split_bytes(header_part, b"\r\n") {
+            let header_parts = split_bytes(one_header, b": ");
+            let name = String::from_utf8_lossy(header_parts[0]).to_lowercase();
+            let value = header_parts.get(1).map(|v| v.to_vec()).unwrap_or_default();
+            all_headers.insert(name, value);
+        }
+        result.push((all_headers, body));
+    }
+    result
+}
+
+/// `FakeQNAM::forEachReplyPart`: calls `reply_function` with the headers of
+/// every part of a bulk upload request and collects its answers that have
+/// both `error` and `etag`, keyed by the part's `x-file-path`.
+pub fn for_each_reply_part(
+    request: &Request,
+    content_type: &str,
+    mut reply_function: impl FnMut(
+        &BTreeMap<String, Vec<u8>>,
+    ) -> serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut full_reply = serde_json::Map::new();
+    let payload: &[u8] = request.body().as_bytes().map_or(&[], |b| b.as_ref());
+    for (all_headers, _) in multipart_parts(payload, content_type) {
+        let reply = reply_function(&all_headers);
+        if reply.contains_key("error") && reply.contains_key("etag") {
+            let path = all_headers
+                .get("x-file-path")
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_default();
+            full_reply.insert(path, serde_json::Value::Object(reply));
+        }
+    }
+    full_reply
+}
+
+/// `FakePutMultiFileReply::performMultiPart`: checks every part's headers
+/// and checksums (`X-File-MD5` is required before server 32 and forbidden
+/// from 32 on, `OC-Checksum` always) like upstream's `Q_ASSERT`s (a panic
+/// here), then creates or updates the files. Returns their paths.
+pub fn put_multi_file_perform(
+    root: &mut FileInfo,
+    payload: &[u8],
+    content_type: &str,
+    server_version: &str,
+) -> Vec<String> {
+    let mut result = Vec::new();
+    for (all_headers, one_part_body) in multipart_parts(payload, content_type) {
+        let header = |name: &str| {
+            all_headers
+                .get(name)
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .unwrap_or_default()
+        };
+        let file_name = header("x-file-path");
+        let modtime = to_long_long(header("x-file-mtime").as_bytes());
+        let expected_md5_checksum = header("x-file-md5");
+        let standard_checksum = header("oc-checksum");
+        assert!(
+            !file_name.is_empty(),
+            "bulk upload part without X-File-Path"
+        );
+        assert!(modtime > 0, "bulk upload part with an invalid X-File-Mtime");
+        let components: Vec<i32> = server_version
+            .split('.')
+            .map(|c| c.parse().unwrap_or(0))
+            .collect();
+        let component = |i: usize| components.get(i).copied().unwrap_or(0);
+        let server_int_version =
+            nc_dav::account::make_server_version(component(0), component(1), component(2));
+        let md5_checksum_mandatory =
+            server_int_version < nc_dav::account::make_server_version(32, 0, 0);
+        if md5_checksum_mandatory {
+            assert!(!expected_md5_checksum.is_empty(), "X-File-MD5 missing");
+        } else {
+            assert!(expected_md5_checksum.is_empty(), "unexpected X-File-MD5");
+        }
+        assert!(!standard_checksum.is_empty(), "OC-Checksum missing");
+        let standard_checksum_components: Vec<&str> = standard_checksum.split(':').collect();
+        assert_eq!(standard_checksum_components.len(), 2);
+        let standard_hash_algorithm: &[u8] = match standard_checksum_components[0] {
+            "MD5" => b"MD5",
+            "SHA256" => b"SHA256",
+            "SHA3_256" => b"SHA3-256",
+            "Adler32" => panic!("Adler32 is not a bulk upload checksum"),
+            _ => b"SHA1",
+        };
+        let checksum = |algorithm: &[u8]| {
+            nc_journal::checksums::ChecksumCalculator::calculate_from_reader(
+                algorithm,
+                one_part_body.as_slice(),
+            )
+            .expect("checksum")
+        };
+        if md5_checksum_mandatory {
+            let computed_md5_checksum = checksum(b"MD5");
+            assert_eq!(
+                expected_md5_checksum.as_bytes(),
+                computed_md5_checksum.as_slice()
+            );
+        }
+        let computed_standard_checksum = checksum(standard_hash_algorithm);
+        assert_eq!(
+            standard_checksum_components[1].as_bytes(),
+            computed_standard_checksum.as_slice()
+        );
+        let size = one_part_body.len() as i64;
+        // Assume that the file is filled with the same character
+        let content_char = one_part_body.first().copied().unwrap_or(b' ');
+        if let Some(fi) = root.find_mut(file_name.as_str()) {
+            fi.size = size;
+            fi.content_char = content_char;
+        } else {
+            root.create(&file_name, size, content_char)
+                .expect("bulk upload into a missing directory");
+        }
+        let fi = root.find_mut(file_name.as_str()).expect("created");
+        fi.last_modified = from_secs(modtime);
+        let path = fi.path();
+        root.find_with(file_name.as_str(), EtagsAction::Invalidate);
+        result.push(path);
+    }
+    result
+}
+
+/// `FakePutMultiFileReply`: performs the upload, then answers 200 with a
+/// JSON object mapping `/<path>` to `{"error": "false", "etag": <etag>}`
+/// (`error` is the string `"false"`, as upstream).
+pub fn put_multi_file_reply(
+    root: &mut FileInfo,
+    request: &Request,
+    content_type: &str,
+    server_version: &str,
+) -> Response {
+    let payload: &[u8] = request.body().as_bytes().map_or(&[], |b| b.as_ref());
+    let all_file_info = put_multi_file_perform(root, payload, content_type, server_version);
+    let mut all_file_info_reply = serde_json::Map::new();
+    for path in all_file_info {
+        let etag = root
+            .find(path.as_str())
+            .map(|fi| fi.etag.clone())
+            .unwrap_or_default();
+        let mut file_info_reply = serde_json::Map::new();
+        file_info_reply.insert("error".to_owned(), serde_json::Value::from("false"));
+        file_info_reply.insert("etag".to_owned(), serde_json::Value::from(etag));
+        all_file_info_reply.insert(
+            format!("/{path}"),
+            serde_json::Value::Object(file_info_reply),
+        );
+    }
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(all_file_info_reply))
+        .unwrap_or_default();
+    response(StatusCode::OK)
+        .body(Body::from(Bytes::from(body)))
+        .unwrap()
+}

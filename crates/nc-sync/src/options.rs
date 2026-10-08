@@ -41,6 +41,14 @@ pub struct SyncOptions {
     /// `SyncEngine::minimumFileAgeForUpload`: files modified more recently
     /// are not uploaded (2 s; `nextcloudcmd` and the tests use 0).
     pub minimum_file_age_for_upload: Duration,
+    /// Port addition, experimental opt-in (default false): lets
+    /// `OwncloudPropagator::isDelayedUploadItem` use its pre-v34 condition,
+    /// so that small new and changed files are uploaded together by the
+    /// bulk upload job (`BulkPropagatorJob`, `POST /remote.php/dav/bulk`)
+    /// when the server announces `dav.bulkupload`. Upstream disables bulk
+    /// upload in v34.0.5 (`isDelayedUploadItem()` returns false), which is
+    /// what the default keeps.
+    pub bulk_upload: bool,
     min_chunk_size: i64,
     max_chunk_size: i64,
     /// Only sync files that match the expression (`None` = upstream's
@@ -60,6 +68,7 @@ impl Default for SyncOptions {
             target_chunk_upload_duration: Duration::from_secs(60),
             parallel_network_jobs: 6,
             minimum_file_age_for_upload: Duration::from_millis(2000),
+            bulk_upload: false,
             min_chunk_size: CHUNK_V2_MIN_CHUNK_SIZE,
             max_chunk_size: CHUNK_V2_MAX_CHUNK_SIZE,
             file_regex: None,

@@ -28,6 +28,7 @@
 //! Qt::QueuedConnection)`) go through a posted-event queue.
 
 pub mod bandwidth;
+mod bulk;
 mod download;
 pub use bandwidth::{BandwidthManager, NetworkLimits};
 pub use download::{
@@ -36,6 +37,7 @@ pub use download::{
 };
 mod local;
 pub use local::is_path_inside_deleted_dir;
+mod put_multi_file;
 mod remote;
 mod upload;
 
@@ -348,6 +350,8 @@ enum NodeKind {
     Item(ItemJob),
     Composite(CompositeJob),
     Directory(DirectoryJob),
+    /// `BulkPropagatorJob`.
+    Bulk(bulk::BulkJob),
 }
 
 struct Node {
@@ -381,6 +385,15 @@ impl Done {
 /// The result of an item job: `None` when the job returned without calling
 /// `done()` (upstream does that when an abort is already requested).
 pub(crate) type Outcome = Option<Done>;
+
+/// What a running future of the propagator delivers.
+pub(crate) enum Completion {
+    /// An item job finished.
+    Item(Outcome),
+    /// The `POST` of a bulk upload job finished: the reply and the size of
+    /// the request body.
+    BulkPut(Box<nc_dav::Reply>, i64),
+}
 
 /// Signals of the propagator other than `itemCompleted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -786,6 +799,13 @@ pub(crate) struct JobCtx {
 enum PostedEvent {
     /// `PropagatorCompositeJob::finalize` queued from `scheduleSelfOrChild`.
     CompositeFinalize(JobId),
+    /// A checksum of a bulk upload file is computed (`ComputeChecksum::done`).
+    BulkChecksum(
+        JobId,
+        SyncFileItemPtr,
+        bulk::UploadFileInfo,
+        bulk::ChecksumStep,
+    ),
 }
 
 /// Callbacks of the propagator's signals.
@@ -809,10 +829,16 @@ pub struct Propagator {
     pub(crate) shared: Rc<Shared>,
     nodes: Vec<Node>,
     root: JobId,
-    futures: FuturesUnordered<LocalBoxFuture<'static, (JobId, Outcome)>>,
+    futures: FuturesUnordered<LocalBoxFuture<'static, (JobId, Completion)>>,
     posted: VecDeque<PostedEvent>,
     finished_emitted: Option<Status>,
     pub callbacks: PropagatorCallbacks,
+    /// `_delayedTasks`: the uploads left to the bulk upload job.
+    delayed_tasks: VecDeque<SyncFileItemPtr>,
+    /// `_scheduleDelayedTasks`.
+    schedule_delayed_tasks: bool,
+    /// `_bulkUploadBlackList`: a reference to the sync engine's set.
+    bulk_upload_black_list: Rc<RefCell<HashSet<String>>>,
 }
 
 fn poll_once<F: Future + ?Sized + Unpin>(fut: &mut F) -> Poll<F::Output> {
@@ -869,7 +895,17 @@ impl Propagator {
             posted: VecDeque::new(),
             finished_emitted: None,
             callbacks: PropagatorCallbacks::default(),
+            delayed_tasks: VecDeque::new(),
+            schedule_delayed_tasks: false,
+            bulk_upload_black_list: Rc::new(RefCell::new(HashSet::new())),
         }
+    }
+
+    /// Shares the sync engine's bulk upload blacklist (upstream passes
+    /// `SyncEngine::_bulkUploadBlackList` by reference to the constructor),
+    /// which outlives the propagator.
+    pub fn set_bulk_upload_black_list(&mut self, list: Rc<RefCell<HashSet<String>>>) {
+        self.bulk_upload_black_list = list;
     }
 
     pub fn another_sync_needed(&self) -> bool {
@@ -982,6 +1018,10 @@ impl Propagator {
             | Instruction::Sync => {
                 if direction != Direction::Up {
                     ItemKind::Download
+                } else if !delete_existing && self.is_delayed_upload_item(item) {
+                    // pushDelayedUploadTask
+                    self.delayed_tasks.push_back(item.clone());
+                    return None;
                 } else if size > self.shared.options.initial_chunk_size
                     && self.shared.account.capabilities().chunking_ng()
                 {
@@ -1124,6 +1164,9 @@ impl Propagator {
     /// `OwncloudPropagator::start(items)`: builds the job tree.
     pub fn start(&mut self, mut items: SyncFileItemVector) {
         self.shared.abort_requested.set(false);
+        // resetDelayedUploadTasks
+        self.schedule_delayed_tasks = false;
+        self.delayed_tasks.clear();
         // This builds all the jobs needed for the propagation.
         if let Some(regex) = self.shared.options.file_regex() {
             let mut names: HashSet<String> = HashSet::new();
@@ -1365,6 +1408,9 @@ impl Propagator {
             while let Some(ev) = self.posted.pop_front() {
                 match ev {
                     PostedEvent::CompositeFinalize(c) => self.composite_finalize(c),
+                    PostedEvent::BulkChecksum(id, item, file, step) => {
+                        self.bulk_checksum_done(id, item, file, step);
+                    }
                 }
                 self.drain_events();
             }
@@ -1449,10 +1495,12 @@ impl Propagator {
         }
     }
 
-    fn handle_outcome(&mut self, id: JobId, outcome: Outcome) {
+    fn handle_outcome(&mut self, id: JobId, completion: Completion) {
         self.apply_tree_ops();
-        if let Some(done) = outcome {
-            self.item_done(id, done);
+        match completion {
+            Completion::Item(Some(done)) => self.item_done(id, done),
+            Completion::Item(None) => {}
+            Completion::BulkPut(reply, sent) => self.bulk_put_finished(id, *reply, sent),
         }
         self.drain_events();
     }
@@ -1509,6 +1557,7 @@ impl Propagator {
                 }
                 Parallelism::FullParallelism
             }
+            NodeKind::Bulk(_) => Parallelism::FullParallelism,
             NodeKind::Directory(d) => {
                 if d.root.is_some() {
                     // the root directory parallelism isn't important
@@ -1532,6 +1581,7 @@ impl Propagator {
         match &self.nodes[id].kind {
             NodeKind::Item(_) => self.item_schedule_self_or_child(id),
             NodeKind::Composite(_) => self.composite_schedule_self_or_child(id),
+            NodeKind::Bulk(_) => self.bulk_schedule_self_or_child(id),
             NodeKind::Directory(d) => {
                 if d.root.is_some() {
                     self.root_schedule_self_or_child(id)
@@ -1595,8 +1645,10 @@ impl Propagator {
                 break;
             };
             let Some(job) = self.create_job(&next_task) else {
-                let t = next_task.borrow();
-                log::warn!(target: "nextcloud.sync.propagator.directory", "Useless task found for file {} instruction {:?}", t.destination(), t.instruction);
+                if !self.is_delayed_upload_item(&next_task) {
+                    let t = next_task.borrow();
+                    log::warn!(target: "nextcloud.sync.propagator.directory", "Useless task found for file {} instruction {:?}", t.destination(), t.instruction);
+                }
                 continue;
             };
             self.composite_append_job(id, job);
@@ -1707,18 +1759,22 @@ impl Propagator {
         self.schedule_self_or_child(sub_jobs)
     }
 
-    /// `PropagateRootDirectory::scheduleSelfOrChild` (no delayed tasks).
+    /// `PropagateRootDirectory::scheduleSelfOrChild`.
     fn root_schedule_self_or_child(&mut self, id: JobId) -> bool {
         if self.nodes[id].state == JobState::Finished {
             return false;
         }
-        if self.directory_schedule_self_or_child(id) {
+        if self.directory_schedule_self_or_child(id) && self.delayed_tasks.is_empty() {
             return true;
         }
         // Important: Finish _subJobs before scheduling any deletes.
         let sub_jobs = self.directory(id).sub_jobs;
         if self.nodes[sub_jobs].state != JobState::Finished {
             return false;
+        }
+        if !self.delayed_tasks.is_empty() {
+            log::debug!(target: "nextcloud.sync.propagator.root.directory", "root folder has more delayed jobs to do");
+            return self.schedule_delayed_jobs(id);
         }
         let dir_deletion_jobs = self
             .directory(id)
@@ -1855,8 +1911,12 @@ impl Propagator {
         self.emit_job_finished(id, status);
     }
 
-    /// `PropagateRootDirectory::slotSubJobsFinished` (no delayed tasks).
+    /// `PropagateRootDirectory::slotSubJobsFinished`.
     fn root_sub_jobs_finished(&mut self, id: JobId, status: Status) {
+        if !self.delayed_tasks.is_empty() {
+            self.schedule_delayed_jobs(id);
+            return;
+        }
         if status == Status::FatalError {
             if self.nodes[id].state != JobState::Finished {
                 // Synchronously abort
@@ -1977,7 +2037,8 @@ impl Propagator {
                 }
             }
             Poll::Pending => {
-                self.futures.push(Box::pin(async move { (id, fut.await) }));
+                self.futures
+                    .push(Box::pin(async move { (id, Completion::Item(fut.await)) }));
             }
         }
     }

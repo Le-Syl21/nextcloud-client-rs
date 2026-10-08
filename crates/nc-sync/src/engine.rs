@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Port of upstream `src/libsync/syncengine.{h,cpp}` (nextcloud/desktop
-// v34.0.5), without the GUI-only parts (status tracker, virtual files,
-// end-to-end encryption). The touched files and the scheduled sync run
+// v34.0.5), without the GUI-only parts (virtual files, end-to-end
+// encryption). The status tracker is in `sync_file_status_tracker.rs`. The touched files and the scheduled sync run
 // timers are in `touched_files.rs` and `scheduled_sync.rs`.
 
 //! `SyncEngine`: runs one sync (discovery, reconcile, propagation) of a
@@ -36,6 +36,7 @@ use crate::options::SyncOptions;
 use crate::progress::{ProgressInfo, ProgressStatus};
 use crate::propagator::{AbortHandle, Propagator, PropagatorEvent};
 use crate::scheduled_sync::ScheduledSyncTimers;
+use crate::sync_file_status_tracker::SyncFileStatusTracker;
 use crate::touched_files::TouchedFiles;
 
 const LOG: &str = "nextcloud.sync.engine";
@@ -86,6 +87,31 @@ pub struct EngineCallbacks {
     /// `rootEtag(etag, time)`: the etag of the remote root, as soon as the
     /// discovery received it (the time is when it was received).
     pub root_etag: Option<Box<dyn FnMut(&[u8], std::time::SystemTime)>>,
+    /// `_syncFileStatusTracker`: connected to the signals in its
+    /// constructor upstream, so its slots run before the callbacks above.
+    pub(crate) status_tracker: Option<Rc<RefCell<SyncFileStatusTracker>>>,
+}
+
+/// The status tracker, if any (cloned out so that no borrow of the
+/// callbacks is held while it runs).
+fn status_tracker(
+    cbs: &Rc<RefCell<EngineCallbacks>>,
+) -> Option<Rc<RefCell<SyncFileStatusTracker>>> {
+    cbs.borrow().status_tracker.clone()
+}
+
+/// `itemCompleted(item, category)`: the status tracker, then the callback.
+fn emit_item_completed(
+    cbs: &Rc<RefCell<EngineCallbacks>>,
+    item: &SyncFileItemPtr,
+    cat: ErrorCategory,
+) {
+    if let Some(t) = status_tracker(cbs) {
+        t.borrow_mut().slot_item_completed(item);
+    }
+    if let Some(cb) = cbs.borrow_mut().item_completed.as_mut() {
+        cb(item, cat);
+    }
 }
 
 /// State shared with the discovery and propagator callbacks.
@@ -173,6 +199,9 @@ pub struct SyncEngine {
     touched_files: Rc<RefCell<TouchedFiles>>,
     /// `_scheduledSyncTimers` / `_filesScheduledForLaterSync`.
     scheduled_sync_timers: ScheduledSyncTimers,
+    /// `_bulkUploadBlackList`: files whose bulk upload failed, uploaded
+    /// alone by the next syncs (kept for the engine's lifetime).
+    bulk_upload_black_list: Rc<RefCell<HashSet<String>>>,
 }
 
 fn emit_sync_error(cbs: &Rc<RefCell<EngineCallbacks>>, msg: &str, cat: ErrorCategory) {
@@ -193,13 +222,23 @@ impl SyncEngine {
         journal: Arc<SyncJournalDb>,
     ) -> Self {
         debug_assert!(local_path.ends_with('/'));
+        let excluded_files = Rc::new(RefCell::new(ExcludedFiles::new(local_path)));
+        let status_tracker = Rc::new(RefCell::new(SyncFileStatusTracker::new(
+            local_path,
+            journal.clone(),
+            excluded_files.clone(),
+        )));
+        let callbacks = EngineCallbacks {
+            status_tracker: Some(status_tracker),
+            ..EngineCallbacks::default()
+        };
         Self {
             account,
             local_path: local_path.to_owned(),
             remote_path: remote_path.to_owned(),
             journal,
             sync_options,
-            excluded_files: Rc::new(RefCell::new(ExcludedFiles::new(local_path))),
+            excluded_files,
             ignore_hidden_files: false,
             local_discovery_style: LocalDiscoveryStyle::FilesystemOnly,
             local_discovery_paths: Vec::new(),
@@ -213,11 +252,12 @@ impl SyncEngine {
             root_file_id: Rc::new(std::cell::Cell::new(None)),
             prompt_delete_files: false,
             delete_files_threshold: 100,
-            callbacks: Rc::new(RefCell::new(EngineCallbacks::default())),
+            callbacks: Rc::new(RefCell::new(callbacks)),
             discovery_abort: CancellationToken::new(),
             propagator_abort: Rc::new(RefCell::new(None)),
             touched_files: Rc::new(RefCell::new(TouchedFiles::new())),
             scheduled_sync_timers: ScheduledSyncTimers::new(),
+            bulk_upload_black_list: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -280,6 +320,14 @@ impl SyncEngine {
 
     pub fn set_ignore_hidden_files(&mut self, ignore: bool) {
         self.ignore_hidden_files = ignore;
+        if let Some(t) = status_tracker(&self.callbacks) {
+            t.borrow_mut().set_ignore_hidden_files(ignore);
+        }
+    }
+
+    /// `syncFileStatusTracker()`.
+    pub fn sync_file_status_tracker(&self) -> Rc<RefCell<SyncFileStatusTracker>> {
+        status_tracker(&self.callbacks).expect("the engine has a status tracker")
     }
 
     pub fn ignore_hidden_files(&self) -> bool {
@@ -394,6 +442,11 @@ impl SyncEngine {
         // connected in the constructor: store the time of the last sync
         self.journal
             .key_value_store_set("last_sync", crate::utility::current_secs_since_epoch());
+        if let Some(t) = status_tracker(&self.callbacks) {
+            let mut t = t.borrow_mut();
+            t.slot_sync_finished();
+            t.slot_sync_engine_running_changed();
+        }
         if let Some(cb) = self.callbacks.borrow_mut().finished.as_mut() {
             cb(success);
         }
@@ -588,6 +641,11 @@ impl SyncEngine {
                     .borrow_mut()
                     .remnant_read_only_folders
                     .push(item.clone());
+            }));
+        }
+        if let Some(t) = status_tracker(&cbs) {
+            discovery.callbacks.silently_excluded = Some(Box::new(move |path| {
+                t.borrow_mut().slot_add_silently_excluded(path);
             }));
         }
         {
@@ -840,6 +898,9 @@ impl SyncEngine {
                 .all(|w| item_ordering(&w[0].borrow(), &w[1].borrow()).is_le())
         );
         // To announce the beginning of the sync
+        if let Some(t) = status_tracker(&cbs) {
+            t.borrow_mut().slot_about_to_propagate(&items);
+        }
         if let Some(cb) = cbs.borrow_mut().about_to_propagate.as_mut() {
             cb(&items);
         }
@@ -855,6 +916,7 @@ impl SyncEngine {
             self.journal.clone(),
             self.sync_options.clone(),
         );
+        propagator.set_bulk_upload_black_list(self.bulk_upload_black_list.clone());
         {
             let cbs2 = cbs.clone();
             let state2 = state.clone();
@@ -865,9 +927,7 @@ impl SyncEngine {
                     .progress
                     .set_progress_complete(&item.borrow());
                 emit_transmission_progress(&cbs2, &state2, None);
-                if let Some(cb) = cbs2.borrow_mut().item_completed.as_mut() {
-                    cb(item, cat);
-                }
+                emit_item_completed(&cbs2, item, cat);
             }));
         }
         {
@@ -925,10 +985,13 @@ impl SyncEngine {
         self.delete_stale_error_blacklist_entries(&items);
         self.journal.commit("post stale entry removal", true);
         // Emit the started signal only after the propagator has been set up.
-        if state.borrow().needs_update
-            && let Some(cb) = cbs.borrow_mut().started.as_mut()
-        {
-            cb();
+        if state.borrow().needs_update {
+            if let Some(t) = status_tracker(&cbs) {
+                t.borrow_mut().slot_sync_engine_running_changed();
+            }
+            if let Some(cb) = cbs.borrow_mut().started.as_mut() {
+                cb();
+            }
         }
         *self.propagator_abort.borrow_mut() = Some(propagator.abort_handle());
         propagator.start(items);
@@ -1284,9 +1347,7 @@ fn slot_item_discovered(
                     i.instruction = Instruction::Error;
                     i.error_string = format!("Could not update file metadata: {file_path}");
                 }
-                if let Some(cb) = cbs.borrow_mut().item_completed.as_mut() {
-                    cb(item, ErrorCategory::GenericError);
-                }
+                emit_item_completed(cbs, item, ErrorCategory::GenericError);
                 return;
             }
             // Updating the db happens on success
@@ -1299,9 +1360,7 @@ fn slot_item_discovered(
                 log::warn!(target: LOG, "Could not set file record to local DB {}", rec.path_str());
             }
             // This might have changed the shared flag, so we must notify SyncFileStatusTracker for example
-            if let Some(cb) = cbs.borrow_mut().item_completed.as_mut() {
-                cb(item, ErrorCategory::NoError);
-            }
+            emit_item_completed(cbs, item, ErrorCategory::NoError);
         } else {
             // Update only outdated data from the disk.
             let i = item.borrow();
@@ -1328,6 +1387,10 @@ fn slot_item_discovered(
     } else if instruction == Instruction::None {
         state.borrow_mut().has_none_files = true;
         let file = item.borrow().file.clone();
+        if let Some(t) = status_tracker(cbs) {
+            t.borrow_mut()
+                .slot_check_and_remove_silently_excluded(&file);
+        }
         if account.capabilities().upload_conflict_files()
             && nc_journal::utility::is_conflict_file(&file)
         {

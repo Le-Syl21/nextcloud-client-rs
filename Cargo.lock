@@ -1599,6 +1599,7 @@ dependencies = [
 name = "nc-sync"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "bytes",
  "fastrand",
  "futures-util",
