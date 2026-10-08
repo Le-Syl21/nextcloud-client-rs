@@ -10,10 +10,9 @@
 //! Office / LibreOffice / AutoCAD / Adobe / Affinity lock file detection.
 //!
 //! The folder watcher uses these to report the documents that an
-//! application opened (lock file created) or closed (lock file removed).
-//! They belong to `OCC::FileSystem` upstream (`src/libsync`) and are also used
-//! by `SyncEngine` (`lockFileDetected`); they live here until the sync engine
-//! needs them, then they can move to `nc_sync::filesystem` unchanged.
+//! application opened (lock file created) or closed (lock file removed);
+//! the sync engine uses them to find the lock file of a newly uploaded
+//! document (`SyncEngine::detectFileLock`, `lockFileDetected`).
 
 use std::fs;
 use std::path::Path;

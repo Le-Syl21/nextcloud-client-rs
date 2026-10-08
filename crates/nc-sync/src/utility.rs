@@ -21,6 +21,11 @@ pub fn qstring_to_int(s: &str) -> i64 {
     s.trim().parse::<i32>().map(i64::from).unwrap_or(0)
 }
 
+/// `QString::toInt(&ok)`.
+pub fn qstring_to_int_ok(s: &str) -> Option<i64> {
+    s.trim().parse::<i32>().ok().map(i64::from)
+}
+
 /// `QString::toLongLong()`: 0 when not a valid 64-bit integer.
 pub fn qstring_to_long_long(s: &str) -> i64 {
     s.trim().parse::<i64>().unwrap_or(0)

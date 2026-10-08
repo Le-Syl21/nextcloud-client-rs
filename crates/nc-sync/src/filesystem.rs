@@ -18,6 +18,15 @@ use std::path::Path;
 
 use nc_journal::csync::ItemType;
 
+pub mod lock_file;
+
+pub use lock_file::{
+    FileLockingInfo, FileLockingType, file_path_lock_file_pattern_match,
+    find_all_lock_files_in_dir, is_matching_adobe_document_extension,
+    is_matching_affinity_document_extension, is_matching_autocad_document_extension,
+    is_matching_office_file_extension, lock_file_target_file_path,
+};
+
 /// `csync_file_stat_t`, the fields the sync engine reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileStat {
@@ -314,6 +323,17 @@ pub enum FolderPermissions {
 
 /// `FileSystem::setFolderPermissions` (Unix).
 pub fn set_folder_permissions(path: &str, permissions: FolderPermissions) -> bool {
+    set_folder_permissions_changed(path, permissions, &mut false)
+}
+
+/// `FileSystem::setFolderPermissions(path, permissions, &permissionsChanged)`:
+/// `permissions_changed` tells whether the mode was modified.
+pub fn set_folder_permissions_changed(
+    path: &str,
+    permissions: FolderPermissions,
+    permissions_changed: &mut bool,
+) -> bool {
+    *permissions_changed = false;
     let Some(current) = mode(path) else {
         log::warn!(target: "nextcloud.sync.filesystem", "exception when modifying folder permissions - path: {path}");
         return false;
@@ -322,8 +342,12 @@ pub fn set_folder_permissions(path: &str, permissions: FolderPermissions) -> boo
         FolderPermissions::ReadOnly => current & !0o222,
         FolderPermissions::ReadWrite => (current & !0o002) | 0o200,
     };
-    if new != current && fs::set_permissions(path, fs::Permissions::from_mode(new)).is_err() {
-        return false;
+    if new != current {
+        if fs::set_permissions(path, fs::Permissions::from_mode(new)).is_err() {
+            log::warn!(target: "nextcloud.sync.filesystem", "exception when modifying folder permissions - path: {path}");
+            return false;
+        }
+        *permissions_changed = true;
     }
     true
 }

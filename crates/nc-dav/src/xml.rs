@@ -465,6 +465,28 @@ pub fn parse_request_etag(xml: &[u8]) -> Vec<u8> {
     etag
 }
 
+/// The `QXmlStreamReader` loop of `LockFileJob::handleReply`: for every
+/// start element whose local name (any namespace) is one of `names`, its
+/// `readElementText()`, in document order. Other elements are entered.
+/// Reading stops at the first tokenizer error, like `atEnd()` does.
+pub fn read_element_texts(xml: &[u8], names: &[&str]) -> Vec<(String, String)> {
+    let (tokens, _) = tokenize(xml);
+    let mut cur = Cursor {
+        tokens: &tokens,
+        pos: 0,
+    };
+    let mut result = Vec::new();
+    while let Some(t) = cur.next() {
+        if let Token::Start { name, .. } = t
+            && names.contains(&name.as_str())
+        {
+            let text = cur.read_element_text();
+            result.push((name.clone(), text));
+        }
+    }
+    result
+}
+
 /// `PropfindJob::processPropfindDomDocument`: every child element of every
 /// `prop` element (any namespace, any depth) mapped to its text. Later
 /// values win. Returns an error when the document is not well-formed.

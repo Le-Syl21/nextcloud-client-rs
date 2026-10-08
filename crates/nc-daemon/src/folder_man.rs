@@ -1060,6 +1060,28 @@ impl FolderMan {
         self.run_actions(id, actions);
     }
 
+    /// A folder's own `startSync()` call (the engine's scheduled sync run
+    /// timers, the lock file requests): it bypasses the queue upstream; here
+    /// the folder is queued when another folder is syncing, since only one
+    /// sync runs at a time.
+    fn start_folder_sync_directly(&mut self, id: FolderId, reason: &str) {
+        if self.is_any_sync_running() {
+            self.schedule_folder(id);
+            return;
+        }
+        let factory = self.watcher_factory.clone();
+        let actions = match self.folder_by_id_mut(id) {
+            Some(f) => {
+                log::info!(target: LOG, "Rescanning {} {reason}", f.alias());
+                f.register_folder_watcher(&factory);
+                f.start_sync()
+            }
+            None => return,
+        };
+        self.current_sync_folder = Some(id);
+        self.run_actions(id, actions);
+    }
+
     fn handle_folder_event(&mut self, id: FolderId, event: FolderEvent) {
         if self.folder_by_id(id).is_none() {
             // A removed folder: its engine comes back once, and the next
@@ -1098,21 +1120,22 @@ impl FolderMan {
                 if !fire {
                     return;
                 }
-                if self.is_any_sync_running() {
-                    self.schedule_folder(id);
-                    return;
+                self.start_folder_sync_directly(id, "for files whose lock expired");
+                return;
+            }
+            FolderEvent::LockFileStateFinished(finished) => {
+                let start_sync = self
+                    .folder_by_id_mut(id)
+                    .is_some_and(|f| f.lock_file_state_finished(&finished));
+                if start_sync {
+                    self.start_folder_sync_directly(id, "after a file lock change");
                 }
-                let factory = self.watcher_factory.clone();
-                let actions = match self.folder_by_id_mut(id) {
-                    Some(f) => {
-                        log::info!(target: LOG, "Rescanning {} for files whose lock expired", f.alias());
-                        f.register_folder_watcher(&factory);
-                        f.start_sync()
-                    }
-                    None => return,
-                };
-                self.current_sync_folder = Some(id);
-                self.run_actions(id, actions);
+                return;
+            }
+            FolderEvent::LockFileDetected(lock_file) => {
+                if let Some(f) = self.folder_by_id_mut(id) {
+                    f.slot_lock_file_detected(&lock_file);
+                }
                 return;
             }
             e => e,
@@ -1121,7 +1144,10 @@ impl FolderMan {
             return;
         };
         let actions = match event {
-            FolderEvent::EtagJobFinished(..) | FolderEvent::ScheduledSyncTimer(_) => Vec::new(),
+            FolderEvent::EtagJobFinished(..)
+            | FolderEvent::ScheduledSyncTimer(_)
+            | FolderEvent::LockFileStateFinished(_)
+            | FolderEvent::LockFileDetected(_) => Vec::new(),
             FolderEvent::ScheduleSelfTimer(g) => {
                 if f.schedule_self_timer_fired(g) {
                     vec![FolderAction::Schedule]

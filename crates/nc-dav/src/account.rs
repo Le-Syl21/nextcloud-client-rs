@@ -402,6 +402,10 @@ struct State {
     dav_display_name: String,
     server_version: String,
     capabilities: Capabilities,
+    /// `_lockStatusChangeInprogress`: the lock state changes
+    /// (`SyncFileItem::LockStatus` values) requested by `setLockFileState`
+    /// and still running, by server-relative path.
+    lock_status_change_in_progress: std::collections::HashMap<String, Vec<i64>>,
 }
 
 /// The account (`Account`). Shared (`Arc`) by the engine and its jobs.
@@ -544,6 +548,47 @@ impl Account {
     /// `X-File-MD5` header on every part of a bulk upload.
     pub fn bulk_upload_needs_legacy_checksum_header(&self) -> bool {
         self.server_version_int() < make_server_version(32, 0, 0)
+    }
+
+    /// The first half of `setLockFileState`: registers a lock state change
+    /// of `server_relative_path` in `_lockStatusChangeInprogress`. Returns
+    /// false (and registers nothing) when a change to the same state is
+    /// already running ("Already running a job with lockStatus").
+    pub fn add_lock_status_change_in_progress(
+        &self,
+        server_relative_path: &str,
+        lock_status: i64,
+    ) -> bool {
+        let mut state = self.state();
+        let in_progress = state
+            .lock_status_change_in_progress
+            .entry(server_relative_path.to_owned())
+            .or_default();
+        if in_progress.contains(&lock_status) {
+            return false;
+        }
+        in_progress.push(lock_status);
+        true
+    }
+
+    /// `removeLockStatusChangeInprogress(serverRelativePath, lockStatus)`.
+    pub fn remove_lock_status_change_in_progress(
+        &self,
+        server_relative_path: &str,
+        lock_status: i64,
+    ) {
+        let mut state = self.state();
+        if let Some(in_progress) = state
+            .lock_status_change_in_progress
+            .get_mut(server_relative_path)
+        {
+            in_progress.retain(|s| *s != lock_status);
+            if in_progress.is_empty() {
+                state
+                    .lock_status_change_in_progress
+                    .remove(server_relative_path);
+            }
+        }
     }
 
     pub fn capabilities(&self) -> Capabilities {
