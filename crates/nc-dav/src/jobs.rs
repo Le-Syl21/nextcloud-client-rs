@@ -70,6 +70,11 @@ pub struct JobOptions {
     /// `QNetworkRequest::setDecompressedSafetyCheckThreshold` (`None`: Qt's
     /// default of 10 MiB).
     pub decompressed_safety_check_threshold: Option<i64>,
+    /// `setIgnoreCredentialFailure(true)`: a 401 is left to the caller and
+    /// does not call `Account::handleInvalidCredentials()`.
+    pub ignore_credential_failure: bool,
+    /// `setFollowRedirects(false)` when false: a 3xx reply is returned as is.
+    pub follow_redirects: bool,
 }
 
 impl Default for JobOptions {
@@ -79,6 +84,8 @@ impl Default for JobOptions {
             timeout: http_timeout(),
             dont_add_credentials: false,
             decompressed_safety_check_threshold: None,
+            ignore_credential_failure: false,
+            follow_redirects: true,
         }
     }
 }
@@ -141,7 +148,20 @@ fn build_job_request(
         req.extensions_mut()
             .insert(crate::transport::DecompressedSafetyCheckThreshold(t));
     }
+    mark_request(&mut req, opts);
     (req, request_id)
+}
+
+/// The request attributes of `opts` that every job sets the same way.
+fn mark_request(req: &mut crate::transport::Request, opts: &JobOptions) {
+    if opts.ignore_credential_failure {
+        req.extensions_mut()
+            .insert(crate::transport::IgnoreCredentialFailure);
+    }
+    if !opts.follow_redirects {
+        req.extensions_mut()
+            .insert(crate::transport::NoFollowRedirects);
+    }
 }
 
 /// `HttpError` (`HttpResult` failure): HTTP code (0 if none) and message.
@@ -623,13 +643,36 @@ pub async fn json_api(
     path: &str,
     opts: &JobOptions,
 ) -> (Option<serde_json::Value>, i32, Reply) {
+    json_api_request(account, Method::GET, path, None, opts).await
+}
+
+/// [`json_api`] with another verb (`setVerb`) and a JSON body (`setBody`,
+/// sent as `application/json`).
+pub async fn json_api_request(
+    account: &Account,
+    verb: Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    opts: &JobOptions,
+) -> (Option<serde_json::Value>, i32, Reply) {
     let mut p = path.to_owned();
     p.push_str(if p.contains('?') {
         "&format=json"
     } else {
         "?format=json"
     });
-    let headers = header_map(&[("OCS-APIREQUEST", b"true".to_vec())]);
+    let mut headers = header_map(&[("OCS-APIREQUEST", b"true".to_vec())]);
+    // QJsonDocument::toJson(): indented.
+    let body = match body.and_then(|b| serde_json::to_vec_pretty(b).ok()) {
+        Some(bytes) if !bytes.is_empty() => {
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            Body::from(bytes)
+        }
+        _ => Body::empty(),
+    };
     // The query is kept out of the percent-encoded path.
     let (base, query) = p.split_once('?').unwrap_or((&p, ""));
     let path = account.account_path_for(base);
@@ -644,7 +687,8 @@ pub async fn json_api(
     let reply = match uri_str.parse::<http::Uri>() {
         Ok(uri) => {
             let url = uri.to_string();
-            let (req, request_id) = account.build_request(Method::GET, uri, headers, Body::empty());
+            let (mut req, request_id) = account.build_request(verb, uri, headers, body);
+            mark_request(&mut req, opts);
             match guarded(opts, async {
                 let resp = account.send(req).await?;
                 let (parts, body) = resp.into_parts();
@@ -722,6 +766,9 @@ pub async fn check_redirect_cost_free_url(
         account.build_request(Method::GET, uri, HeaderMap::new(), Body::empty());
     req.extensions_mut()
         .insert(crate::transport::NoFollowRedirects);
+    // CheckRedirectCostFreeUrlJob: setIgnoreCredentialFailure(true)
+    req.extensions_mut()
+        .insert(crate::transport::IgnoreCredentialFailure);
     let result = guarded(opts, async {
         let resp = account.send(req).await?;
         let (parts, body) = resp.into_parts();
@@ -751,6 +798,11 @@ pub async fn check_server(
     account: &Account,
     opts: &JobOptions,
 ) -> Result<serde_json::Value, Reply> {
+    // CheckServerJob: setIgnoreCredentialFailure(true)
+    let opts = &JobOptions {
+        ignore_credential_failure: true,
+        ..opts.clone()
+    };
     let reply = send(
         account,
         Method::GET,

@@ -332,3 +332,9 @@ mod tests {
 /// is returned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoFollowRedirects;
+
+/// A request extension marking a job that handles a credential failure
+/// itself (`AbstractNetworkJob::setIgnoreCredentialFailure(true)`): its 401
+/// does not call [`crate::Account::handle_invalid_credentials`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IgnoreCredentialFailure;

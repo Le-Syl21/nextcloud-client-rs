@@ -129,6 +129,14 @@ impl Capabilities {
         }
     }
 
+    /// `isClientStatusReportingEnabled()`: `security_guard.diagnostics`.
+    pub fn is_client_status_reporting_enabled(&self) -> bool {
+        let Some(security_guard) = self.caps.get("security_guard") else {
+            return false;
+        };
+        to_bool(security_guard.get("diagnostics"))
+    }
+
     pub fn raw(&self) -> &Map<String, Value> {
         &self.caps
     }

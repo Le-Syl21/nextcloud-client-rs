@@ -18,9 +18,28 @@ use http::{HeaderMap, HeaderValue, Method};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::capabilities::{Capabilities, PushNotificationTypes};
+use crate::client_status::{ClientStatusReporter, ClientStatusReportingStatus};
 use crate::http_client::HttpClientOptions;
 use crate::push_notifications::{PushNotifications, PushNotificationsEvent};
-use crate::transport::{Body, Request, Response, Transport, TransportError};
+use crate::transport::{
+    Body, IgnoreCredentialFailure, Request, Response, Transport, TransportError,
+};
+
+/// What `Account::handleInvalidCredentials()` notifies (see
+/// [`Account::set_invalid_credentials_handler`]).
+pub type InvalidCredentialsHandler = Arc<dyn Fn() + Send + Sync>;
+
+/// Creates the `ClientStatusReporting` of an account (its database and its
+/// periodic sender); `None` when it cannot be set up.
+pub type ClientStatusReportingFactory =
+    Arc<dyn Fn(&Arc<Account>) -> Option<Arc<dyn ClientStatusReporter>> + Send + Sync>;
+
+#[derive(Default)]
+struct StatusReportingState {
+    /// Set by [`Account::enable_client_status_reporting`].
+    factory: Option<(ClientStatusReportingFactory, Weak<Account>)>,
+    reporter: Option<Arc<dyn ClientStatusReporter>>,
+}
 
 /// Characters `QUrl` percent-encodes in a path when sending it.
 pub const PATH_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -416,6 +435,8 @@ pub struct Account {
     state: Mutex<State>,
     push: Mutex<PushState>,
     push_events: tokio::sync::broadcast::Sender<AccountPushEvent>,
+    invalid_credentials: Mutex<Option<InvalidCredentialsHandler>>,
+    status_reporting: Mutex<StatusReportingState>,
 }
 
 impl Drop for Account {
@@ -460,6 +481,8 @@ impl Account {
             }),
             push: Mutex::new(PushState::default()),
             push_events: tokio::sync::broadcast::channel(PUSH_EVENT_CHANNEL_CAPACITY).0,
+            invalid_credentials: Mutex::new(None),
+            status_reporting: Mutex::new(StatusReportingState::default()),
         }
     }
 
@@ -487,6 +510,36 @@ impl Account {
 
     pub fn credentials(&self) -> Credentials {
         self.state().credentials.clone()
+    }
+
+    /// `credentials()->forgetSensitiveData()`: the password is dropped, the
+    /// user is kept.
+    pub fn forget_sensitive_data(&self) {
+        self.state().credentials.password.clear();
+    }
+
+    /// Who is told when a request fails because of the credentials (the
+    /// connections to `Account::invalidCredentials` and the app password
+    /// retrieval of `handleInvalidCredentials()`). Called synchronously
+    /// when the reply arrives, before the job sees it, like upstream's
+    /// `AbstractNetworkJob::slotFinished`.
+    pub fn set_invalid_credentials_handler(&self, handler: Option<InvalidCredentialsHandler>) {
+        *self
+            .invalid_credentials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = handler;
+    }
+
+    /// `handleInvalidCredentials()`.
+    pub fn handle_invalid_credentials(&self) {
+        let handler = self
+            .invalid_credentials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(h) = handler {
+            h();
+        }
     }
 
     /// `davUser()`: the explicit DAV user, else the credentials' user.
@@ -599,6 +652,54 @@ impl Account {
     pub fn set_capabilities(&self, caps: Capabilities) {
         self.state().capabilities = caps;
         self.try_setup_push_notifications();
+        self.try_setup_client_status_reporting();
+    }
+
+    fn status_reporting(&self) -> MutexGuard<'_, StatusReportingState> {
+        self.status_reporting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Lets this account report client statuses to the server when its
+    /// capabilities allow it (Rust-only switch: upstream's `Account` always
+    /// does; the factory decides where the reporting database lives).
+    /// Calls [`Self::try_setup_client_status_reporting`] at once, and so does
+    /// [`Self::set_capabilities`] from now on.
+    pub fn enable_client_status_reporting(self: &Arc<Self>, factory: ClientStatusReportingFactory) {
+        self.status_reporting().factory = Some((factory, Arc::downgrade(self)));
+        self.try_setup_client_status_reporting();
+    }
+
+    /// `trySetupClientStatusReporting()`.
+    pub fn try_setup_client_status_reporting(&self) {
+        if !self.capabilities().is_client_status_reporting_enabled() {
+            self.status_reporting().reporter = None;
+            return;
+        }
+        let factory = {
+            let state = self.status_reporting();
+            if state.reporter.is_some() {
+                return;
+            }
+            state.factory.clone()
+        };
+        let Some((factory, this)) = factory else {
+            return;
+        };
+        let Some(this) = this.upgrade() else {
+            return;
+        };
+        let reporter = factory(&this);
+        self.status_reporting().reporter = reporter;
+    }
+
+    /// `reportClientStatus(status)`.
+    pub fn report_client_status(&self, status: ClientStatusReportingStatus) {
+        let reporter = self.status_reporting().reporter.clone();
+        if let Some(r) = reporter {
+            r.report_client_status(status);
+        }
     }
 
     /// Lets this account own a push notifications object, like every
@@ -845,7 +946,22 @@ impl Account {
 
     /// Sends a request through the transport.
     pub async fn send(&self, request: Request) -> Result<Response, TransportError> {
-        self.transport.send(request).await
+        let ignore_credential_failure = request
+            .extensions()
+            .get::<IgnoreCredentialFailure>()
+            .is_some();
+        let response = self.transport.send(request).await;
+        // AbstractNetworkJob::slotFinished: `!creds->stillValid(reply) &&
+        // !_ignoreCredentialFailure` (WebFlowCredentials::stillValid: not
+        // AuthenticationRequiredError, i.e. not a 401).
+        if !ignore_credential_failure
+            && response
+                .as_ref()
+                .is_ok_and(|r| r.status() == http::StatusCode::UNAUTHORIZED)
+        {
+            self.handle_invalid_credentials();
+        }
+        response
     }
 }
 

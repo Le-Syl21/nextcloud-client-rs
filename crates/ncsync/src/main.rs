@@ -16,12 +16,13 @@
 mod config_cmds;
 mod control_cmds;
 mod netrc;
+mod provisioning;
 
 use std::io::Write as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory as _, Parser, Subcommand};
 use nc_dav::{
     Account, Capabilities, Credentials, HttpClientOptions, HttpTransport, JobOptions, ServerUrl,
 };
@@ -36,6 +37,8 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once at start-up: the size of the sync options does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Synchronize a local folder with a Nextcloud folder once (like nextcloudcmd).
@@ -84,10 +87,10 @@ enum Command {
 #[command(disable_help_flag = true)]
 struct SyncArgs {
     /// Local folder to synchronize (must exist).
-    source_dir: String,
+    source_dir: Option<String>,
     /// Base URL of the server, e.g. https://cloud.example.com (user and
     /// password may be given in the URL).
-    server_url: String,
+    server_url: Option<String>,
 
     /// Don't be so verbose.
     #[arg(short = 's', long)]
@@ -138,8 +141,8 @@ struct SyncArgs {
     /// Path to a folder on the remote server (default /).
     #[arg(long, value_name = "PATH", default_value = "/")]
     path: String,
-    /// Configuration directory of nextcloudcmd (accepted and ignored: this
-    /// client does not read nextcloud.cfg yet).
+    /// Use the given configuration directory: DIR/ncsyncd.cfg instead of
+    /// ~/.config/ncsyncd/ncsyncd.cfg (created if missing).
     #[arg(long, value_name = "DIR")]
     confdir: Option<String>,
 
@@ -161,16 +164,54 @@ struct SyncArgs {
     #[arg(long = "max-deletions", value_name = "N", default_value_t = 100)]
     max_deletions: i64,
 
+    /// The user ID to configure. With --userid, `ncsync sync` adds an
+    /// account (and a folder) to the ncsyncd configuration instead of
+    /// syncing: `ncsync sync --userid USER --serverurl URL [--apppassword PASS]`.
+    #[arg(long, value_name = "USER", help_heading = PROVISIONING)]
+    userid: Option<String>,
+    /// The app password for authentication (optional; without it the
+    /// account is stored without credentials: log in later with
+    /// `ncsync account add URL`).
+    #[arg(long, value_name = "PASS", help_heading = PROVISIONING)]
+    apppassword: Option<String>,
+    /// The base URL of the Nextcloud server.
+    #[arg(long, value_name = "URL", help_heading = PROVISIONING)]
+    serverurl: Option<String>,
+    /// Local folder path for sync (optional, default ~/Nextcloud).
+    #[arg(long, value_name = "PATH", help_heading = PROVISIONING)]
+    localdirpath: Option<String>,
+    /// Remote folder path to sync, default /.
+    #[arg(long, value_name = "PATH", help_heading = PROVISIONING)]
+    remotedirpath: Option<String>,
+    /// Enable virtual files (1) or disable (0). Virtual files are not
+    /// supported: 1 is refused.
+    #[arg(long, value_name = "0|1", help_heading = PROVISIONING)]
+    isvfsenabled: Option<String>,
+
     /// Print help.
     #[arg(long, action = clap::ArgAction::Help)]
     help: Option<bool>,
 }
 
+const PROVISIONING: &str = "Account provisioning options (non-interactive setup)";
+
+/// `help()`: the help of `ncsync sync`, on stdout.
+fn print_sync_help() {
+    let mut cmd = Cli::command();
+    cmd.build();
+    if let Some(sync) = cmd.find_subcommand_mut("sync") {
+        let _ = sync.print_long_help();
+    }
+}
+
 fn main() -> ExitCode {
     // cmd.cpp runs Utility::expandCommandLineOptionValues on its arguments.
-    let cli = Cli::parse_from(expand_command_line_option_values(
-        std::env::args().collect(),
-    ));
+    let args = expand_command_line_option_values(std::env::args().collect());
+    // parseOptions: "--userid flag present means no positional args required".
+    if args.get(1).is_some_and(|a| a == "sync") && args[2..].iter().any(|a| a == "--userid") {
+        return provisioning::run(&args[1..]);
+    }
+    let cli = Cli::parse_from(args);
     match cli.command {
         Command::Sync(args) => run_sync(args),
         Command::Account { cmd, config } => config_cmds::run_account(cmd, config),
@@ -211,10 +252,10 @@ fn query_password(user: &str) -> String {
         .unwrap_or_default()
 }
 
-fn init_logging(args: &SyncArgs) {
-    let level = if args.silent {
+fn init_logging(silent: bool, logdebug: bool) {
+    let level = if silent {
         log::LevelFilter::Off
-    } else if args.logdebug {
+    } else if logdebug {
         log::LevelFilter::Debug
     } else {
         log::LevelFilter::Info
@@ -277,16 +318,18 @@ fn system_exclude_file() -> String {
 }
 
 fn run_sync(args: SyncArgs) -> ExitCode {
-    init_logging(&args);
-    if let Some(dir) = &args.confdir {
-        log::warn!(
-            "--confdir {dir} is ignored: ncsync does not read the desktop client configuration"
-        );
-    }
+    let (Some(source_dir), Some(server_url)) = (args.source_dir.clone(), args.server_url.clone())
+    else {
+        // argCount < 3: help, HelpMode (exit 0).
+        print_sync_help();
+        return ExitCode::SUCCESS;
+    };
+    init_logging(args.silent, args.logdebug);
+    let config_file = args.confdir.as_deref().and_then(provisioning::set_conf_dir);
     let _ = args.sync_hidden; // the default: hidden files are synced
 
     // Source directory
-    let mut source_dir = args.source_dir.clone();
+    let mut source_dir = source_dir;
     if !source_dir.ends_with('/') {
         source_dir.push('/');
     }
@@ -300,9 +343,9 @@ fn run_sync(args: SyncArgs) -> ExitCode {
     }
 
     // Server URL
-    let target = args.server_url.trim_end_matches(['/', '\\']);
+    let target = server_url.trim_end_matches(['/', '\\']);
     let Ok(mut host_url) = ServerUrl::parse(target) else {
-        eprintln!("Invalid server URL '{}'", args.server_url);
+        eprintln!("Invalid server URL '{server_url}'");
         return ExitCode::FAILURE;
     };
     let lower_path = host_url.path.to_lowercase();
@@ -374,6 +417,18 @@ fn run_sync(args: SyncArgs) -> ExitCode {
     };
     let account = Arc::new(Account::new(host_url, Arc::new(transport)));
     account.set_credentials(Credentials::new(user.clone(), password));
+    // ClientStatusReporting (when the server enables it): its database in
+    // the configuration directory, like nextcloudcmd's ConfigFile().configPath().
+    let config_dir = config_file
+        .or_else(|| {
+            nc_daemon::config_file::ConfigLocation::user()
+                .ok()
+                .map(|l| l.config_file)
+        })
+        .and_then(|f| f.parent().map(std::path::Path::to_path_buf));
+    if let Some(dir) = config_dir {
+        nc_sync::client_status_reporting::install(&account, dir);
+    }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

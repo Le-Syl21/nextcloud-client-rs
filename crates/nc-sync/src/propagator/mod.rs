@@ -774,6 +774,9 @@ impl Shared {
             conflict_record.base_file_id = base_record.file_id;
         }
         self.journal.set_case_conflict_record(&conflict_record);
+        self.account.report_client_status(
+            nc_dav::client_status::ClientStatusReportingStatus::DownloadErrorConflictCaseClash,
+        );
         self.another_sync_needed.set(true);
         None
     }
@@ -2072,6 +2075,7 @@ impl Propagator {
         let status = {
             let mut i = item.borrow_mut();
             i.status = done.status;
+            crate::client_status_reporting::report_client_statuses(&self.shared.account, &i);
             if i.is_restoration {
                 if i.status == Status::Success || i.status == Status::Conflict {
                     i.status = Status::Restoration;

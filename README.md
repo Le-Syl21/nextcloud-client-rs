@@ -29,7 +29,10 @@ Phase 2: the daemon `ncsyncd`, with the official client's sync logic
 (folder watcher, etag polling or notify_push, scheduling and back-off,
 several accounts and folders), its `nextcloud.cfg` configuration format,
 folder takeover and hand-back, and systemd services.
-Phase 3 (in progress): server-side file locking, as in the official client.
+Phase 3 (in progress): server-side file locking, as in the official client;
+`nextcloudcmd`'s account provisioning (`ncsync sync --userid`), the
+server-requested remote wipe, the client status reporting (`security_guard`
+diagnostics); bulk upload is ported but off by default, like upstream.
 
 | Crate | Mirrors upstream | Content |
 |---|---|---|
@@ -67,6 +70,38 @@ or `NC_PASSWORD` (with `--non-interactive`) rather than `-p`. Extensions: `--new
 The journal is the official client's `.sync_xxxxxxxxxxxx.db`, named the same
 way, in the synchronized folder.
 
+### Account provisioning (`nextcloudcmd --userid`)
+
+With `--userid`, `ncsync sync` does what `nextcloudcmd`'s provisioning mode
+does: instead of syncing, it adds an account (and a folder) to the ncsyncd
+configuration, for `ncsyncd` to sync:
+
+```sh
+ncsync sync --userid alice --serverurl https://cloud.example.com --apppassword "$APP_PASSWORD" \
+    [--localdirpath ~/Nextcloud] [--remotedirpath /Photos] [--isvfsenabled 0] [--confdir DIR]
+```
+
+* the app password is checked against the server (`ocs/v1.php/cloud/user`,
+  then a PROPFIND) before anything is written: on failure ("Could not fetch
+  username.", ...) nothing is stored and the exit code is 1;
+* the account goes to `~/.config/ncsyncd/ncsyncd.cfg` (`DIR/ncsyncd.cfg`
+  with `--confdir DIR`), the app password to the keyring or a password file
+  like `ncsync account add` (`--password-file FILE` reads it from a file
+  instead of the command line);
+* the folder is `--localdirpath` (default `~/Nextcloud`, made unique), which
+  must be missing or empty, synced with `--remotedirpath` (default `/`);
+* without `--apppassword` the account is stored without credentials, like
+  upstream; log in later with `ncsync account add <server_url>`;
+* `--isvfsenabled 1` is refused (exit 255, nothing written): virtual files
+  are not supported;
+* a rejected command line or setup (missing `--userid`/`--serverurl`,
+  existing account, non-empty local folder) exits with 255, like
+  `nextcloudcmd`'s `return -1`; `--trust` and `--httpproxy` do not apply
+  to the setup, as upstream.
+
+`--confdir DIR` also applies to the sync mode: the client status reporting
+database (below) goes there.
+
 ## The daemon: `ncsyncd`
 
 `ncsyncd` syncs every folder of its configuration continuously, like the
@@ -89,7 +124,20 @@ official desktop client without its GUI:
   lock files, AutoCAD, Adobe InDesign/InCopy/Premiere and Affinity lock
   files) is locked on the server while its lock file exists, and unlocked
   when the application removes it; a file locked by someone else is made
-  read-only locally.
+  read-only locally;
+* a request refused for its credentials (HTTP 401) signs the account out,
+  like the official client, and asks the server whether this device was
+  wiped (`index.php/core/wipe/check`, with the app password). When the
+  server's administrator asked for a **remote wipe**, every folder of the
+  account is deleted, local files included, the account and its stored
+  app password are removed, and the server is told
+  (`index.php/core/wipe/success`). Otherwise the account stays signed out
+  until new credentials are given (`ncsync account add`, then
+  `systemctl --user reload ncsyncd`);
+* when the server enables the `security_guard` diagnostics, the counts of
+  some sync failures (conflicts, server errors, viruses detected) are sent to
+  it once a day, like the official client; they are kept meanwhile in
+  `.userdata_<hash>.db` next to the configuration.
 
 ### Setting it up (user service)
 
@@ -235,11 +283,12 @@ the copyright lines and SPDX header of the upstream file it was ported from:
   the crate as a whole is GPL-2.0-or-later;
 * a few upstream files in `src/common` and `src/csync` are GPL-2.0-or-later
   (`c_jhash.h`, `checksumcalculator.*`, `checksumconsts.h`) and so are their ports;
-* files ported from `src/libsync` and `src/cmd` are GPL-2.0-or-later;
+* files ported from `src/libsync`, `src/gui` and `src/cmd` are GPL-2.0-or-later;
 * ported tests and test utilities are CC0-1.0 like upstream `test/`, except
   the few upstream test files with another header (`testcapabilities.cpp`,
-  `testpushnotifications.cpp` and `pushnotificationstestutils.*`
-  GPL-2.0-or-later, `testlongpath.cpp` LGPL-2.1-or-later), whose ports keep it.
+  `testpushnotifications.cpp`, `pushnotificationstestutils.*` and
+  `testclientstatusreporting.cpp` GPL-2.0-or-later, `testlongpath.cpp`
+  LGPL-2.1-or-later), whose ports keep it.
 
 See `REUSE.toml` and the `LICENSES/` directory.
 

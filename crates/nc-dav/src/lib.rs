@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod capabilities;
+pub mod client_status;
 pub mod decompress;
 pub mod http_client;
 pub mod jobs;
