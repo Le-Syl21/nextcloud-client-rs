@@ -4,7 +4,14 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); the behavioural reference is the
 official Nextcloud desktop client v34.0.5.
 
-## Unreleased
+## 0.1.0-beta.2 (2026-10-08)
+
+First beta tested on a real desktop (Secret Service keyring, systemd user unit, inotify,
+Login Flow v2 by QR code) against a Nextcloud 35 server.
+
+- Login Flow v2: the poll's 404 while the user has not logged in yet is a debug line, not
+  two warnings every 3 s in the terminal (upstream logs it as a warning, which only reaches
+  its log file).
 
 ## 0.1.0-beta.1 (2026-10-08)
 

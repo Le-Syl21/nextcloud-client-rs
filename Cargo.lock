@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "nc-daemon"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "base64",
  "fastrand",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "nc-dav"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "base64",
  "bytes",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "nc-journal"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "adler2",
  "log",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "nc-sync"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "base64",
  "bytes",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "nc-testutils"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "bytes",
  "env_logger",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "ncsync"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "clap",
  "env_logger",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "ncsyncd"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "clap",
  "env_logger",

@@ -120,6 +120,13 @@ fn handle_response(reply: &Reply, enforce_https: bool) -> Result<Handled, Flow2E
         }
     }
     if reply.error != NetworkError::NoError || !parse_ok {
+        // We get a 404 until authentication is done. Upstream logs it as a warning, which
+        // only reaches its log file; a terminal would show one pair every 3 s while the
+        // user logs in, so it is a debug line here.
+        if reply.error == NetworkError::ContentNotFoundError {
+            log::debug!(target: LOG_TARGET, "Login not completed yet: {} - http status code: {}", reply.url, reply.http_status);
+            return Ok(Handled::NotFound);
+        }
         let reason = if reply.http_status == 503 {
             "The server is temporarily unavailable because it is in maintenance mode. Please try again once maintenance has finished.".to_owned()
         } else if !str_of(&json, "error").is_empty() {
@@ -133,10 +140,6 @@ fn handle_response(reply: &Reply, enforce_https: bool) -> Result<Handled, Flow2E
             "We couldn't parse the server response. Please try connecting again later or contact your server administrator if the issue continues.".to_owned()
         };
         log::warn!(target: LOG_TARGET, "Error when requesting: {} - http status code: {}", reply.url, reply.http_status);
-        // We get a 404 until authentication is done.
-        if reply.error == NetworkError::ContentNotFoundError {
-            return Ok(Handled::NotFound);
-        }
         return Err(Flow2Error::Server(reason));
     }
     Ok(Handled::Json(json))
