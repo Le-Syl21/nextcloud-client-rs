@@ -25,6 +25,8 @@ fastrand.workspace = true
 rustix.workspace = true
 trash.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
+md-5.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

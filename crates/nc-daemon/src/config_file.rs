@@ -51,6 +51,7 @@ const NEW_BIG_FOLDER_SIZE_LIMIT: &str = "newBigFolderSizeLimit";
 const NOTIFY_EXISTING_FOLDERS_OVER_LIMIT: &str = "notifyExistingFoldersOverLimit";
 const STOP_SYNCING_EXISTING_FOLDERS_OVER_LIMIT: &str = "stopSyncingExistingFoldersOverLimit";
 const MOVE_TO_TRASH: &str = "moveToTrash";
+const OVERRIDE_LOCAL_DIR: &str = "overrideLocalDir";
 const USE_UPLOAD_LIMIT: &str = "BWLimit/useUploadLimit";
 const USE_DOWNLOAD_LIMIT: &str = "BWLimit/useDownloadLimit";
 const UPLOAD_LIMIT: &str = "BWLimit/uploadLimit";
@@ -248,6 +249,11 @@ impl<'a> ConfigFile<'a> {
         self.settings.bool_or(MOVE_TO_TRASH, false)
     }
 
+    /// `overrideLocalDir()` (empty by default).
+    pub fn override_local_dir(&self) -> String {
+        self.settings.string(OVERRIDE_LOCAL_DIR)
+    }
+
     /// `clientVersionString()` as stored (empty when never written).
     pub fn client_version(&self) -> String {
         self.settings.string(CLIENT_VERSION)
@@ -406,7 +412,10 @@ mod tests {
     #[test]
     fn derived_locations() {
         let sys = ConfigLocation::system("work").unwrap();
-        assert_eq!(sys.config_file, PathBuf::from("/var/lib/ncsyncd/work/ncsyncd.cfg"));
+        assert_eq!(
+            sys.config_file,
+            PathBuf::from("/var/lib/ncsyncd/work/ncsyncd.cfg")
+        );
         assert_eq!(sys.state_dir, PathBuf::from("/var/lib/ncsyncd/work"));
         assert!(ConfigLocation::system("../x").is_err());
         assert!(ConfigLocation::system("").is_err());

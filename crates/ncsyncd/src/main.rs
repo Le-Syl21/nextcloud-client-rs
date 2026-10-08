@@ -167,7 +167,10 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
     let mut fm = FolderMan::new(
         &tx,
         fm_settings,
-        Box::new(FileSettingsStore::new(&options.location.config_file)),
+        Box::new(
+            FileSettingsStore::new(&options.location.config_file)
+                .with_mode(options.location.mode.clone()),
+        ),
         watcher,
     );
     if let Err(e) = startup::setup(&mut fm, &options) {

@@ -15,8 +15,10 @@
 //!
 //! Signals are returned as [`AccountSignal`]s for the daemon to dispatch
 //! (`stateChanged`, `isConnectedChanged`, `termsOfServiceChanged`, the push
-//! notification setup). Not ported: navigation apps, desktop notification
-//! settings and user status, remote wipe, the unbranded→branded migration.
+//! notification setup). The remote wipe check is wired by the folder
+//! manager (`folder_man.rs`, `remote_wipe.rs`). Not ported: navigation
+//! apps, desktop notification settings and user status, the
+//! unbranded→branded migration.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -125,6 +127,12 @@ pub enum AccountEvent {
     CheckConnectivity,
     /// `connectionResult(status, errors)` of the running validator.
     ConnectionResult(ValidationResult),
+    /// `Account::handleInvalidCredentials()`: a request of the account
+    /// failed because of the credentials (handled by the folder manager).
+    InvalidCredentials,
+    /// `RemoteWipe::slotCheckJob()`: the server's answer to the wipe check
+    /// (handled by the folder manager).
+    RemoteWipeCheckFinished(bool),
 }
 
 /// `AccountState`.
@@ -425,6 +433,7 @@ impl AccountState {
                 self.slot_check_connection(tx, wrap, &mut signals);
             }
             AccountEvent::CheckConnectivity => self.check_connectivity(tx, wrap, &mut signals),
+            AccountEvent::InvalidCredentials | AccountEvent::RemoteWipeCheckFinished(_) => {}
             AccountEvent::ConnectionResult(result) => {
                 self.validator_running = false;
                 self.slot_connection_validator_result(
@@ -555,6 +564,47 @@ impl AccountState {
                 },
             ));
         }
+    }
+
+    /// `signOutByUi()`: the password is forgotten and the account signed out.
+    fn sign_out_by_ui<E: 'static>(
+        &mut self,
+        tx: &UnboundedSender<E>,
+        wrap: &EventWrapper<E>,
+        signals: &mut Vec<AccountSignal>,
+    ) {
+        self.account.forget_sensitive_data();
+        self.credentials_ready = false;
+        // clearCookieJar(): reqwest's cookie jar cannot be emptied; the
+        // cookies of an app password login carry no credentials.
+        self.set_state(State::SignedOut, tx, wrap, signals);
+    }
+
+    /// `slotHandleRemoteWipeCheck()` (connected to
+    /// `Account::invalidCredentials`).
+    pub fn slot_handle_remote_wipe_check<E: 'static>(
+        &mut self,
+        tx: &UnboundedSender<E>,
+        wrap: &EventWrapper<E>,
+    ) -> Vec<AccountSignal> {
+        let mut signals = Vec::new();
+        // make sure it changes account state and icons
+        self.sign_out_by_ui(tx, wrap, &mut signals);
+        log::info!(target: LOG, "Invalid credentials for {} checking for remote wipe request", self.account.url().to_credential_free_string());
+        signals
+    }
+
+    /// `handleInvalidCredentials()`, called by the remote wipe check when
+    /// the server does not ask for a wipe ("ask user for his credentials
+    /// again").
+    pub fn ask_for_new_credentials<E: 'static>(
+        &mut self,
+        tx: &UnboundedSender<E>,
+        wrap: &EventWrapper<E>,
+    ) -> Vec<AccountSignal> {
+        let mut signals = Vec::new();
+        self.handle_invalid_credentials(tx, wrap, &mut signals);
+        signals
     }
 
     /// `handleInvalidCredentials()`.

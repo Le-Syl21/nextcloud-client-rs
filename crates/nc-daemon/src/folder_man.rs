@@ -37,6 +37,7 @@ use crate::account_state::{AccountEvent, AccountSignal, AccountState, EventWrapp
 use crate::event::{Event, FolderEvent, FolderId, FolderManEvent, PushEvent, WatcherEvent};
 use crate::folder::{Definition, EtagJob, Folder, FolderAction, FolderSettings, WatcherFactory};
 use crate::network_limits::NetworkLimits;
+use crate::remote_wipe::{self, RemoteWipe};
 use crate::timer::{Timer, single_shot};
 
 const LOG: &str = "nextcloud.gui.folder.manager";
@@ -76,6 +77,9 @@ pub trait FolderSettingsStore {
     );
     /// Removes the folder from all the groups of the account.
     fn remove_folder(&mut self, account_id: &str, alias: &str);
+    /// `AccountManager::deleteAccount` (settings part): removes the account
+    /// and forgets its stored credentials.
+    fn remove_account(&mut self, _account_id: &str) {}
 }
 
 /// A store that keeps nothing (tests, `--no-save`).
@@ -123,6 +127,8 @@ pub struct FolderMan {
     next_sync_should_start_immediately: bool,
     requests: Vec<ManagerRequest>,
     account_wrap: EventWrapper<Event>,
+    /// The `RemoteWipe` of every account.
+    remote_wipes: HashMap<String, RemoteWipe>,
 }
 
 impl FolderMan {
@@ -157,6 +163,7 @@ impl FolderMan {
             next_sync_should_start_immediately: false,
             requests: Vec::new(),
             account_wrap: Arc::new(Event::Account),
+            remote_wipes: HashMap::new(),
         };
         fm.etag_poll_timer
             .start(tx, |g| Event::FolderMan(FolderManEvent::EtagPollTimer(g)));
@@ -189,6 +196,7 @@ impl FolderMan {
             account.enable_push_notifications(options);
             forward_push_events(id, &account, &self.tx);
         }
+        self.connect_invalid_credentials(id, &account);
         let mut state = AccountState::new(
             id,
             account,
@@ -203,10 +211,44 @@ impl FolderMan {
     /// Adds an account that is connected and never checks its connection
     /// (`FakeAccountState`, for tests).
     pub fn add_fake_connected_account(&mut self, id: &str, account: Arc<Account>) {
+        self.connect_invalid_credentials(id, &account);
         self.accounts
             .insert(id.to_owned(), AccountState::new_fake_connected(id, account));
         self.account_limits
             .insert(id.to_owned(), NetworkLimits::default());
+    }
+
+    /// The `RemoteWipe` of a new account (`AccountState` creates it) and
+    /// the connections of `Account::invalidCredentials` and
+    /// `appPasswordRetrieved`: a credential failure of any request of the
+    /// account is posted as [`AccountEvent::InvalidCredentials`]. Needs a
+    /// `LocalSet`.
+    fn connect_invalid_credentials(&mut self, id: &str, account: &Arc<Account>) {
+        self.remote_wipes.insert(
+            id.to_owned(),
+            RemoteWipe {
+                stored_app_password: account.credentials().password,
+                ..RemoteWipe::default()
+            },
+        );
+        // The handler runs wherever the reply arrives; the events of the
+        // queue are not `Send`, so a forwarding task posts them.
+        let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        account.set_invalid_credentials_handler(Some(Arc::new(move || {
+            let _ = itx.send(());
+        })));
+        let tx = self.tx.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_local(async move {
+            while irx.recv().await.is_some() {
+                if tx
+                    .send(Event::Account(id.clone(), AccountEvent::InvalidCredentials))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
     }
 
     /// Empties the schedule queue (tests: `_scheduledFolders.clear()`).
@@ -232,11 +274,21 @@ impl FolderMan {
         let Some(state) = self.accounts.get_mut(id) else {
             return;
         };
+        if ready && let Some(rw) = self.remote_wipes.get_mut(id) {
+            rw.stored_app_password = state.account().credentials().password;
+        }
         let signals = state.set_credentials_ready(ready, &self.tx, &wrap);
         self.handle_account_signals(id, signals);
     }
 
     fn handle_account_event(&mut self, id: &str, event: AccountEvent) {
+        match event {
+            AccountEvent::InvalidCredentials => return self.slot_invalid_credentials(id),
+            AccountEvent::RemoteWipeCheckFinished(wipe) => {
+                return self.slot_remote_wipe_check_finished(id, wipe);
+            }
+            _ => {}
+        }
         let wrap = self.account_wrap.clone();
         let Some(state) = self.accounts.get_mut(id) else {
             return;
@@ -269,12 +321,171 @@ impl FolderMan {
                     }
                 }
                 AccountSignal::CredentialsNeeded => {
-                    log::warn!(target: LOG, "Account {id} needs credentials: run `ncsync account login` (or provide the systemd credential) and reload the daemon");
+                    log::warn!(target: LOG, "Account {id} needs credentials: run `ncsync account add <server_url>` (or provide the systemd credential) and reload the daemon");
                     self.requests
                         .push(ManagerRequest::CredentialsNeeded(id.to_owned()));
                 }
             }
         }
+    }
+
+    // ---- remote wipe (RemoteWipe, AccountManager::deleteAccount) ----
+
+    /// `Account::handleInvalidCredentials()`: "Retrieving password will
+    /// trigger remote wipe check job", then `invalidCredentials()`
+    /// (`AccountState::slotHandleRemoteWipeCheck`).
+    fn slot_invalid_credentials(&mut self, id: &str) {
+        // retrieveAppPassword(): the app password as stored, not the one in
+        // memory (signing out forgets that one).
+        let Some(password) = self
+            .remote_wipes
+            .get(id)
+            .map(|rw| rw.stored_app_password.clone())
+        else {
+            return;
+        };
+        self.start_remote_wipe_check(id, &password);
+        let wrap = self.account_wrap.clone();
+        let Some(state) = self.accounts.get_mut(id) else {
+            return;
+        };
+        let signals = state.slot_handle_remote_wipe_check(&self.tx, &wrap);
+        self.handle_account_signals(id, signals);
+    }
+
+    /// `RemoteWipe::startCheckJobWithAppPassword(pwd)`: asks the server
+    /// whether this device must be wiped. Needs a `LocalSet`.
+    pub fn start_remote_wipe_check(&mut self, id: &str, app_password: &str) {
+        let Some(account) = self.accounts.get(id).map(|s| s.account().clone()) else {
+            return;
+        };
+        if app_password.is_empty() {
+            log::debug!(target: "nextcloud.gui.remotewipe", "not checking remote wipe status: app password is empty");
+            return;
+        }
+        if let Some(rw) = self.remote_wipes.get_mut(id) {
+            rw.app_password = app_password.to_owned();
+        }
+        let app_password = app_password.to_owned();
+        let tx = self.tx.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_local(async move {
+            if let Some(wipe) = remote_wipe::check(&account, &app_password).await {
+                let _ = tx.send(Event::Account(
+                    id,
+                    AccountEvent::RemoteWipeCheckFinished(wipe),
+                ));
+            }
+        });
+    }
+
+    /// `RemoteWipe::slotCheckJob()` (after the reply was parsed).
+    fn slot_remote_wipe_check_finished(&mut self, id: &str, wipe: bool) {
+        let wrap = self.account_wrap.clone();
+        let Some(state) = self.accounts.get_mut(id) else {
+            return;
+        };
+        let display_name = account_display_name(state.account());
+        if wipe {
+            log::info!(target: "nextcloud.gui.remotewipe", "Starting remote wipe for {display_name}");
+            if let Some(rw) = self.remote_wipes.get_mut(id) {
+                rw.remote_wipe_requested = true;
+            }
+            // delete data: authorized(accountState) → FolderMan::slotWipeFolderForAccount
+            self.slot_wipe_folder_for_account(id);
+        } else {
+            // ask user for his credentials again
+            let signals = state.ask_for_new_credentials(&self.tx, &wrap);
+            self.handle_account_signals(id, signals);
+        }
+    }
+
+    /// `slotWipeFolderForAccount(accountState)`: removes every folder of the
+    /// account, its journal and its local files, then `wipeDone`.
+    pub fn slot_wipe_folder_for_account(&mut self, account_id: &str) {
+        let folders_to_remove: Vec<String> = self
+            .folder_map
+            .values()
+            .filter(|f| f.account_id() == account_id)
+            .map(|f| f.alias().to_owned())
+            .collect();
+        let mut success = false;
+        for alias in folders_to_remove {
+            let Some(path) = self.folder_map.get(&alias).map(|f| f.path().to_owned()) else {
+                continue;
+            };
+            // abort a running sync, de-schedule, wipe database
+            // (wipeForRemoval), pause, remove the folder configuration,
+            // unload.
+            self.remove_folder(&alias);
+            // wipe data
+            if std::path::Path::new(&path).is_dir() {
+                let mut errors = Vec::new();
+                success =
+                    nc_sync::filesystem::remove_recursively(&path, &mut |_, _| {}, &mut errors);
+                if !success {
+                    log::warn!(target: LOG, "Failed to remove existing folder  {path}");
+                } else {
+                    log::info!(target: LOG, "wipe: Removed  file  {path}");
+                }
+            } else {
+                success = true;
+                log::warn!(target: LOG, "folder does not exist, can not remove.");
+            }
+        }
+        self.slot_wipe_done(account_id, success);
+    }
+
+    /// `RemoteWipe::slotWipeDone(accountState, dataWiped)`.
+    fn slot_wipe_done(&mut self, account_id: &str, data_wiped: bool) {
+        let Some(state) = self.accounts.get(account_id) else {
+            return;
+        };
+        if !data_wiped {
+            log::warn!(target: "nextcloud.gui.remotewipe", "will not notify server about wipe success dataWiped={data_wiped}, isCurrentAccount=true");
+            return;
+        }
+        // delete account after wiping local data succeeded
+        // sending the notification to the server will be done after the account got removed
+        log::info!(target: "nextcloud.gui.remotewipe", "Deleting account {}", account_display_name(state.account()));
+        self.delete_account(account_id);
+    }
+
+    /// `AccountManager::deleteAccount(accountState)`
+    /// (`removeAccountState(ForgetSensitiveData)`), then `accountRemoved`:
+    /// the server is told about the wipe.
+    fn delete_account(&mut self, account_id: &str) {
+        let Some(state) = self.accounts.remove(account_id) else {
+            return;
+        };
+        self.account_limits.remove(account_id);
+        let account = state.account().clone();
+        drop(state);
+        account.set_invalid_credentials_handler(None);
+        let display_name = account_display_name(&account);
+        let remote_wipe = self.remote_wipes.remove(account_id).unwrap_or_default();
+        // deleteAppToken() is started before the credentials are forgotten.
+        let delete_job = {
+            let account = account.clone();
+            let display_name = display_name.clone();
+            async move { remote_wipe::delete_app_token(&account, &display_name).await }
+        };
+        // Forget account credentials, cookies
+        account.forget_sensitive_data();
+        self.store.remove_account(account_id);
+        tokio::task::spawn_local(async move {
+            delete_job.await;
+            // accountRemoved → RemoteWipe: notifyServerSuccess() when the wipe
+            // was requested.
+            if remote_wipe.remote_wipe_requested {
+                remote_wipe::notify_server_success(
+                    &account,
+                    &remote_wipe.app_password,
+                    &display_name,
+                )
+                .await;
+            }
+        });
     }
 
     /// `slotAccountStateChanged()`: schedules folders of newly connected
@@ -1178,6 +1389,11 @@ impl FolderMan {
     pub fn any_engine_away(&self) -> bool {
         self.folder_map.values().any(|f| f.is_sync_running())
     }
+}
+
+/// `Account::displayName()`.
+fn account_display_name(account: &Account) -> String {
+    crate::account_setup::display_name(&account.credentials().user, account.url())
 }
 
 /// A watcher factory creating no watcher (tests, `--no-watch`): local

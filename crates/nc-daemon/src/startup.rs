@@ -57,11 +57,23 @@ pub enum StartupError {
 /// re-read and written under its lock at every change.
 pub struct FileSettingsStore {
     path: PathBuf,
+    /// Where the credentials of a removed account are forgotten.
+    mode: ServiceMode,
 }
 
 impl FileSettingsStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            mode: ServiceMode::User,
+        }
+    }
+
+    /// The service mode of the configuration (the keyring is used for the
+    /// user daemon only).
+    pub fn with_mode(mut self, mode: ServiceMode) -> Self {
+        self.mode = mode;
+        self
     }
 }
 
@@ -97,6 +109,35 @@ impl FolderSettingsStore for FileSettingsStore {
             crate::folder_definition::remove_folder(s, account_id, &escaped)
         }) {
             log::warn!(target: LOG, "Could not remove folder {alias} from {}: {e}", self.path.display());
+        }
+    }
+
+    fn remove_account(&mut self, account_id: &str) {
+        let removed = Settings::modify(&self.path, |s| {
+            let acc = crate::account_config::load_account(s, account_id);
+            crate::account_config::remove_account(s, account_id);
+            acc
+        });
+        let acc = match removed {
+            Ok((acc, _)) => acc,
+            Err(e) => {
+                log::warn!(target: LOG, "Could not remove account {account_id} from {}: {e}", self.path.display());
+                return;
+            }
+        };
+        let Some(acc) = acc else {
+            return;
+        };
+        let store = match self.mode {
+            ServiceMode::User => KeyringStore::secret_service().ok(),
+            ServiceMode::System { .. } => None,
+        };
+        let resolver = CredentialResolver::new(
+            self.mode.clone(),
+            store.as_ref().map(|s| s as &dyn SecretStore),
+        );
+        if let Err(e) = resolver.forget(&acc) {
+            log::warn!(target: LOG, "Could not delete the credentials of account {account_id}: {e}");
         }
     }
 }
@@ -241,6 +282,11 @@ pub fn setup(fm: &mut FolderMan, options: &Options) -> Result<(), StartupError> 
             }
         };
         let account = Arc::new(Account::new(url, Arc::new(transport)));
+        // ClientStatusReporting: its databases next to the configuration
+        // (`ConfigFile().configPath()`).
+        if let Some(dir) = config_path.parent() {
+            nc_sync::client_status_reporting::install(&account, dir.to_owned());
+        }
         let user = acc.credentials_user();
         let ready = match resolver.app_password(acc) {
             Ok((password, source)) => {

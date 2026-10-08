@@ -91,6 +91,18 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | systemd `Type=notify`, watchdog, status | **sd-notify** | 0.5.0 | `READY=1`, `STATUS=`, `STOPPING=1`, and `WATCHDOG=1` sent from the event loop itself (half of `WatchdogSec`), so a stuck loop gets the service restarted. |
 | Control socket (no upstream counterpart: the GUI) | tokio `UnixListener`, one JSON line per request, **serde** (`derive`) + **serde_json** | 1.0.229, 1.0.151 | Mode 0600 in a 0700 runtime directory. |
 
+## Phase 3 (in the tree)
+
+No new crate: the workspace's existing dependencies are reused (versions
+above).
+
+| Component (upstream) | Choice | Version | Why |
+|---|---|---|---|
+| nextcloudcmd provisioning (`cmd.cpp` `parseOptions` / `main`, `accountsetupcommandlinemanager.cpp`, `accountsetupfromcommandlinejob.cpp`) | ported (`ncsync/src/provisioning.rs`, `nc-daemon/src/account_setup.rs`) | — | Upstream's hand-written parser decides the exit codes and the `HelpMode` cases (an unknown option or a missing value prints the help and exits 0), which clap would turn into usage errors; so the provisioning command line is parsed by hand like upstream, while the sync mode stays on clap. `QUrl::isValid` is reproduced for `--serverurl` (`qurl_is_valid`). |
+| Remote wipe (`remotewipe.cpp`, `FolderMan::slotWipeFolderForAccount`, `AccountManager::deleteAccount`, `Account::handleInvalidCredentials`) | ported (`nc-daemon/src/remote_wipe.rs`, `folder_man.rs`), the token form-encoded with **percent-encoding** | 2.3.2 | The credential failure hook is in `nc_dav::Account::send` (a 401 of a request not marked `ignore_credential_failure`, like `AbstractNetworkJob::slotFinished`). |
+| Client status reporting database (`clientstatusreportingdatabase.cpp`, `QSqlDatabase`) | **rusqlite** (now also a dependency of `nc-sync`), **md-5** for the database name | 0.40.2, 0.11.0 | The same SQL as upstream; byte arrays bound as blobs like Qt's SQLite driver. |
+| Client status reporting network and statuses (`clientstatusreportingnetwork.cpp`, `clientstatusreporting.cpp`, `clientstatusreportingcommon.cpp`) | ported (`nc-sync/src/client_status_reporting.rs`, `nc-dav/src/client_status.rs`); the send timer is a tokio task | — | The report format, the 2 min / 24 h intervals and the success rules (including upstream's "a request that failed without an HTTP status counts as sent") are the behaviour under test. |
+
 ## Planned (later phases), from the study
 
 All of these are to be re-checked for the latest version when they are added

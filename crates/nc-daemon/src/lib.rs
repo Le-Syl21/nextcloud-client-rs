@@ -6,6 +6,7 @@
 //! state, configuration, credentials).
 
 pub mod account_config;
+pub mod account_setup;
 pub mod account_state;
 pub mod config_file;
 pub mod connection_validator;
@@ -21,6 +22,7 @@ pub mod folder_watcher;
 pub mod instance;
 pub mod manage;
 pub mod network_limits;
+pub mod remote_wipe;
 pub mod settings;
 pub mod startup;
 pub mod sync_result;

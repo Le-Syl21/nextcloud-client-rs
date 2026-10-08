@@ -61,7 +61,13 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testforcesyncnow.cpp | 3 | 2 | 0 | 1 |
 | test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
 | test/testaccount.cpp | 5 | 2 | 0 | 3 |
-| **Total** | **403** | **319** | **1** | **83** |
+| test/testnextcloudcmdprovisioning.cpp | 9 | 9 | 0 | 0 |
+| test/testremotewipe.cpp | 2 | 1 | 0 | 1 |
+| test/testclientstatusreporting.cpp | 4 | 4 | 0 | 0 |
+| test/testcookies.cpp | 1 | 0 | 0 | 1 |
+| test/testconnectionvalidator.cpp | 2 | 0 | 0 | 2 |
+| test/testfolder.cpp | 2 | 0 | 0 | 2 |
+| **Total** | **423** | **333** | **1** | **89** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -765,3 +771,88 @@ pause (a remote change is not applied), resume and sync-now.
 | testAccount_isPublicShareLink (+_data, 8 rows) | test_account_is_public_share_link | adapted (`Account::setUrl`'s detection is `public_share_link_parts`, used when an account is loaded) |
 | testAccount_setLimitSettings_globalNetworkLimitFallback | test_account_set_limit_settings_global_network_limit_fallback | adapted (the setters are on `AccountDefinition`) |
 | testAccount_listRemoteFolder (+_data) | — | n/a (`Account::listRemoteFolder` serves the GUI folder wizard) |
+
+# Phase 3
+
+## test/testnextcloudcmdprovisioning.cpp → `crates/ncsync/tests/testnextcloudcmdprovisioning.rs`
+
+`nextcloudcmd ARGS` is `ncsync sync ARGS`, run as a child process
+(`CARGO_BIN_EXE_ncsync`) with stdin closed, like upstream's `QProcess`.
+Every run gets its own `HOME` and XDG directories and an unreachable
+D-Bus session (upstream's runs without `--confdir` use the configuration
+of the user running the tests), so nothing reaches the user's
+configuration or keyring. Upstream's `return -1` is exit code 255 on Linux,
+as the upstream test expects there.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| testUserIdAlonePrintsServerUrlError | test_user_id_alone_prints_server_url_error | ported |
+| testUserIdAndServerUrlWithoutAppPasswordEntersProvisionMode | test_user_id_and_server_url_without_app_password_enters_provision_mode | ported (the quoted `"http://127.0.0.1:1"` is an invalid `QUrl`: 255 from "Missing mandatory command line options") |
+| testProvisioningOptionsEnterProvisionModeNotSyncMode | test_provisioning_options_enter_provision_mode_not_sync_mode | ported |
+| testNoArgsShowsHelp | test_no_args_shows_help | adapted (`ncsync sync` without arguments prints the clap help of `ncsync sync`, which names `ncsync` instead of `nextcloudcmd`, and exits 0) |
+| testNonInteractiveFlagDoesNotSuppressProvisioningError | test_non_interactive_flag_does_not_suppress_provisioning_error | ported |
+| testInlineOptionValuesSelectProvisioningMode | test_inline_option_values_select_provisioning_mode | ported |
+| testInlineOptionValuesReachAccountSetup | test_inline_option_values_reach_account_setup | ported |
+| testSetupWithoutLocalDirPathIsNotRejected | test_setup_without_local_dir_path_is_not_rejected | ported |
+| testAppPasswordSetupRunsTheEventLoop | test_app_password_setup_runs_the_event_loop | ported |
+
+rust_only (same file, against a local `TcpListener` server,
+`nc-testutils/tests/common/http_server.rs`):
+`rust_only_provisioning_writes_account_folder_and_app_password` (the
+account, the folder `0` with the remote path, the password file without a
+keyring, the folder's journal, then "Account alice already exists!" with
+255), `rust_only_provisioning_refuses_virtual_files_and_writes_nothing`,
+`rust_only_provisioning_wrong_app_password_writes_nothing` (no account,
+no local folder), `rust_only_provisioning_without_app_password_stores_the_account_only`,
+`rust_only_provisioning_non_empty_local_folder_is_rejected`,
+`rust_only_provisioning_unknown_option_shows_help` (`HelpMode`, exit 0).
+Derived unit tests: `account_setup::tests::derived_qurl_validity`,
+`derived_display_name`.
+
+## test/testremotewipe.cpp → `crates/nc-daemon/tests/testremotewipe.rs`
+
+Upstream swaps the `RemoteWipe`'s own `QNetworkAccessManager` for a
+`FakeQNAM` sharing the override; here the wipe requests go through the
+account's transport (the FakeFolder server, without credentials, like that
+separate manager), so one override answers everything. `QTest::qWait(500)`
+handles the folder manager's queue for 500 ms.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (logger / `QStandardPaths` test mode) |
+| testRemoteWipe | test_remote_wipe | adapted (upstream's keychain gives an empty app password in tests, so the 401 of the sync makes no check; here the 401 also starts a check with the account's stored password, answered 401 as well; both phases then call `startCheckJobWithAppPassword("password")` like upstream; also checks the account was signed out, its settings removal, and that `wipe/check` then `wipe/success` were called) |
+
+rust_only: `rust_only_remote_wipe_without_folder_keeps_the_account`
+(upstream's `wipeDone(account, false)` when the account has no folder: the
+account stays and the server is not told),
+`rust_only_remote_wipe_empty_app_password_does_not_check`. Derived unit
+test: `remote_wipe::tests::derived_token_encoding`.
+
+## test/testclientstatusreporting.cpp → `crates/nc-testutils/tests/testclientstatusreporting.rs`
+
+The upstream file is GPL-2.0-or-later and so is the port. Upstream's
+functions share one account and database; here each test builds the
+fixture.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | `init_test_case` | adapted (called by every test: the 1 s / 2 s intervals, an account on the fake server whose override records the PUT body, the database in a temporary directory instead of `dbPathForTesting`, the `security_guard.diagnostics` capability) |
+| testReportAndSendStatuses | test_report_and_send_statuses | ported |
+| testNothingReportedAndNothingSent | test_nothing_reported_and_nothing_sent | ported (on a fresh fixture, where upstream runs after the previous test emptied the database) |
+| cleanupTestCase | `cleanup_test_case` | adapted (called by every test) |
+
+rust_only: `rust_only_reporting_follows_the_capability` (the database is
+created with the reporting; a capability switched off drops it),
+`rust_only_sync_engine_reports_item_errors` (`PropagateItemJob::reportClientStatuses`
+on a FakeFolder sync: a failed upload and a failed download).
+
+## Not applicable
+
+| Upstream | Rust | Status |
+|---|---|---|
+| test/testcookies.cpp testCookies | — | n/a (`CookieJar::save`/`restore` persist cookies to `cookies<id>.db` for the GUI's `AccountManager`; `nextcloudcmd` keeps them in memory per process and so do `ncsync` and `ncsyncd` (reqwest's jar, which cannot be exported). With an app password the server's persistent cookies are only its `__Host-nc_sameSiteCookie*` markers, so nothing that the persistence would save matters for the sync) |
+| test/testconnectionvalidator.cpp initTestCase | — | n/a (test setup) |
+| test/testconnectionvalidator.cpp localNetworkPermissionFailureReplacesTimeout | — | n/a (macOS local network permission: on Linux `LocalNetworkPermission::checkDeniedForConnection` always answers "not denied", so the timeout message is never replaced) |
+| test/testfolder.cpp initTestCase | — | n/a (test setup) |
+| test/testfolder.cpp test_sidebarDisplayName | — | n/a (`Folder::sidebarDisplayName` names the folder in the Windows Explorer navigation pane and the virtual files providers; no Linux sync path uses it) |
+
