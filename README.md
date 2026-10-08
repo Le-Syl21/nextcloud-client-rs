@@ -301,3 +301,18 @@ tools/itest/run.sh          # ncsync sync end to end against a throw-away Nextcl
 tools/itest/run-daemon.sh   # ncsyncd end to end, with redis and notify_push
 tools/itest/run.sh --down
 ```
+
+The side-by-side bench runs the official `nextcloudcmd` of the pinned tag
+and `ncsync` through the same scripted scenarios against the test server
+(each with its own user), and compares the local trees, the server trees
+and a normalized dump of the journals after every step; `--roundtrip`
+alternates the two clients on one folder and journal (a takeover and a
+hand-back at every step) and checks that the other client then has
+nothing to do:
+
+```sh
+tools/bench/build-oracle.sh          # once: nextcloudcmd v34.0.5 in the upstream CI image (Docker)
+docker compose -f tools/itest/compose.yml -p ncrs-itest up -d
+tools/bench/bench.py                 # side by side
+tools/bench/bench.py --roundtrip     # one folder, alternating clients
+```
