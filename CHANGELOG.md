@@ -4,7 +4,7 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); the behavioural reference is the
 official Nextcloud desktop client v34.0.5.
 
-## Unreleased
+## 0.1.0-beta.3 (2026-10-08)
 
 - **Live reload of `ncsyncd`.** `ncsync account add|remove`, `folder add|remove`,
   `takeover` and `handback` tell a running daemon to re-read its configuration (a new
