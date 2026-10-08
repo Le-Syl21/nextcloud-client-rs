@@ -61,7 +61,9 @@ virtual files / end-to-end encryption test files (out of scope).
 | test/testforcesyncnow.cpp | 3 | 2 | 0 | 1 |
 | test/testaccountmanager.cpp | 7 | 1 | 0 | 6 |
 | test/testaccount.cpp | 5 | 2 | 0 | 3 |
-| **Total** | **403** | **319** | **1** | **83** |
+| test/testlockfile.cpp | 28 | 27 | 0 | 1 |
+| test/testfilesystem.cpp | 7 | 4 | 0 | 3 |
+| **Total** | **438** | **350** | **1** | **87** |
 
 Phase 1 gate: every FakeFolder test file in the Phase 1 list
 (testsyncengine, testsyncmove, testsyncconflict, testchunkingng,
@@ -649,10 +651,7 @@ channel of the watcher, read while the test waits.
 `derived_queue_overflow_reports_lost_changes` (the `IN_Q_OVERFLOW`
 divergence), `derived_journal_files_and_unknown_descriptors_are_filtered`,
 `derived_notification_test` (`startNotificatonTest` with and without
-notifications), `derived_set_permissions_test`. The lock file helpers ported
-from `src/libsync/filesystem.cpp` have unit tests in
-`crates/nc-daemon/src/folder_watcher/lock_file.rs` (*derived*; upstream
-covers them in `testlockfile.cpp`, not ported yet).
+notifications), `derived_set_permissions_test`.
 ## test/testpushnotifications.cpp → `crates/nc-dav/tests/testpushnotifications.rs`
 
 Helpers `verifyCalledOnceWithAccount` and `failThreeAuthenticationAttempts`
@@ -765,3 +764,65 @@ pause (a remote change is not applied), resume and sync-now.
 | testAccount_isPublicShareLink (+_data, 8 rows) | test_account_is_public_share_link | adapted (`Account::setUrl`'s detection is `public_share_link_parts`, used when an account is loaded) |
 | testAccount_setLimitSettings_globalNetworkLimitFallback | test_account_set_limit_settings_global_network_limit_fallback | adapted (the setters are on `AccountDefinition`) |
 | testAccount_listRemoteFolder (+_data) | — | n/a (`Account::listRemoteFolder` serves the GUI folder wizard) |
+
+# Phase 3 file locking
+
+## test/testlockfile.cpp → `crates/nc-testutils/tests/testlockfile.rs`
+
+GPL-2.0-or-later like the upstream file. `QSignalSpy::wait()` on the
+account's `lockFileSuccess` / `lockFileError` or on the job's
+`finishedWithoutError` / `finishedWithError` is running the request to its
+end: `nc_sync::account_lock::set_lock_file_state` and `LockFileJob::start`
+resolve to `Ok` or `Err`. `SyncEngine::lockFileDetected` is the engine
+callback `lock_file_detected`.
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (Qt logger / QStandardPaths test mode) |
+| testLockFile_lockFile_lockSuccess | test_lock_file_lock_file_lock_success | ported |
+| testLockFile_lockFile_lockError | test_lock_file_lock_file_lock_error | ported |
+| testLockFile_fileLockStatus_queryLockStatus | test_lock_file_file_lock_status_query_lock_status | ported |
+| testLockFile_fileCanBeUnlocked_canUnlock | test_lock_file_file_can_be_unlocked_can_unlock | ported |
+| testLockFile_lockFile_jobSuccess | test_lock_file_lock_file_job_success | ported |
+| testLockFile_lockFile_unlockFile_jobSuccess | test_lock_file_lock_file_unlock_file_job_success | ported |
+| testLockFile_lockFile_alreadyLockedByUser | test_lock_file_lock_file_already_locked_by_user | ported |
+| testLockFile_lockFile_alreadyLockedByApp | test_lock_file_lock_file_already_locked_by_app | ported |
+| testLockFile_unlockFile_alreadyUnlocked | test_lock_file_unlock_file_already_unlocked | ported |
+| testLockFile_unlockFile_lockedBySomeoneElse | test_lock_file_unlock_file_locked_by_someone_else | ported |
+| testLockFile_lockFile_jobError | test_lock_file_lock_file_job_error | ported |
+| testLockFile_lockFile_preconditionFailedError | test_lock_file_lock_file_precondition_failed_error | ported |
+| testSyncLockedFilesAlmostExpired | test_sync_locked_files_almost_expired | adapted (the engine's scheduled sync run timers are deadlines: `spySyncCompleted.wait(4000)` is "the next deadline is within 4 s", then `fire_due` and a sync run; same real-time waits) |
+| testSyncLockedFilesNoExpiredLockedFiles | test_sync_locked_files_no_expired_locked_files | adapted (idem: no deadline within 3 s, nothing fires) |
+| testSyncLockedFiles | test_sync_locked_files | ported |
+| testLockFile_lockedFileReadOnly_afterSync | test_lock_file_locked_file_read_only_after_sync | ported |
+| testLockFile_lockFile_detect_newly_uploaded | test_lock_file_lock_file_detect_newly_uploaded | ported |
+| testLockFile_lockFile_detect_newly_uploaded_autocad | test_lock_file_lock_file_detect_newly_uploaded_autocad | ported |
+| testLockFile_lockFile_detect_newly_uploaded_adobe_idlk | test_lock_file_lock_file_detect_newly_uploaded_adobe_idlk | ported |
+| testLockFile_autoCADLockFileTargetFilePath_resolution | test_lock_file_auto_cad_lock_file_target_file_path_resolution | ported |
+| testLockFile_lockFile_detect_newly_uploaded_adobe_prlock | test_lock_file_lock_file_detect_newly_uploaded_adobe_prlock | ported |
+| testLockFile_adobeLockFileTargetFilePath_resolution | test_lock_file_adobe_lock_file_target_file_path_resolution | ported |
+| testLockFile_lockFile_detect_newly_uploaded_affinity_afphoto | test_lock_file_lock_file_detect_newly_uploaded_affinity_afphoto | ported |
+| testLockFile_lockFile_detect_newly_uploaded_affinity_afdesign | test_lock_file_lock_file_detect_newly_uploaded_affinity_afdesign | ported |
+| testLockFile_affinityLockFileTargetFilePath_resolution | test_lock_file_affinity_lock_file_target_file_path_resolution | ported (in a temporary directory instead of the fixed `/tmp/affinityTestDir/`) |
+| testLockFile_verifyE2eeFilesUseCorrectPath | test_lock_file_verify_e2ee_files_use_correct_path | ported (no encryption involved: the journal record carries a mangled name, which `LockFileJob` must use in the URL) |
+| testUploadLockedFilesInDeletedFolder | test_upload_locked_files_in_deleted_folder | ported (the override's `Q_ASSERT(false)` on an `If` header is a flag checked at the end) |
+
+The lock file helpers (`src/libsync/filesystem.cpp`, now in
+`crates/nc-sync/src/filesystem/lock_file.rs`) also keep their *derived*
+unit tests there. *rust_only* in `crates/nc-daemon/tests/rust_only_daemon.rs`:
+`rust_only_daemon_locks_documents_opened_in_an_office_application` (a
+LibreOffice lock file appearing and disappearing next to a synced document
+locks then unlocks it on the server, through the inotify watcher and
+`Folder::slotLockedFilesFound` / `slotFilesLockReleased`).
+
+## test/testfilesystem.cpp → `crates/nc-sync/tests/testfilesystem.rs`
+
+| Upstream | Rust | Status |
+|---|---|---|
+| initTestCase | — | n/a (Qt logger / test mode; each test creates its directory) |
+| testSetFolderPermissionsExistingDirectory (+_data, 6 rows) | test_set_folder_permissions_existing_directory | ported |
+| testSetFolderPermissionsNonexistentDirectory | test_set_folder_permissions_nonexistent_directory | ported |
+| testSetFileReadOnlyLongPath | test_set_file_read_only_long_path | ported (the temporary file is created in a temporary directory, not in the working directory) |
+| testRenameFileWithTrailingPeriod | — | n/a (Windows-only) |
+| testAclWithManyDeniedAces | — | n/a (Windows-only, ACLs) |
+| testRecursiveDeletionLongPaths | test_recursive_deletion_long_paths | ported |

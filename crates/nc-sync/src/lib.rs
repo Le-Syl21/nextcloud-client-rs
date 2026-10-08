@@ -7,11 +7,13 @@
 //!
 //! Reference upstream: nextcloud/desktop tag `v34.0.5`, `src/libsync`.
 
+pub mod account_lock;
 pub mod discovery;
 pub mod engine;
 pub mod filesystem;
 pub mod item;
 pub mod local_discovery_tracker;
+pub mod lock_file_jobs;
 pub mod options;
 pub mod progress;
 pub mod propagator;

@@ -26,16 +26,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nc_dav::Account;
 use nc_journal::exclude::ExcludedFiles;
-use nc_journal::journal::{SelectiveSyncListType, SyncJournalDb};
+use nc_journal::journal::{SelectiveSyncListType, SyncJournalDb, SyncJournalFileRecord};
 use nc_sync::discovery::LocalDiscoveryStyle;
 use nc_sync::touched_files::TouchedFiles;
 use nc_sync::{
     AnotherSyncNeeded, EngineAbortHandle, ErrorCategory, Instruction, LocalDiscoveryTracker,
-    ProgressInfo, Status as ItemStatus, SyncEngine, SyncFileItemPtr, SyncOptions,
+    LockOwnerType, LockStatus, ProgressInfo, Status as ItemStatus, SyncEngine, SyncFileItemPtr,
+    SyncOptions,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::event::{Event, FolderEvent, FolderId, WatcherEvent};
+use crate::event::{Event, FolderEvent, FolderId, LockFileStateFinished, WatcherEvent};
 use crate::network_limits::NetworkLimits;
 use crate::sync_result::{SyncResult, SyncStatus};
 use crate::timer::{Timer, single_shot};
@@ -165,6 +166,8 @@ pub trait FolderWatcherHandle {
     fn is_reliable(&self) -> bool;
     /// `canSetPermissions()`.
     fn can_set_permissions(&self) -> bool;
+    /// `slotLockFileDetectedExternally(lockFile)`.
+    fn slot_lock_file_detected_externally(&self, _lock_file: &str) {}
 }
 
 /// Creates the folder watcher of a folder (`registerFolderWatcher`):
@@ -332,6 +335,10 @@ impl Folder {
         let p = post(&self.tx);
         cbs.root_etag = Some(Box::new(move |etag, time| {
             p(FolderEvent::RootEtag(etag.to_vec(), time))
+        }));
+        let p = post(&self.tx);
+        cbs.lock_file_detected = Some(Box::new(move |lock_file| {
+            p(FolderEvent::LockFileDetected(lock_file.to_owned()))
         }));
         let p = post(&self.tx);
         cbs.root_file_id_received =
@@ -827,19 +834,180 @@ impl Folder {
                 self.slot_watcher_unreliable(&m);
                 Vec::new()
             }
-            // Office lock files: locking and unlocking files on the server
-            // (`setLockFileState`) is not ported; with virtual files off the
-            // "imposed" signal only updates placeholders, which are no-ops.
-            WatcherEvent::FilesLockReleased(files) | WatcherEvent::LockedFilesFound(files) => {
+            // `registerFolderWatcher` / `slotCapabilitiesChanged` connect
+            // these two only when the account has the files locking
+            // capability.
+            WatcherEvent::FilesLockReleased(files) => {
                 if self.account.capabilities().files_lock_available() {
-                    log::info!(target: LOG, "Lock files changed for {files:?}: server-side file locking is not supported by this client");
+                    self.slot_files_lock_released(&files);
+                }
+                Vec::new()
+            }
+            WatcherEvent::LockedFilesFound(files) => {
+                if self.account.capabilities().files_lock_available() {
+                    self.slot_locked_files_found(&files);
                 }
                 Vec::new()
             }
             WatcherEvent::FilesLockImposed(files) => {
-                log::debug!(target: LOG, "Lock files detected for office files {files:?}");
+                self.slot_files_lock_imposed(&files);
                 Vec::new()
             }
+        }
+    }
+
+    /// `fileFromLocalPath(localPath)`: `localPath.mid(cleanPath().length() + 1)`.
+    fn file_from_local_path(&self, local_path: &str) -> String {
+        let skip = self.clean_path().chars().count() + 1;
+        local_path.chars().skip(skip).collect()
+    }
+
+    /// The valid journal record of `file_record_path`.
+    fn valid_file_record(&self, file_record_path: &str) -> Option<SyncJournalFileRecord> {
+        self.journal
+            .get_file_record(file_record_path.as_bytes())
+            .ok()
+            .flatten()
+            .filter(SyncJournalFileRecord::is_valid)
+    }
+
+    /// `slotFilesLockReleased(files)`: the lock files of these documents
+    /// are gone; unlock on the server the ones this user locked.
+    pub fn slot_files_lock_released(&mut self, files: &[String]) {
+        log::debug!(target: LOG, "Going to unlock office files {files:?}");
+        let files_lock_type_available = self.account.capabilities().files_lock_type_available();
+        let dav_user = self.account.dav_user();
+        for file in files {
+            let file_record_path = self.file_from_local_path(file);
+            let rec = self.valid_file_record(&file_record_path);
+            // (VfsOff: `updatePlaceholderMarkInSync` does nothing.)
+            let can_unlock_file = rec.as_ref().is_some_and(|rec| {
+                rec.lockstate.locked
+                    && (!files_lock_type_available
+                        || rec.lockstate.lock_owner_type == LockOwnerType::TokenLock as i64)
+                    && rec.lockstate.lock_owner_id == dav_user
+            });
+            let Some(rec) = rec.filter(|_| can_unlock_file) else {
+                log::info!(target: LOG, "Skipping file {file} (not locked by {dav_user} with a lock this client can release)");
+                continue;
+            };
+            let remote_file_path =
+                format!("{}{}", self.remote_path_trailing_slash(), rec.path_str());
+            log::debug!(target: LOG, "Unlocking an office file {remote_file_path}");
+            let lock_owner_type = LockOwnerType::from_i64(rec.lockstate.lock_owner_type);
+            self.set_lock_file_state(
+                remote_file_path,
+                &String::from_utf8_lossy(&rec.etag),
+                LockStatus::UnlockedItem,
+                lock_owner_type,
+            );
+        }
+    }
+
+    /// `slotFilesLockImposed(files)`: with virtual files off it only
+    /// updates placeholders, which does nothing.
+    pub fn slot_files_lock_imposed(&self, files: &[String]) {
+        log::debug!(target: LOG, "Lock files detected for office files {files:?}");
+    }
+
+    /// `slotLockedFilesFound(files)`: an application opened these
+    /// documents (lock files appeared); lock them on the server with a
+    /// token lock.
+    pub fn slot_locked_files_found(&mut self, files: &[String]) {
+        log::debug!(target: LOG, "Found new lock files {files:?}");
+        for file in files {
+            let file_record_path = self.file_from_local_path(file);
+            let Some(rec) = self
+                .valid_file_record(&file_record_path)
+                .filter(|rec| !rec.lockstate.locked)
+            else {
+                log::debug!(target: LOG, "Skipping locking file {file} (not in the journal or already locked)");
+                continue;
+            };
+            let remote_file_path =
+                format!("{}{}", self.remote_path_trailing_slash(), rec.path_str());
+            log::debug!(target: LOG, "Automatically locking file on server {remote_file_path}");
+            self.set_lock_file_state(
+                remote_file_path,
+                &String::from_utf8_lossy(&rec.etag),
+                LockStatus::LockedItem,
+                LockOwnerType::TokenLock,
+            );
+        }
+    }
+
+    /// `_accountState->account()->setLockFileState(remoteFilePath,
+    /// remotePathTrailingSlash(), path(), etag, journalDb(), status, type)`;
+    /// the result comes back as [`FolderEvent::LockFileStateFinished`].
+    ///
+    /// Upstream connects the account-wide `lockFileSuccess` /
+    /// `lockFileError` signals for each request (one connection kept per
+    /// folder, so a reply can be taken for another request's); here each
+    /// request gets its own result.
+    fn set_lock_file_state(
+        &self,
+        remote_file_path: String,
+        etag: &str,
+        lock_status: LockStatus,
+        lock_owner_type: LockOwnerType,
+    ) {
+        let Some(request) = nc_sync::account_lock::set_lock_file_state(
+            &self.account,
+            &remote_file_path,
+            &self.remote_path_trailing_slash(),
+            self.path(),
+            etag,
+            &self.journal,
+            lock_status,
+            lock_owner_type,
+        ) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let id = self.id;
+        let lock = lock_status == LockStatus::LockedItem;
+        tokio::task::spawn_local(async move {
+            let result = request.await;
+            let _ = tx.send(Event::Folder(
+                id,
+                FolderEvent::LockFileStateFinished(LockFileStateFinished {
+                    remote_file_path,
+                    lock,
+                    result,
+                }),
+            ));
+        });
+    }
+
+    /// The lambdas connected to `lockFileSuccess` / `lockFileError` by
+    /// `slotFilesLockReleased` and `slotLockedFilesFound`. Returns true
+    /// when the folder must `startSync()`.
+    pub fn lock_file_state_finished(&mut self, finished: &LockFileStateFinished) -> bool {
+        let path = &finished.remote_file_path;
+        match (&finished.result, finished.lock) {
+            (Ok(()), true) => {
+                log::debug!(target: LOG, "Locking file succeeded {path}");
+                true
+            }
+            (Ok(()), false) => {
+                log::debug!(target: LOG, "Unlocking an office file succeeded {path}");
+                true
+            }
+            (Err(message), true) => {
+                log::warn!(target: LOG, "Failed to lock a file: {path} {message}");
+                false
+            }
+            (Err(message), false) => {
+                log::warn!(target: LOG, "Failed to unlock a file: {path} {message}");
+                false
+            }
+        }
+    }
+
+    /// `SyncEngine::lockFileDetected` → `FolderWatcher::slotLockFileDetectedExternally`.
+    pub fn slot_lock_file_detected(&self, lock_file: &str) {
+        if let Some(w) = self.folder_watcher.as_ref() {
+            w.slot_lock_file_detected_externally(lock_file);
         }
     }
 

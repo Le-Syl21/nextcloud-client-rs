@@ -49,7 +49,6 @@
 //!   owner when the capabilities change.
 
 pub mod linux;
-pub mod lock_file;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
@@ -66,9 +65,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use nc_sync::filesystem;
+use nc_sync::filesystem::lock_file::{self, FileLockingType};
 
 use self::linux::{FolderWatcherPrivate, InotifySys, LinuxInotify, NoInotify, WatcherParent};
-use self::lock_file::FileLockingType;
 
 const LOG: &str = "nextcloud.gui.folderwatcher";
 

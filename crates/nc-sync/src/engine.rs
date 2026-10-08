@@ -86,6 +86,9 @@ pub struct EngineCallbacks {
     /// `rootEtag(etag, time)`: the etag of the remote root, as soon as the
     /// discovery received it (the time is when it was received).
     pub root_etag: Option<Box<dyn FnMut(&[u8], std::time::SystemTime)>>,
+    /// `lockFileDetected(lockFile)`: the lock file (absolute path) of a
+    /// newly uploaded document (`detectFileLock`).
+    pub lock_file_detected: Option<Box<dyn FnMut(&str)>>,
 }
 
 /// State shared with the discovery and propagator callbacks.
@@ -173,6 +176,64 @@ pub struct SyncEngine {
     touched_files: Rc<RefCell<TouchedFiles>>,
     /// `_scheduledSyncTimers` / `_filesScheduledForLaterSync`.
     scheduled_sync_timers: ScheduledSyncTimers,
+}
+
+/// `detectFileLock(item)`: when a document was just uploaded while its
+/// application holds a lock file next to it, `lockFileDetected(lockFile)`
+/// lets the folder watcher lock it on the server.
+fn detect_file_lock(
+    cbs: &Rc<RefCell<EngineCallbacks>>,
+    account: &Account,
+    journal: &SyncJournalDb,
+    local_path: &str,
+    item: &SyncFileItemPtr,
+) {
+    let i = item.borrow();
+    let is_newly_uploaded_file = !i.is_directory()
+        && i.instruction == Instruction::New
+        && i.direction == Direction::Up
+        && i.status == Status::Success;
+    if !(is_newly_uploaded_file
+        && i.locked != crate::item::LockStatus::LockedItem
+        && account.capabilities().files_lock_available()
+        && (filesystem::is_matching_office_file_extension(&i.file)
+            || filesystem::is_matching_autocad_document_extension(&i.file)
+            || filesystem::is_matching_adobe_document_extension(&i.file)
+            || filesystem::is_matching_affinity_document_extension(&i.file)))
+    {
+        return;
+    }
+    if !journal
+        .get_file_record(i.file.as_bytes())
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.is_valid())
+    {
+        log::warn!(target: LOG, "Newly-created office file just uploaded but not in sync journal. Not going to lock it. {}", i.file);
+        return;
+    }
+    // `_propagator->fullLocalPath(item->_file)`
+    let local_file_path = format!("{local_path}{}", i.file);
+    // `QFileInfo(localFilePath).absolutePath()`
+    let dir = local_file_path
+        .rsplit_once('/')
+        .map_or("", |(d, _)| d)
+        .to_owned();
+    let dir = if dir.is_empty() { "/".to_owned() } else { dir };
+    for lock_file_path in filesystem::find_all_lock_files_in_dir(&dir) {
+        let check_result = filesystem::lock_file_target_file_path(
+            &lock_file_path,
+            &filesystem::file_path_lock_file_pattern_match(&lock_file_path),
+        );
+        if check_result.locking_type == filesystem::FileLockingType::Locked
+            && check_result.path == local_file_path
+        {
+            log::info!(target: LOG, "Newly-created office file lock detected. Let FolderWatcher take it from here... {}", i.file);
+            if let Some(cb) = cbs.borrow_mut().lock_file_detected.as_mut() {
+                cb(&lock_file_path);
+            }
+        }
+    }
 }
 
 fn emit_sync_error(cbs: &Rc<RefCell<EngineCallbacks>>, msg: &str, cat: ErrorCategory) {
@@ -858,6 +919,9 @@ impl SyncEngine {
         {
             let cbs2 = cbs.clone();
             let state2 = state.clone();
+            let account = self.account.clone();
+            let journal = self.journal.clone();
+            let local_path = self.local_path.clone();
             propagator.callbacks.item_completed = Some(Box::new(move |item, cat| {
                 // slotItemCompleted
                 state2
@@ -868,6 +932,7 @@ impl SyncEngine {
                 if let Some(cb) = cbs2.borrow_mut().item_completed.as_mut() {
                     cb(item, cat);
                 }
+                detect_file_lock(&cbs2, &account, &journal, &local_path, item);
             }));
         }
         {

@@ -31,6 +31,10 @@ impl FolderWatcherHandle for FolderWatcher {
     fn can_set_permissions(&self) -> bool {
         FolderWatcher::can_set_permissions(self)
     }
+
+    fn slot_lock_file_detected_externally(&self, lock_file: &str) {
+        FolderWatcher::slot_lock_file_detected_externally(self, lock_file);
+    }
 }
 
 /// The inotify folder watcher (`Folder::registerFolderWatcher`): the

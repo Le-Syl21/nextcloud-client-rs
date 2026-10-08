@@ -29,6 +29,7 @@ Phase 2: the daemon `ncsyncd`, with the official client's sync logic
 (folder watcher, etag polling or notify_push, scheduling and back-off,
 several accounts and folders), its `nextcloud.cfg` configuration format,
 folder takeover and hand-back, and systemd services.
+Phase 3 (in progress): server-side file locking, as in the official client.
 
 | Crate | Mirrors upstream | Content |
 |---|---|---|
@@ -77,7 +78,13 @@ official desktop client without its GUI:
   `ncsync handback`);
 * a folder that the official client's configuration also lists is never
   synced (never run both clients on one folder): take it over first;
-* folders in virtual files mode are refused.
+* folders in virtual files mode are refused;
+* when the server has file locking (the `files_lock` app), a document
+  opened in an office application (LibreOffice/Office `.~lock.*#` and `~$*`
+  lock files, AutoCAD, Adobe InDesign/InCopy/Premiere and Affinity lock
+  files) is locked on the server while its lock file exists, and unlocked
+  when the application removes it; a file locked by someone else is made
+  read-only locally.
 
 ### Setting it up (user service)
 

@@ -72,6 +72,11 @@ pub enum FolderEvent {
     EtagJobFinished(Result<Vec<u8>, HttpError>, SystemTime),
     /// The engine's scheduled sync run timer fired (lock expiry).
     ScheduledSyncTimer(u64),
+    /// A `setLockFileState` request of the folder finished (the account's
+    /// `lockFileSuccess()` / `lockFileError(message)`).
+    LockFileStateFinished(LockFileStateFinished),
+    /// `SyncEngine::lockFileDetected(lockFile)`.
+    LockFileDetected(String),
     /// `SyncEngine::started()`.
     EngineStarted,
     /// `SyncEngine::itemCompleted(item, category)`.
@@ -93,6 +98,17 @@ pub enum FolderEvent {
     AllFilesDeletedRestore,
     /// `SyncEngine::finished(success)`: the engine comes back to the folder.
     EngineFinished(Box<SyncEngine>, bool),
+}
+
+/// The end of a `setLockFileState` request made by a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockFileStateFinished {
+    /// The server-relative path of the file.
+    pub remote_file_path: String,
+    /// The requested state: true for a lock, false for an unlock.
+    pub lock: bool,
+    /// `Ok` for `lockFileSuccess()`, the message of `lockFileError`.
+    pub result: Result<(), String>,
 }
 
 /// The signals of `FolderWatcher`.
