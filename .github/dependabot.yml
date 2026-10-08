@@ -1,0 +1,48 @@
+version: 2
+
+# Third-party actions are pinned to a commit SHA: a version tag can be moved,
+# a SHA cannot. Dependabot knows how to bump a pinned SHA and keep its version
+# comment up to date, so the fixes still arrive.
+updates:
+  # Crates: one grouped PR a month for the routine bumps, and a separate PR
+  # per major (for a 0.x crate, Dependabot's "minor" 0.11 -> 0.12 is already
+  # breaking and gets its own PR too).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      # The RustCrypto hashes share the `digest` traits: bumped one at a
+      # time, two digest generations end up in one graph and the checksum
+      # code stops building. They move together or not at all.
+      rustcrypto:
+        patterns: ["digest", "md-5", "sha1", "sha2", "sha3", "crypto-common",
+                   "block-buffer"]
+      # The TLS stack: reqwest, tokio-rustls, tokio-tungstenite and the
+      # platform verifier must agree on one rustls.
+      rustls:
+        patterns: ["rustls", "rustls-*", "tokio-rustls", "reqwest",
+                   "tokio-tungstenite", "rcgen"]
+      # keyring-core and its Secret Service store are released together.
+      keyring:
+        patterns: ["keyring-core", "zbus-secret-service-keyring-store"]
+      crates:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # One grouped PR rather than one per action.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    ignore:
+      # dtolnay/rust-toolchain has no versions: its ref names the toolchain
+      # to install, and the toolchain wanted lives in `with: toolchain:`.
+      - dependency-name: dtolnay/rust-toolchain

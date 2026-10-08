@@ -8,14 +8,14 @@
 #
 #   tools/bench/build-oracle.sh [ORACLE_DIR] [TARGETS...]
 #
-# ORACLE_DIR (default ~/.cache/claude-work/nccmd-34.0.5) gets src/ (a copy
+# ORACLE_DIR (default ~/.cache/ncrs-oracle/nccmd-34.0.5) gets src/ (a copy
 # of the tag), build/ (build/bin/nextcloudcmd, build/bin/*Test).
 # TARGETS default to `nextcloudcmd SyncMoveTest`; e.g. add SyncEngineTest.
 set -euo pipefail
 tag=v34.0.5
 commit=62ebad6043b1e7c8e319f41be25d41f5a2c733e5
 image=ghcr.io/nextcloud/continuous-integration-client-qt6:client-sid-6.10.2-4
-dir="${1:-$HOME/.cache/claude-work/nccmd-34.0.5}"
+dir="${1:-$HOME/.cache/ncrs-oracle/nccmd-34.0.5}"
 shift || true
 targets=("$@")
 [[ ${#targets[@]} -gt 0 ]] || targets=(nextcloudcmd SyncMoveTest)

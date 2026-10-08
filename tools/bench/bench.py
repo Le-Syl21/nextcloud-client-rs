@@ -25,7 +25,7 @@ container with the host network. Usage:
 
 Environment: NCRS_NCSYNC (default target/debug/ncsync), NCRS_ORACLE
 (directory with build/bin/nextcloudcmd, default
-~/.cache/claude-work/nccmd-34.0.5), NCRS_ORACLE_IMAGE.
+~/.cache/ncrs-oracle/nccmd-34.0.5), NCRS_ORACLE_IMAGE.
 """
 
 import argparse
@@ -54,7 +54,7 @@ NC = "ncrs-itest-nc"
 PASSWORD = "ncrs-bench-pw-0123"
 NCSYNC = Path(os.environ.get("NCRS_NCSYNC", ROOT / "target/debug/ncsync"))
 ORACLE = Path(
-    os.environ.get("NCRS_ORACLE", Path.home() / ".cache/claude-work/nccmd-34.0.5")
+    os.environ.get("NCRS_ORACLE", Path.home() / ".cache/ncrs-oracle/nccmd-34.0.5")
 )
 ORACLE_IMAGE = os.environ.get(
     "NCRS_ORACLE_IMAGE",
