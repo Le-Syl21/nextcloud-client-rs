@@ -12,9 +12,9 @@ differs is reported.
 
 A second mode, `--roundtrip`, alternates the two clients on ONE folder and
 journal (step 1 by nextcloudcmd, step 2 by ncsync, ...), which is what a
-takeover / hand-back does, and checks that the result matches the
-single-client runs and that an idle sync by the other client propagates
-nothing.
+takeover / hand-back does, and checks that an idle sync by the other
+client then propagates nothing, and that every step ends like the
+nextcloudcmd-only run of the last side-by-side run (`<step>.json`).
 
 nextcloudcmd is the one built from the pinned tag (v34.0.5) inside the
 upstream CI image; see tools/bench/build-oracle.sh. It runs in a throw-away
@@ -566,7 +566,7 @@ def run_side_by_side(args):
         shutil.rmtree(locals_[c], ignore_errors=True)
         locals_[c].mkdir(parents=True)
     report = []
-    for name, action, env in STEPS:
+    for name, action, env in STEPS[: args.steps]:
         snaps = {}
         for c, u in users.items():
             dav = Dav(u)
@@ -601,21 +601,36 @@ def run_roundtrip(args):
     dav = Dav(user)
     order = ["oracle", "ncsync"]
     problems = []
-    for i, (name, action, env) in enumerate(STEPS):
+    for i, (name, action, env) in enumerate(STEPS[: args.steps]):
         c = order[i % 2]
         other = order[(i + 1) % 2]
         action(local, dav)
-        CLIENTS[c](local, user, env)
-        CLIENTS[c](local, user, env)
+        for n in (1, 2):
+            _, log = CLIENTS[c](local, user, env)
+            (WORK / f"roundtrip.{name}.{c}.{n}.log").write_text(log)
         before = snapshot(local, dav)
         # The other client takes the folder over: nothing to propagate.
         code, log = CLIENTS[other](local, user, env)
         (WORK / f"roundtrip.{name}.{other}.log").write_text(log)
         after = snapshot(local, dav)
+        (WORK / f"roundtrip.{name}.json").write_text(
+            json.dumps({"before": before, "after": after}, indent=1, sort_keys=True, default=str)
+        )
         d = diff(before, after)
         print(f"== {name}: synced by {c}, idle takeover by {other}: {'same' if not d else str(len(d)) + ' change(s)'}")
         for line in d:
             print("   " + line)
+        # The alternating result against the single-client run of the
+        # oracle (from a previous side-by-side run, when there is one).
+        ref = WORK / f"{name}.json"
+        if ref.exists():
+            single = json.loads(ref.read_text())["oracle"]
+            single.pop("exit", None)
+            d2 = diff(single, json.loads(json.dumps(after, default=str)))
+            print(f"   vs nextcloudcmd alone: {'same' if not d2 else str(len(d2)) + ' difference(s)'}")
+            for line in d2:
+                print("   " + line)
+            d = d + d2
         problems.append((name, d))
     return problems
 
@@ -623,6 +638,7 @@ def run_roundtrip(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--roundtrip", action="store_true")
+    ap.add_argument("--steps", type=int, default=None, help="run only the first N steps")
     args = ap.parse_args()
     os.umask(0o022)
     WORK.mkdir(parents=True, exist_ok=True)

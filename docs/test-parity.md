@@ -955,3 +955,42 @@ on a FakeFolder sync: a failed upload and a failed download).
 | test/testfolder.cpp initTestCase | — | n/a (test setup) |
 | test/testfolder.cpp test_sidebarDisplayName | — | n/a (`Folder::sidebarDisplayName` names the folder in the Windows Explorer navigation pane and the virtual files providers; no Linux sync path uses it) |
 
+
+# Side-by-side bench against nextcloudcmd v34.0.5
+
+`tools/bench/bench.py` (see the README) runs 19 scripted steps with the
+official `nextcloudcmd` built from the pinned tag (`tools/bench/build-oracle.sh`,
+upstream CI image) and with `ncsync`, each against its own user of the test
+server: initial up/download, local edits/deletes/moves/folder renames,
+remote edits/moves/deletes/folder moves, chunked upload, conflicts (both
+edited, same content, delete vs edit both ways, new on both sides), a
+directory/file type conflict, renames on both sides, case-differing names,
+mtime-only changes, NFC/NFD, leading/trailing spaces and non-Latin names,
+150 local + 40 remote files, a folder created on both sides, remote type
+changes, a case-only folder rename, deletions on both sides, idle syncs.
+After every step it compares the local trees (names, sizes, contents,
+mtimes, modes), the server trees and a dump of the journals (schema, every
+table; etags, file ids and inodes as "matches the server/disk").
+
+`--roundtrip` alternates the two clients on one folder and journal, and
+after every step has the other client take the folder over: it must find
+nothing to do, and the result must equal the nextcloudcmd-only run.
+
+Differences found and fixed:
+
+| Found | Cause | Fix |
+|---|---|---|
+| `metadata.e2eCertificateFingerprint` is `''` upstream, NULL here | `setFileRecord` binds it with `bindValue(19, {})`, i.e. an empty `QByteArray`: TEXT `''` | bound as `''` (`nc-journal`, 1ab49af) |
+| testsyncmove/testMovePropagation (pending) | upstream's `QCOMPARE` of `printDbData` goes through `QTest::toString`, truncated to 245 characters (shown by the upstream test binary) | the truncation is reproduced in `print_db_data` (c9bb556) |
+
+Bench artefacts (not client differences), normalized by the script: the
+`last_sync` time, the creation time of directories, the conflict date in
+file names, the umask (the oracle's container uses 022).
+
+Last result (2026-10-08): side by side 0 differences in 19 steps;
+round trip: the other client never had anything to do after a takeover
+(19/19). Compared with the nextcloudcmd-only run, one run showed
+`quotaBytesUsed` 0 instead of 288002 for one folder for 6 steps; it did
+not reproduce (3 more runs of each client, and the same sequence again,
+all 288002): both clients copy the server's `quota-used-bytes` of the
+PROPFIND, which the server had not updated yet at that moment.
