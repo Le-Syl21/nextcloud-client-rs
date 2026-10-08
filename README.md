@@ -54,11 +54,15 @@ How close it is:
 
 ### Install
 
-**Release binaries** (Linux x86_64 and aarch64): download the archive from the
-[releases page](https://github.com/Le-Syl21/nextcloud-client-rs/releases), check it against
-`SHA256SUMS`, and install the two programs where the systemd units expect them:
+**Release binaries** (Linux x86_64 and aarch64, glibc 2.35 or later: Debian 12,
+Ubuntu 22.04 and later): download the archive and `SHA256SUMS` from the
+[releases page](https://github.com/Le-Syl21/nextcloud-client-rs/releases), check them (the
+key's fingerprint is given in the release notes), and install the two programs where the
+systemd units expect them:
 
 ```sh
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify nextcloud-client-rs-linux-x86_64.tar.gz -R Le-Syl21/nextcloud-client-rs   # optional: built by this repository's CI
 tar xzf nextcloud-client-rs-linux-x86_64.tar.gz
 cd nextcloud-client-rs-linux-x86_64
 sudo install -m755 ncsync ncsyncd /usr/bin/
@@ -465,12 +469,15 @@ du client officiel, un dossier peut passer du client officiel à `ncsyncd` et re
 
 ### Installation
 
-**Binaires des versions publiées** (Linux x86_64 et aarch64) : téléchargez l'archive sur la
-[page des versions](https://github.com/Le-Syl21/nextcloud-client-rs/releases), vérifiez-la
-avec `SHA256SUMS`, puis installez les deux programmes là où les unités systemd les
-attendent :
+**Binaires des versions publiées** (Linux x86_64 et aarch64, glibc 2.35 ou plus récente :
+Debian 12, Ubuntu 22.04 et suivantes) : téléchargez l'archive et `SHA256SUMS` sur la
+[page des versions](https://github.com/Le-Syl21/nextcloud-client-rs/releases), vérifiez-les
+(l'empreinte de la clé figure dans les notes de version), puis installez les deux
+programmes là où les unités systemd les attendent :
 
 ```sh
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify nextcloud-client-rs-linux-x86_64.tar.gz -R Le-Syl21/nextcloud-client-rs   # facultatif : construit par la CI de ce dépôt
 tar xzf nextcloud-client-rs-linux-x86_64.tar.gz
 cd nextcloud-client-rs-linux-x86_64
 sudo install -m755 ncsync ncsyncd /usr/bin/

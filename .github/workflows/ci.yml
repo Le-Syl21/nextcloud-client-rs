@@ -1,0 +1,220 @@
+name: CI
+
+# Nothing builds on a push: work lands directly on main, is built and tested
+# locally, and the builds run at a tag (before anything is signed or
+# published) or on demand. A manual run (workflow_dispatch) lints, tests and
+# builds every target but signs and publishes nothing: those jobs only run
+# for a v* tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # The tag must name the workspace version exactly, pre-release included
+      # (v0.1.0-beta.1 <-> 0.1.0-beta.1).
+      - name: Check that the tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(cargo pkgid -p ncsync)
+          crate="${crate##*[@#]}"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $crate: update Cargo.toml, then re-tag"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME <-> Cargo.toml $crate: OK"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  # Linux only: the daemon needs inotify, systemd and the Secret Service, and
+  # the official client has Windows and macOS code paths that are not ported
+  # (see the README's Limitations). Native runners, no cross-compiling.
+  # Built on Ubuntu 22.04, the oldest runner image, so that the binaries need
+  # glibc 2.35 at most (Debian 12, Ubuntu 22.04 and later); glibc rather than
+  # a static musl build, so that user lookups (`--instance alice`) go through
+  # NSS like any other program (LDAP, sssd, systemd-homed users).
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          - os: ubuntu-22.04-arm
+            label: linux-aarch64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
+    env:
+      GLIBC_MAX: '2.35'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          key: ${{ matrix.label }}
+
+      # The whole suite: the ported upstream tests (FakeFolder, journal,
+      # discovery, propagation, daemon) run without a server.
+      - name: Run tests
+        run: cargo test --locked --workspace
+
+      - name: Build
+        run: cargo build --locked --release -p ncsync -p ncsyncd
+
+      - name: Smoke test (--version)
+        run: |
+          target/release/ncsync --version
+          target/release/ncsyncd --version
+
+      # A binary that asks for a newer glibc than the one announced in the
+      # README would fail to start on the oldest supported systems.
+      - name: Check the glibc floor
+        run: |
+          for bin in ncsync ncsyncd; do
+            need=$(objdump -T "target/release/$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$bin needs glibc $need"
+            if [ "$(printf '%s\n%s\n' "$need" "$GLIBC_MAX" | sort -V | tail -1)" != "$GLIBC_MAX" ]; then
+              echo "::error::$bin needs glibc $need, more than $GLIBC_MAX"
+              exit 1
+            fi
+          done
+
+      # --- Packaging (the checksums are made in a job of their own). ---
+      - name: Package
+        run: |
+          name=nextcloud-client-rs-${{ matrix.label }}
+          mkdir -p "$name/systemd"
+          cp target/release/ncsync target/release/ncsyncd README.md CHANGELOG.md LICENSE "$name/"
+          cp contrib/systemd/ncsyncd.service contrib/systemd/ncsyncd@.service "$name/systemd/"
+          tar czf "$name.tar.gz" --owner=0 --group=0 "$name"
+          tar tzvf "$name.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextcloud-client-rs-${{ matrix.label }}
+          path: nextcloud-client-rs-${{ matrix.label }}.tar.gz
+
+  # SHA256SUMS for the archives. Linux builds need no signing key; the
+  # `signing` environment comes back with the macOS and Windows builds.
+  checksums:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nextcloud-client-rs-linux-*
+          path: dl
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dl
+        run: |
+          sha256sum nextcloud-client-rs-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Upload the checksums
+        uses: actions/upload-artifact@v7
+        with:
+          name: checksums
+          path: dl/SHA256SUMS
+
+  release:
+    needs: [lint, build, checksums]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+
+      # GitHub build provenance (Sigstore): `gh attestation verify` proves an
+      # archive was built by this workflow from this tag. Needs no secret.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/artifacts/nextcloud-client-rs-linux-*.tar.gz
+
+      # A tag with a '-' (v0.1.0-beta.1) is published as a pre-release.
+      # The notes always go through --notes-file (never `--notes -`, which
+      # publishes a body made of a single "-").
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          a="$RUNNER_TEMP/artifacts"
+          notes="$RUNNER_TEMP/notes.md"
+          cat > "$notes" <<EOF
+          Unofficial Rust port of the Nextcloud desktop client's sync engine (reference: v34.0.5):
+          \`ncsync\` (one-shot sync, like \`nextcloudcmd\`) and \`ncsyncd\` (headless daemon, systemd units included).
+
+          | system | file |
+          |---|---|
+          | Linux x86_64 (glibc 2.35 or later) | \`nextcloud-client-rs-linux-x86_64.tar.gz\` |
+          | Linux aarch64 (glibc 2.35 or later) | \`nextcloud-client-rs-linux-aarch64.tar.gz\` |
+
+          **Verify:**
+
+          \`\`\`sh
+          sha256sum -c --ignore-missing SHA256SUMS
+          gh attestation verify nextcloud-client-rs-linux-x86_64.tar.gz -R ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          Install, usage and **limitations** (Linux only, no end-to-end encryption, no virtual files, beta): see the README.
+          Not affiliated with Nextcloud GmbH; please report problems here, not to Nextcloud.
+          EOF
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "nextcloud-client-rs ${GITHUB_REF_NAME#v}" \
+            --notes-file "$notes" \
+            --generate-notes \
+            $prerelease \
+            "$a"/*
+          body=$(gh release view "$GITHUB_REF_NAME" --json body --jq '.body')
+          if [ ${#body} -lt 100 ]; then
+            echo "::error::release body is only ${#body} characters"
+            exit 1
+          fi

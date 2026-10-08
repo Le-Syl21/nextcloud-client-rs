@@ -6,6 +6,8 @@ official Nextcloud desktop client v34.0.5.
 
 ## Unreleased
 
+## 0.1.0-beta.1 (2026-10-08)
+
 First public version: an unofficial Rust port of the sync engine of the
 Nextcloud desktop client v34.0.5, for Linux.
 
@@ -28,3 +30,6 @@ Nextcloud desktop client v34.0.5, for Linux.
   (see docs/test-parity.md).
 - Not supported: virtual files, end-to-end encryption, Windows and macOS;
   bulk upload is ported but off, as upstream. See the README's Limitations.
+- Release binaries for Linux x86_64 and aarch64 (glibc 2.35 or later), with
+  the systemd units, `SHA256SUMS`, and
+  GitHub build provenance attestations.
