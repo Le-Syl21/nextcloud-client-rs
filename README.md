@@ -154,8 +154,8 @@ client without its GUI:
   When the server's administrator asked for a **remote wipe**, every folder of the account
   is deleted, local files included, the account and its stored app password are removed,
   and the server is told (`index.php/core/wipe/success`). Otherwise the account stays
-  signed out until new credentials are given (`ncsync account add`, then
-  `systemctl --user reload ncsyncd`);
+  signed out until new credentials are given (`ncsync account add`, which the running
+  daemon picks up);
 * when the server enables the `security_guard` diagnostics, the counts of some sync
   failures (conflicts, server errors, viruses detected) are sent to it once a day, like the
   official client; they are kept meanwhile in `.userdata_<hash>.db` next to the
@@ -208,9 +208,53 @@ version=13
 remotePollInterval=30000
 ```
 
-(`networkUploadLimitSetting=1` with `networkUploadLimit=500`: 500 KB/s.) Edit the file
-while the daemon is stopped, or reload it with `systemctl --user restart ncsyncd`;
-`systemctl --user reload ncsyncd` (SIGHUP) re-reads the credentials only.
+(`networkUploadLimitSetting=1` with `networkUploadLimit=500`: 500 KB/s.)
+
+The `ncsync` commands that change the configuration (`account add|remove`,
+`folder add|remove`, `takeover`, `handback`) tell a running daemon to reload it and say so
+(`The running ncsyncd picked up the change.`); without a daemon they just edit the file.
+After editing the file by hand (preferably while the daemon is stopped: it writes the file
+too), `systemctl --user reload ncsyncd` (SIGHUP) does the same: new accounts and folders
+are added, the ones that are gone stop (a running sync is aborted first, their journals are
+kept), and the credentials are read again. Global settings (the `[Nextcloud]` group) and an
+account's proxy need `systemctl --user restart ncsyncd`.
+
+To remove an account:
+
+```sh
+ncsync account remove 0          # refused while folders use it
+ncsync account remove 0 --force  # removes its folders too (their files are kept)
+```
+
+Like the official client's "Remove account", its app password is revoked on the server
+(`DELETE ocs/v2.php/core/apppassword`, a warning if that fails) and forgotten: the keyring
+item of service `ncsyncd` and the password file `ncsync` wrote are deleted. Nothing of the
+official client's (keyring service `Nextcloud`) is touched, and the app password is kept
+on the server when the official client has the same account (a takeover copies its app
+password). A password file of your own and systemd credentials are left in place, and
+named. An account a taken-over folder belongs to needs `ncsync handback` first, or
+`--force` (the folder is then dropped and its journal kept, as with
+`ncsync folder remove --force`).
+
+#### Choosing what to sync
+
+Like the official client's "Choose what to sync", remote subfolders of a folder can be left
+out:
+
+```sh
+ncsync folder exclude 1 Photos/2019 Videos   # paths relative to the folder's remote path,
+                                             # or local paths inside the folder
+ncsync folder excluded 1                     # the excluded subfolders (--json)
+ncsync folder include 1 Photos/2019          # sync it again
+```
+
+The list is the folder's selective sync blacklist in its journal, as upstream. The next
+sync (started at once by a running daemon) removes the local copies of newly excluded
+folders, except the files changed locally since the last sync, which are kept and ignored;
+nothing is deleted on the server. An included folder is downloaded again. While the daemon
+runs, the change goes through it (it keeps the journal open); otherwise `ncsync` edits the
+journal itself and the daemon's next start syncs it. A subfolder of an excluded folder
+cannot be included on its own: include the parent, then exclude the other subfolders.
 
 #### Setting it up (system service, one per user)
 
@@ -301,6 +345,14 @@ Deliberate behavioural differences with the official client v34.0.5:
 * **`--httpproxy` in provisioning mode.** Upstream parses `--httpproxy` but does not apply
   it to the account setup; `ncsync` sends every request of the setup through it
   (`status.php`, Login Flow v2 and its polling, `ocs/v1.php/cloud/user`, the PROPFIND).
+* **Removing an account with folders.** The official client's "Remove account" removes the
+  account's folders with it; `ncsync account remove` refuses while folders use the account
+  and removes them only with `--force`. Its app password is not revoked on the server when
+  the official client has the same account, since a takeover shares it between the two
+  clients.
+* **Removing a folder that is syncing.** Upstream wipes the journal of a removed folder at
+  once (its sync engine aborts synchronously); `ncsyncd` aborts the sync and wipes the
+  journal when the engine is back, so the aborted sync cannot write to a deleted journal.
 
 ### Limitations
 
@@ -575,8 +627,8 @@ bureau officiel sans son interface :
   distance**, tous les dossiers du compte sont supprimés, fichiers locaux compris, le compte
   et son mot de passe enregistré sont retirés, et le serveur en est informé
   (`index.php/core/wipe/success`). Sinon, le compte reste déconnecté jusqu'à ce que de
-  nouveaux identifiants soient fournis (`ncsync account add`, puis
-  `systemctl --user reload ncsyncd`) ;
+  nouveaux identifiants soient fournis (`ncsync account add`, que le service en marche
+  prend en compte) ;
 * quand le serveur active les diagnostics `security_guard`, le nombre de certains échecs de
   synchronisation (conflits, erreurs du serveur, virus détectés) lui est envoyé une fois par
   jour, comme le fait le client officiel ; ils sont conservés en attendant dans
@@ -629,9 +681,57 @@ version=13
 remotePollInterval=30000
 ```
 
-(`networkUploadLimitSetting=1` avec `networkUploadLimit=500` : 500 Ko/s.) Modifiez le
-fichier service arrêté, ou faites-le relire avec `systemctl --user restart ncsyncd` ;
-`systemctl --user reload ncsyncd` (SIGHUP) ne relit que les identifiants.
+(`networkUploadLimitSetting=1` avec `networkUploadLimit=500` : 500 Ko/s.)
+
+Les commandes `ncsync` qui modifient la configuration (`account add|remove`,
+`folder add|remove`, `takeover`, `handback`) demandent au service en marche de la relire, et
+le disent (`The running ncsyncd picked up the change.`) ; sans service, elles modifient
+seulement le fichier. Après une modification à la main (de préférence service arrêté : il
+écrit aussi le fichier), `systemctl --user reload ncsyncd` (SIGHUP) fait de même : les
+nouveaux comptes et dossiers sont ajoutés, ceux qui ont disparu s'arrêtent (une
+synchronisation en cours est d'abord interrompue, leurs journaux sont gardés), et les
+identifiants sont relus. Les réglages généraux (le groupe `[Nextcloud]`) et le proxy d'un
+compte demandent `systemctl --user restart ncsyncd`.
+
+Pour retirer un compte :
+
+```sh
+ncsync account remove 0          # refusé tant que des dossiers l'utilisent
+ncsync account remove 0 --force  # retire aussi ses dossiers (leurs fichiers sont gardés)
+```
+
+Comme « Supprimer le compte » du client officiel, son mot de passe d'application est
+révoqué sur le serveur (`DELETE ocs/v2.php/core/apppassword`, un avertissement en cas
+d'échec) et oublié : l'entrée du trousseau du service `ncsyncd` et le fichier de mot de
+passe écrit par `ncsync` sont supprimés. Rien du client officiel (service de trousseau
+`Nextcloud`) n'est touché, et le mot de passe d'application est gardé sur le serveur quand
+le client officiel a le même compte (une reprise copie son mot de passe). Un fichier de mot
+de passe à vous et les identifiants systemd restent en place, et sont nommés. Un compte
+auquel appartient un dossier repris demande d'abord `ncsync handback`, ou `--force` (le
+dossier est alors abandonné et son journal gardé, comme avec
+`ncsync folder remove --force`).
+
+#### Choisir ce qui est synchronisé
+
+Comme « Choisir ce qu'il faut synchroniser » du client officiel, des sous-dossiers distants
+d'un dossier peuvent être laissés de côté :
+
+```sh
+ncsync folder exclude 1 Photos/2019 Videos   # chemins relatifs au chemin distant du dossier,
+                                             # ou chemins locaux dans le dossier
+ncsync folder excluded 1                     # les sous-dossiers exclus (--json)
+ncsync folder include 1 Photos/2019          # le synchroniser de nouveau
+```
+
+La liste est la liste noire de synchronisation sélective du journal du dossier, comme dans
+l'amont. La synchronisation suivante (lancée aussitôt par un service en marche) supprime
+les copies locales des dossiers nouvellement exclus, sauf les fichiers modifiés en local
+depuis la dernière synchronisation, qui sont gardés et ignorés ; rien n'est supprimé sur le
+serveur. Un dossier réinclus est téléchargé de nouveau. Quand le service tourne, le
+changement passe par lui (il garde le journal ouvert) ; sinon `ncsync` modifie le journal
+lui-même et le prochain démarrage du service synchronise. Un sous-dossier d'un dossier
+exclu ne peut pas être réinclus seul : réincluez le parent, puis excluez les autres
+sous-dossiers.
 
 #### Mise en place (service système, un par utilisateur)
 
@@ -727,6 +827,15 @@ Différences de comportement voulues avec le client officiel v34.0.5 :
 * **`--httpproxy` en création de compte.** L'amont lit `--httpproxy` mais ne l'applique pas
   à la création du compte ; `ncsync` fait passer par lui chaque requête de la création
   (`status.php`, Login Flow v2 et son attente, `ocs/v1.php/cloud/user`, le PROPFIND).
+* **Retrait d'un compte qui a des dossiers.** « Supprimer le compte » du client officiel
+  retire ses dossiers avec lui ; `ncsync account remove` refuse tant que des dossiers
+  utilisent le compte, et ne les retire qu'avec `--force`. Son mot de passe d'application
+  n'est pas révoqué sur le serveur quand le client officiel a le même compte, puisqu'une
+  reprise le partage entre les deux clients.
+* **Retrait d'un dossier en cours de synchronisation.** L'amont efface tout de suite le
+  journal d'un dossier retiré (son moteur s'interrompt de façon synchrone) ; `ncsyncd`
+  interrompt la synchronisation et efface le journal au retour du moteur, pour que la
+  synchronisation interrompue ne puisse pas écrire dans un journal supprimé.
 
 ### Limites
 

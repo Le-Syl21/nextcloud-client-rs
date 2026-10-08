@@ -4,6 +4,35 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); the behavioural reference is the
 official Nextcloud desktop client v34.0.5.
 
+## Unreleased
+
+- **Live reload of `ncsyncd`.** `ncsync account add|remove`, `folder add|remove`,
+  `takeover` and `handback` tell a running daemon to re-read its configuration (a new
+  `reload` control request; no daemon, no error) and print whether it did. New accounts and
+  folders are added and scheduled, removed ones stop: a running sync is aborted and the
+  journal is only wiped (`folder remove`) or closed and kept (`handback`, hand edits) once
+  the engine is back; the request is answered then. SIGHUP (`systemctl reload`) now does
+  the same full reload instead of re-reading the credentials only, and tells systemd
+  `RELOADING`/`READY`.
+- **`ncsync account remove <id> [--force]`**, like the official client's "Remove account"
+  (`AccountManager::deleteAccount`): refused while folders use the account (or a taken-over
+  folder belongs to it) unless `--force`, which removes them too (files kept, journals of
+  taken-over folders kept); the app password is revoked on the server
+  (`DELETE ocs/v2.php/core/apppassword`, best effort) unless the official client has the
+  same account, then forgotten (keyring service `ncsyncd`, the password file `ncsync`
+  wrote); the official client's keyring is never touched, and systemd credentials or
+  password files of your own are left in place and named.
+- **`ncsync folder exclude|include|excluded <folder> <subfolder>...`**: selective sync
+  ("Choose what to sync") from the command line, with upstream's
+  `FolderStatusModel::slotApplySelectiveSync` semantics (white list, undecided list,
+  remote and local rediscovery of the changed paths, immediate sync). It goes through the
+  running daemon (a new `selective-sync` control request), which holds the journal, or edits
+  the journal directly when no daemon syncs the folder.
+- A folder removed while it syncs no longer has its journal deleted under the running
+  engine (remote wipe included): the wipe waits for the engine to stop; and a folder
+  removed right after its sync no longer keeps the next syncs from starting (upstream's
+  `_currentSyncFolder` is a `QPointer`, cleared when the folder is deleted).
+
 ## 0.1.0-beta.2 (2026-10-08)
 
 First beta tested on a real desktop (Secret Service keyring, systemd user unit, inotify,

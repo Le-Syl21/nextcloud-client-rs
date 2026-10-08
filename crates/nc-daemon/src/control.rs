@@ -10,9 +10,16 @@
 //!
 //! Requests: `{"command":"status"}`, `{"command":"pause","folder":"1"}`,
 //! `{"command":"resume"}` (no folder: all folders),
-//! `{"command":"sync-now","folder":"1"}`.
+//! `{"command":"sync-now","folder":"1"}`,
+//! `{"command":"reload","config":"/path/ncsyncd.cfg","wipe":["2"]}`,
+//! `{"command":"selective-sync","folder":"1","exclude":["Photos/"],"include":[]}`.
 //! `pause`/`resume` are `Folder::setSyncPaused`, `sync-now` is
-//! `FolderMan::forceSyncForFolder` (or `scheduleAllFolders` for all).
+//! `FolderMan::forceSyncForFolder` (or `scheduleAllFolders` for all),
+//! `reload` re-reads the configuration ([`crate::startup::reload`], handled
+//! by the event loop, answered once the removed folders stopped syncing),
+//! `selective-sync` edits a folder's selective sync lists
+//! (`FolderStatusModel::slotApplySelectiveSync`) and answers with its
+//! blacklist (no change when both lists are empty).
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -44,6 +51,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         folder: Option<String>,
     },
+    /// Re-read the configuration.
+    Reload {
+        /// The configuration file the requester changed: refused when the
+        /// daemon uses another one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<String>,
+        /// Removed folders whose journal is deleted (`removeFolder`); the
+        /// other removed folders keep theirs (`unloadFolder`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wipe: Vec<String>,
+    },
+    /// Exclude and include folders of the selective sync ("Choose what to
+    /// sync") of a folder.
+    SelectiveSync {
+        /// The folder's alias or local path.
+        folder: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        include: Vec<String>,
+    },
 }
 
 /// A control response: `{"ok":true,...}` or `{"ok":false,"error":...}`.
@@ -74,6 +102,36 @@ pub fn handle(fm: &mut FolderMan, request: Request) -> Response {
         Request::Pause { folder } => set_paused(fm, folder.as_deref(), true),
         Request::Resume { folder } => set_paused(fm, folder.as_deref(), false),
         Request::SyncNow { folder } => sync_now(fm, folder.as_deref()),
+        Request::SelectiveSync {
+            folder,
+            exclude,
+            include,
+        } => selective_sync(fm, &folder, &exclude, &include),
+        // The event loop answers it (it needs the configuration).
+        Request::Reload { .. } => error("reload is not available here"),
+    }
+}
+
+fn selective_sync(
+    fm: &mut FolderMan,
+    folder: &str,
+    exclude: &[String],
+    include: &[String],
+) -> Response {
+    let alias = match aliases(fm, Some(folder)) {
+        Ok(a) => a[0].clone(),
+        Err(e) => return e,
+    };
+    match fm.apply_selective_sync(&alias, exclude, include) {
+        Some(Ok(change)) => json!({
+            "ok": true,
+            "folder": alias,
+            "blacklist": change.black_list,
+            "changes": change.changes,
+            "whitelist_added": change.white_list_added,
+        }),
+        Some(Err(e)) => error(e.to_string()),
+        None => error(format!("no such folder: {folder}")),
     }
 }
 
@@ -246,6 +304,8 @@ pub fn serve(path: &Path, tx: UnboundedSender<Event>) -> std::io::Result<()> {
 pub fn request(path: &Path, request: &Request) -> std::io::Result<Response> {
     use std::io::{BufRead, Write};
     let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+    // A reload waits for the syncs of removed folders to stop.
+    stream.set_read_timeout(Some(crate::daemon::SHUTDOWN_GRACE * 2))?;
     let mut text = serde_json::to_string(request).map_err(std::io::Error::other)?;
     text.push('\n');
     stream.write_all(text.as_bytes())?;
@@ -274,6 +334,25 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Request>(r#"{"command":"status"}"#).unwrap(),
             Request::Status
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Reload {
+                config: None,
+                wipe: vec!["2".into()]
+            })
+            .unwrap(),
+            r#"{"command":"reload","wipe":["2"]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(
+                r#"{"command":"selective-sync","folder":"1","exclude":["A"]}"#
+            )
+            .unwrap(),
+            Request::SelectiveSync {
+                folder: "1".into(),
+                exclude: vec!["A".into()],
+                include: Vec::new()
+            }
         );
     }
 }

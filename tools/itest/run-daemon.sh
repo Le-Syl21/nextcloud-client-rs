@@ -109,6 +109,57 @@ sleep 5
 wait_for 30 "sync after resume" test -f "$work/local/paused.txt"
 "$ncsync" status
 
+echo "5b. selective sync through the daemon: exclude, include"
+curl -s "${auth[@]}" -X MKCOL "$dav/Excl" >/dev/null
+echo excluded | curl -s "${auth[@]}" -T - "$dav/Excl/x.txt"
+"$ncsync" sync-now 1 >/dev/null
+wait_for 30 "Excl/x.txt downloaded" test -f "$work/local/Excl/x.txt"
+wait_for 60 "idle" idle
+out="$("$ncsync" folder exclude 1 Excl)" || fail "folder exclude"
+grep -q "Excluded Excl/" <<<"$out" || fail "exclude output: $out"
+grep -q "running ncsyncd syncs" <<<"$out" || fail "exclude did not go through the daemon: $out"
+wait_for 30 "Excl removed locally" bash -c "! test -e '$work/local/Excl/x.txt'"
+remote_has Excl/x.txt || fail "the excluded folder was deleted on the server"
+[[ "$("$ncsync" folder excluded 1)" == "Excl/" ]] || fail "folder excluded"
+"$ncsync" folder include 1 Excl | grep -q "Included Excl/" || fail "folder include"
+wait_for 30 "Excl downloaded again" test -f "$work/local/Excl/x.txt"
+
+echo "5c. live reload: folder add and remove"
+curl -s "${auth[@]}" -X MKCOL "$dav/Sub" >/dev/null
+echo sub | curl -s "${auth[@]}" -T - "$dav/Sub/sub.txt"
+out="$("$ncsync" folder add "$work/local2" --remote /Sub)" || fail "folder add"
+grep -q "picked up the change" <<<"$out" || fail "the daemon did not reload: $out"
+wait_for 60 "second folder synced without a restart" test -f "$work/local2/sub.txt"
+journal2="$(ls "$work"/local2/.sync_*.db)"
+out="$("$ncsync" folder remove 2)" || fail "folder remove"
+grep -q "picked up the change" <<<"$out" || fail "the daemon did not reload: $out"
+[[ "$(status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["folders"]))')" == 1 ]] || fail "removed folder still loaded"
+[[ -e "$journal2" ]] && fail "the removed folder's journal is still there"
+grep -q "Removing  2" "$work/daemon.log" || fail "no removeFolder log line"
+
+echo "5d. account remove: refused with folders, --force, app password revoked"
+docker exec -e OC_PASS=ncrs-itest-bob-pw -u www-data ncrs-itest-nc php occ user:add --password-from-env bob >/dev/null
+bob_password="$(docker exec -e NC_PASS=ncrs-itest-bob-pw -u www-data ncrs-itest-nc php occ user:auth-tokens:add --password-from-env --name=ncsyncd-itest bob | tail -1)"
+printf '%s\n' "$bob_password" > "$work/bob-password"
+echo from-bob | curl -s -u bob:ncrs-itest-bob-pw -T - "$url/remote.php/dav/files/bob/hello.txt"
+"$ncsync" account add "$url" -u bob --app-password-file "$work/bob-password" | grep -q "picked up the change" || fail "account add reload"
+"$ncsync" folder add "$work/local3" --account 1 >/dev/null || fail "folder add for bob"
+wait_for 60 "bob's folder synced" test -f "$work/local3/hello.txt"
+bob_dav() { curl -s -o /dev/null -w '%{http_code}' -u "bob:$bob_password" -X PROPFIND -H 'Depth: 0' "$url/remote.php/dav/files/bob/"; }
+[[ "$(bob_dav)" == 207 ]] || fail "bob's app password does not work"
+"$ncsync" account remove 1 2>/dev/null && fail "account remove with folders was not refused"
+out="$("$ncsync" account remove 1 --force)" || fail "account remove --force"
+grep -q "Revoked its app password on the server" <<<"$out" || fail "app password not revoked: $out"
+grep -q "picked up the change" <<<"$out" || fail "the daemon did not reload: $out"
+[[ "$(bob_dav)" == 401 ]] || fail "bob's app password still works on the server"
+[[ "$(status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["accounts"]), len(d["folders"]))')" == "1 1" ]] || fail "removed account still loaded"
+test -f "$work/local3/hello.txt" || fail "the files of the removed folder were not kept"
+
+echo "5e. SIGHUP reloads the configuration"
+kill -HUP "$(cat "$work/daemon.pid")"
+wait_for 10 "reload on SIGHUP" grep -q "SIGHUP: reloading the configuration" "$work/daemon.log"
+wait_for 10 "reloaded" grep -q "Configuration reloaded: 1 accounts, 1 folders" "$work/daemon.log"
+
 echo "6. clean stop"
 kill -TERM "$(cat "$work/daemon.pid")"
 for _ in $(seq 60); do kill -0 "$(cat "$work/daemon.pid")" 2>/dev/null || break; sleep 0.5; done

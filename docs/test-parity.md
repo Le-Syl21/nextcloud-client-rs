@@ -755,6 +755,16 @@ loop against the FakeFolder server: the initial sync of a loaded folder, a
 remote change found by etag polling, a local change found by inotify,
 pause (a remote change is not applied), resume and sync-now.
 
+`rust_only_daemon_selective_sync_and_folder_removal`: the `selective-sync`
+control request (`FolderStatusModel::slotApplySelectiveSync`): an excluded
+folder loses its local files unchanged since the last sync and keeps a
+changed one, the server keeps everything, a file or a subfolder of an
+excluded folder is refused, an included folder is downloaded again and goes
+to the white list; then a reload unloads the folder and keeps its journal,
+closed. `rust_only_daemon_removed_folder_journal_wiped_after_its_sync`: a
+folder removed by a reload while a download hangs: the answer waits for the
+aborted engine, then the journal is gone and stays gone.
+
 ## test/testaccountmanager.cpp → `crates/nc-daemon/src/account_config/tests.rs`
 
 | Upstream | Rust | Status |

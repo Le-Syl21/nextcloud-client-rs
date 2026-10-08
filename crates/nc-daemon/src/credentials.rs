@@ -463,20 +463,58 @@ impl<'a> CredentialResolver<'a> {
         Ok(CredentialSource::PasswordFile(path))
     }
 
-    /// Deletes what [`Self::store_app_password`] wrote. Systemd credentials
-    /// are left to the administrator.
-    pub fn forget(&self, acc: &AccountDefinition) -> Result<(), CredentialsError> {
+    /// Deletes what [`Self::store_app_password`] wrote: the keyring item of
+    /// our service (never the official client's), and the password file
+    /// when it is ours (`.../credentials/ncsyncd-<id>`). A password file of
+    /// the administrator's own and systemd credentials are left in place
+    /// ([`Forgotten`] says which).
+    pub fn forget(&self, acc: &AccountDefinition) -> Result<Forgotten, CredentialsError> {
+        let mut out = Forgotten::default();
         if let Some(file) = &acc.password_file {
-            let _ = std::fs::remove_file(file);
+            let path = PathBuf::from(file);
+            let ours = path
+                .file_name()
+                .is_some_and(|n| n == password_file_name(&acc.id).as_str())
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|d| d == "credentials");
+            if ours {
+                if std::fs::remove_file(&path).is_ok() {
+                    out.removed_password_file = Some(path);
+                }
+            } else {
+                out.kept_password_file = Some(path);
+            }
+        }
+        if let Some(dir) = &self.credentials_directory {
+            let path = dir.join(systemd_credential_name(&self.mode, &acc.id));
+            if path.exists() {
+                out.kept_systemd_credential = Some(path);
+            }
         }
         if self.keyring_allowed()
             && let Some(store) = self.store
             && let Some(key) = account_keychain_key(acc)
+            && store.delete(KEYRING_SERVICE, &key)?
         {
-            store.delete(KEYRING_SERVICE, &key)?;
+            out.keyring_item = Some(key);
         }
-        Ok(())
+        Ok(out)
     }
+}
+
+/// What [`CredentialResolver::forget`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Forgotten {
+    /// The deleted keyring item (service [`KEYRING_SERVICE`], this key).
+    pub keyring_item: Option<String>,
+    /// The deleted password file (one `ncsync` wrote).
+    pub removed_password_file: Option<PathBuf>,
+    /// A password file that is not ours, left in place.
+    pub kept_password_file: Option<PathBuf>,
+    /// The systemd credential the daemon reads, left to the administrator.
+    pub kept_systemd_credential: Option<PathBuf>,
 }
 
 fn write_secret_file(
@@ -644,8 +682,25 @@ mod tests {
             CredentialSource::SystemdCredential(creds.join("ncsyncd-3"))
         );
 
-        with_sd.forget(&acc).unwrap();
-        assert!(!pf.exists());
+        // The administrator's password file and the systemd credential are
+        // left in place; ours is deleted.
+        let f = with_sd.forget(&acc).unwrap();
+        assert!(pf.exists());
+        assert_eq!(f.kept_password_file, Some(pf.clone()));
+        assert_eq!(f.kept_systemd_credential, Some(creds.join("ncsyncd-3")));
+        assert_eq!(
+            f.keyring_item.as_deref(),
+            Some("alice:https://cloud.example.com/:3")
+        );
+        let ours_dir = dir.path().join("credentials");
+        std::fs::create_dir(&ours_dir).unwrap();
+        let ours = ours_dir.join("ncsyncd-3");
+        std::fs::write(&ours, "x\n").unwrap();
+        acc.password_file = Some(ours.to_string_lossy().into_owned());
+        let f = with_sd.forget(&acc).unwrap();
+        assert!(!ours.exists());
+        assert_eq!(f.removed_password_file, Some(ours));
+        assert_eq!(f.keyring_item, None);
         assert_eq!(
             store
                 .get("ncsyncd", "alice:https://cloud.example.com/:3")

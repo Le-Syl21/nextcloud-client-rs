@@ -123,7 +123,9 @@ pub async fn notify_server_success(account: &Account, app_password: &str, displa
 }
 
 /// `Account::deleteAppToken()`: `DELETE ocs/v2.php/core/apppassword`.
-pub async fn delete_app_token(account: &Account, display_name: &str) {
+/// Returns the HTTP status (200 when the server removed it, 0 without an
+/// answer).
+pub async fn delete_app_token(account: &Account, display_name: &str) -> u16 {
     let mut headers = HeaderMap::new();
     headers.insert("OCS-APIREQUEST", HeaderValue::from_static("true"));
     let reply = nc_dav::jobs::send(
@@ -140,6 +142,7 @@ pub async fn delete_app_token(account: &Account, display_name: &str) {
     } else {
         log::info!(target: "nextcloud.sync.account", "AppToken for user:  {display_name}  has been removed.");
     }
+    reply.http_status
 }
 
 #[cfg(test)]

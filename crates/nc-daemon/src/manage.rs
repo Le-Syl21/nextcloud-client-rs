@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-//! The configuration commands of `ncsync` (`account add|list`,
-//! `folder add|list|remove`, `takeover`, `handback`), on top of the other
-//! modules. Printing is left to the binary.
+//! The configuration commands of `ncsync` (`account add|list|remove`,
+//! `folder add|list|remove|exclude|include|excluded`, `takeover`,
+//! `handback`), on top of the other modules. Printing is left to the
+//! binary.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,8 +12,7 @@ use std::sync::Arc;
 use nc_dav::{Account, HttpClientOptions, HttpTransport, JobOptions, ServerUrl, Transport};
 
 use crate::account_config::{
-    AccountDefinition, find_account, generate_free_account_id, load_accounts, remove_account,
-    save_account,
+    AccountDefinition, find_account, generate_free_account_id, load_accounts, save_account,
 };
 use crate::config_file::{ConfigLocation, ServiceMode};
 use crate::credentials::{
@@ -302,7 +302,7 @@ pub async fn add_account(
         }
         Err(e) => {
             if !existed {
-                Settings::modify(&path, |s| remove_account(s, &def.id))?;
+                Settings::modify(&path, |s| crate::account_config::remove_account(s, &def.id))?;
             }
             Err(e.into())
         }
@@ -410,15 +410,23 @@ pub fn add_folder(
     Ok(def)
 }
 
+/// A folder removed from the configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemovedFolder {
+    pub definition: FolderDefinition,
+    /// It was taken over from the official client: its journal is kept.
+    pub taken_over: bool,
+}
+
 /// `folder remove`: like `FolderMan::removeFolder`, the folder leaves the
-/// configuration and its journal (with `-wal`/`-shm`) is deleted. A folder
-/// taken over from the official client is refused (hand it back instead,
-/// or `force`; its journal is then kept).
+/// configuration; its journal is to be deleted ([`wipe_journal`], or by
+/// the running daemon). A folder taken over from the official client is
+/// refused (hand it back instead, or `force`; its journal is then kept).
 pub fn remove_folder(
     ctx: &Context,
     alias: &str,
     force: bool,
-) -> Result<FolderDefinition, ManageError> {
+) -> Result<RemovedFolder, ManageError> {
     let path = ctx.location.config_file.clone();
     let (res, _) = Settings::modify(&path, |s| {
         let accounts = load_accounts(s).accounts;
@@ -435,33 +443,270 @@ pub fn remove_folder(
                 "folder {alias:?} was taken over from the official client: use `ncsync handback {alias}` (or --force to drop it and keep its journal)"
             )));
         }
-        crate::folder_definition::remove_folder(s, &found.account_id, &found.escaped_alias);
-        if taken_over {
-            s.remove(&crate::settings::join_key(
-                takeover::TAKEOVER_GROUP,
-                &crate::folder_definition::escape_alias(alias),
-            ));
-        }
-        Ok((found.definition, taken_over))
+        Ok(drop_folder(
+            s,
+            &found.account_id,
+            &found.escaped_alias,
+            found.definition,
+            taken_over,
+        ))
     })?;
-    let (def, taken_over) = res?;
-    if !taken_over && Path::new(&def.local_path).is_dir() {
-        let db = def.absolute_journal_path();
-        for suffix in ["", "-wal", "-shm"] {
-            let f = format!("{db}{suffix}");
-            if Path::new(&f).exists() {
-                match std::fs::remove_file(&f) {
-                    Ok(()) => {
-                        log::info!(target: "nextcloud.gui.folder", "wipe: Removed csync StateDB {f}")
-                    }
-                    Err(e) => {
-                        log::warn!(target: "nextcloud.gui.folder", "Failed to remove existing csync StateDB {f}: {e}")
-                    }
+    res
+}
+
+/// Removes a folder (and its takeover backup) from the settings.
+fn drop_folder(
+    s: &mut Settings,
+    account_id: &str,
+    escaped_alias: &str,
+    definition: FolderDefinition,
+    taken_over: bool,
+) -> RemovedFolder {
+    crate::folder_definition::remove_folder(s, account_id, escaped_alias);
+    if taken_over {
+        s.remove(&crate::settings::join_key(
+            takeover::TAKEOVER_GROUP,
+            &crate::folder_definition::escape_alias(&definition.alias),
+        ));
+    }
+    RemovedFolder {
+        definition,
+        taken_over,
+    }
+}
+
+/// `Folder::wipeForRemoval` without a daemon: deletes the journal of a
+/// removed folder (with `-wal`/`-shm`), unless it was taken over.
+pub fn wipe_journal(folder: &RemovedFolder) {
+    let def = &folder.definition;
+    if folder.taken_over || !Path::new(&def.local_path).is_dir() {
+        return;
+    }
+    let db = def.absolute_journal_path();
+    for suffix in ["", "-wal", "-shm"] {
+        let f = format!("{db}{suffix}");
+        if Path::new(&f).exists() {
+            match std::fs::remove_file(&f) {
+                Ok(()) => {
+                    log::info!(target: "nextcloud.gui.folder", "wipe: Removed csync StateDB {f}")
+                }
+                Err(e) => {
+                    log::warn!(target: "nextcloud.gui.folder", "Failed to remove existing csync StateDB {f}: {e}")
                 }
             }
         }
     }
-    Ok(def)
+}
+
+/// The result of the configuration part of `account remove`.
+#[derive(Debug)]
+pub struct RemovedAccount {
+    pub account: AccountDefinition,
+    /// Its folders, removed with it (`--force`).
+    pub folders: Vec<RemovedFolder>,
+    /// Its app password, read before it is forgotten (to revoke it).
+    pub app_password: Option<AppPassword>,
+}
+
+/// `account remove`, configuration part (`AccountManager::deleteAccount`
+/// removes the account group; `FolderMan::slotAccountRemoved` its folders).
+/// Refused while folders use the account, unless `force`: they are then
+/// removed too (files kept; journals deleted except for taken-over
+/// folders, see [`wipe_journal`]). The caller then revokes the app
+/// password ([`revoke_app_password`]) and forgets the credentials
+/// ([`forget_credentials`]).
+pub fn remove_account(
+    ctx: &Context,
+    id: &str,
+    force: bool,
+    store: Option<&dyn SecretStore>,
+) -> Result<RemovedAccount, ManageError> {
+    let path = ctx.location.config_file.clone();
+    let settings = ctx.load()?;
+    let account = crate::account_config::load_account(&settings, id)
+        .ok_or_else(|| ManageError::Usage(format!("no account {id}")))?;
+    let resolver = CredentialResolver::new(ctx.location.mode.clone(), store);
+    let app_password = resolver.app_password(&account).ok().map(|(p, _)| p);
+    let (res, _) = Settings::modify(&path, |s| {
+        let accounts = load_accounts(s).accounts;
+        let folders: Vec<_> = load_folders(s, &accounts)
+            .folders
+            .into_iter()
+            .filter(|f| f.account_id == id)
+            .collect();
+        let taken = taken_over_aliases(s);
+        let list = |only_taken: bool| {
+            folders
+                .iter()
+                .filter(|f| !only_taken || taken.contains(&f.definition.alias))
+                .map(|f| f.definition.alias.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !force && !folders.is_empty() {
+            let taken_list = list(true);
+            return Err(ManageError::Usage(if taken_list.is_empty() {
+                format!(
+                    "account {id} still has folders ({}): remove them first with `ncsync folder remove`, or use --force to remove them too (their files are kept)",
+                    list(false)
+                )
+            } else {
+                format!(
+                    "account {id} has folders taken over from the official client ({taken_list}): hand them back first with `ncsync handback`, or use --force to drop them (their journals are kept)"
+                )
+            }));
+        }
+        let removed: Vec<RemovedFolder> = folders
+            .into_iter()
+            .map(|f| {
+                let taken_over = taken.contains(&f.definition.alias);
+                drop_folder(s, &f.account_id, &f.escaped_alias, f.definition, taken_over)
+            })
+            .collect();
+        crate::account_config::remove_account(s, id);
+        Ok(removed)
+    })?;
+    Ok(RemovedAccount {
+        account,
+        folders: res?,
+        app_password,
+    })
+}
+
+/// Why the app password of a removed account was not revoked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// `DELETE ocs/v2.php/core/apppassword` answered 200.
+    Revoked,
+    /// The official client has the same account and (maybe) the same app
+    /// password (a takeover copies it): revoking it would sign it out.
+    SharedWithOfficialClient,
+    /// No app password was stored.
+    NoPassword,
+    /// The server refused or could not be reached (HTTP status, 0 without
+    /// an answer).
+    Failed(u16),
+}
+
+/// Whether the official client's configuration has the same account
+/// (server and login name) with the same app password, as far as the
+/// keyring tells: `true` unless its password is known to differ.
+fn shared_with_official_client(
+    official_file: Option<&Path>,
+    account: &AccountDefinition,
+    password: &AppPassword,
+    store: Option<&dyn SecretStore>,
+) -> bool {
+    let Some(file) = official_file.filter(|f| f.exists()) else {
+        return false;
+    };
+    let Ok(settings) = Settings::load(file) else {
+        return true; // cannot tell: keep it
+    };
+    let accounts = load_accounts(&settings).accounts;
+    let Some(official) = find_account(&accounts, &account.url, &account.credentials_user()) else {
+        return false;
+    };
+    match store.map(|s| official_client_app_password(s, official)) {
+        Some(Ok(Some(theirs))) => theirs == *password,
+        _ => true,
+    }
+}
+
+/// `Account::deleteAppToken()` for a removed account (best effort):
+/// revokes its app password on the server, unless the official client
+/// uses the same one.
+pub async fn revoke_app_password(
+    ctx: &Context,
+    removed: &RemovedAccount,
+    official_file: Option<&Path>,
+    store: Option<&dyn SecretStore>,
+) -> RevokeOutcome {
+    let Some(password) = &removed.app_password else {
+        return RevokeOutcome::NoPassword;
+    };
+    let acc = &removed.account;
+    if shared_with_official_client(official_file, acc, password, store) {
+        return RevokeOutcome::SharedWithOfficialClient;
+    }
+    let (Ok(url), Ok(transport)) = (parse_server_url(&acc.url), ctx.transport()) else {
+        return RevokeOutcome::Failed(0);
+    };
+    let account = Account::new(url, transport);
+    account.set_credentials(password.to_dav_credentials(&acc.credentials_user()));
+    let display_name = crate::account_setup::display_name(&acc.credentials_user(), account.url());
+    match crate::remote_wipe::delete_app_token(&account, &display_name).await {
+        200 => RevokeOutcome::Revoked,
+        status => RevokeOutcome::Failed(status),
+    }
+}
+
+/// `credentials()->forgetSensitiveData()` for a removed account: see
+/// [`CredentialResolver::forget`].
+pub fn forget_credentials(
+    ctx: &Context,
+    account: &AccountDefinition,
+    store: Option<&dyn SecretStore>,
+) -> Result<crate::credentials::Forgotten, ManageError> {
+    let resolver = CredentialResolver::new(ctx.location.mode.clone(), store);
+    Ok(resolver.forget(account)?)
+}
+
+/// A configured folder by alias or local path.
+pub fn find_folder(settings: &Settings, folder: &str) -> Result<FolderSummary, ManageError> {
+    let folders = list_folders(settings);
+    if let Some(f) = folders.iter().find(|f| f.alias == folder) {
+        return Ok(f.clone());
+    }
+    let wanted = std::path::absolute(folder)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| clean_path(folder));
+    folders
+        .into_iter()
+        .find(|f| clean_path(&f.local_path) == wanted)
+        .ok_or_else(|| ManageError::Usage(format!("no folder {folder:?}")))
+}
+
+/// `folder exclude|include|excluded` without a running daemon: the
+/// selective sync lists are edited in the folder's journal directly (see
+/// [`crate::selective_sync::apply`]); the daemon's next start does a full
+/// local discovery.
+pub fn apply_selective_sync(
+    folder: &FolderSummary,
+    exclude: &[String],
+    include: &[String],
+) -> Result<crate::selective_sync::SelectiveSyncChange, ManageError> {
+    if !Path::new(&folder.local_path).is_dir() {
+        return Err(ManageError::Io(format!(
+            "the local folder {} does not exist",
+            folder.local_path
+        )));
+    }
+    let def = FolderDefinition {
+        local_path: folder.local_path.clone(),
+        journal_path: folder.journal_path.clone(),
+        ..FolderDefinition::default()
+    };
+    let journal = nc_journal::journal::SyncJournalDb::new(def.absolute_journal_path());
+    let result = crate::selective_sync::apply(&journal, exclude, include)
+        .map_err(|e| ManageError::Usage(e.to_string()));
+    journal.close();
+    result
+}
+
+/// A path given to `folder exclude|include`: relative to the folder's
+/// remote root, or a local path inside the folder.
+pub fn selective_sync_path(folder: &FolderSummary, path: &str) -> String {
+    let local = clean_path(&folder.local_path);
+    if path.starts_with('/') || path.starts_with('.') {
+        let absolute = std::path::absolute(path)
+            .map(|p| clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| clean_path(path));
+        if let Some(rest) = absolute.strip_prefix(&format!("{local}/")) {
+            return rest.to_owned();
+        }
+    }
+    path.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -600,9 +845,123 @@ mod tests {
         assert!(add_folder(&c, local.to_str().unwrap(), "/", None).is_err());
         // A journal is removed with the folder.
         std::fs::write(local.join(&def.journal_path), b"").unwrap();
-        remove_folder(&c, "1", false).unwrap();
+        let removed = remove_folder(&c, "1", false).unwrap();
+        assert!(!removed.taken_over);
+        wipe_journal(&removed);
         assert!(!local.join(&def.journal_path).exists());
         assert!(list_folders(&c.load().unwrap()).is_empty());
         assert!(remove_folder(&c, "1", false).is_err());
+    }
+
+    #[test]
+    fn derived_account_remove_refuses_folders_unless_forced() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(dir.path());
+        let store = crate::credentials::MemoryStore::new();
+        let mut acc = AccountDefinition::new_webflow("0", "https://h.example", "u");
+        Settings::modify(&c.location.config_file, |s| save_account(s, &acc)).unwrap();
+        store_account_password(&c, &mut acc, &AppPassword::new("pw"), Some(&store)).unwrap();
+        let local = dir.path().join("sync/A");
+        let one = add_folder(&c, local.to_str().unwrap(), "/", None).unwrap();
+        let two = add_folder(&c, dir.path().join("sync/B").to_str().unwrap(), "/B", None).unwrap();
+        let err = remove_account(&c, "0", false, Some(&store)).unwrap_err();
+        assert!(err.to_string().contains("folder remove"), "{err}");
+        // a taken-over folder: hand it back first
+        Settings::modify(&c.location.config_file, |s| {
+            s.set_value(
+                &crate::settings::join_key(
+                    &crate::settings::join_key(takeover::TAKEOVER_GROUP, &two.alias),
+                    "source",
+                ),
+                "/x/nextcloud.cfg",
+            );
+        })
+        .unwrap();
+        let err = remove_account(&c, "0", false, Some(&store)).unwrap_err();
+        assert!(err.to_string().contains("handback"), "{err}");
+        assert!(remove_account(&c, "9", true, Some(&store)).is_err());
+
+        let removed = remove_account(&c, "0", true, Some(&store)).unwrap();
+        assert_eq!(removed.app_password, Some(AppPassword::new("pw")));
+        let folders: Vec<(&str, bool)> = removed
+            .folders
+            .iter()
+            .map(|f| (f.definition.alias.as_str(), f.taken_over))
+            .collect();
+        assert_eq!(
+            folders,
+            [(one.alias.as_str(), false), (two.alias.as_str(), true)]
+        );
+        let s = c.load().unwrap();
+        assert!(list_accounts(&s).is_empty());
+        assert!(list_folders(&s).is_empty());
+        assert!(taken_over_aliases(&s).is_empty());
+
+        // the official client with the same account: its app password is
+        // kept on the server
+        let official = dir.path().join("nextcloud.cfg");
+        Settings::modify(&official, |s| save_account(s, &acc)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            rt.block_on(revoke_app_password(
+                &c,
+                &removed,
+                Some(&official),
+                Some(&store)
+            )),
+            RevokeOutcome::SharedWithOfficialClient
+        );
+        let no_password = RemovedAccount {
+            app_password: None,
+            ..removed
+        };
+        assert_eq!(
+            rt.block_on(revoke_app_password(&c, &no_password, None, Some(&store))),
+            RevokeOutcome::NoPassword
+        );
+        let f = forget_credentials(&c, &no_password.account, Some(&store)).unwrap();
+        assert!(f.keyring_item.is_some());
+        assert_eq!(
+            store
+                .get(
+                    crate::credentials::KEYRING_SERVICE,
+                    &f.keyring_item.unwrap()
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn derived_folder_selective_sync_without_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(dir.path());
+        Settings::modify(&c.location.config_file, |s| {
+            save_account(
+                s,
+                &AccountDefinition::new_webflow("0", "https://h.example", "u"),
+            );
+        })
+        .unwrap();
+        let local = dir.path().join("sync/A");
+        let def = add_folder(&c, local.to_str().unwrap(), "/", None).unwrap();
+        let s = c.load().unwrap();
+        let f = find_folder(&s, &def.alias).unwrap();
+        assert_eq!(find_folder(&s, local.to_str().unwrap()).unwrap(), f);
+        assert!(find_folder(&s, "nope").is_err());
+        assert_eq!(
+            selective_sync_path(&f, local.join("Photos/2020").to_str().unwrap()),
+            "Photos/2020"
+        );
+        assert_eq!(selective_sync_path(&f, "/Photos"), "/Photos");
+        let change = apply_selective_sync(&f, &["Photos".to_owned()], &[]).unwrap();
+        assert_eq!(change.black_list, ["Photos/"]);
+        // the journal was closed: it opens again
+        let change = apply_selective_sync(&f, &[], &[]).unwrap();
+        assert_eq!(change.black_list, ["Photos/"]);
+        assert!(change.changes.is_empty());
     }
 }

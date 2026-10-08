@@ -35,8 +35,8 @@ pub enum Event {
     ),
     /// The systemd watchdog interval passed: the loop is alive.
     WatchdogTick,
-    /// Reload the credentials of the accounts waiting for them (SIGHUP).
-    ReloadCredentials,
+    /// Re-read the configuration and the credentials (SIGHUP).
+    Reload,
     /// Stop: abort the running syncs and quit.
     Shutdown,
 }

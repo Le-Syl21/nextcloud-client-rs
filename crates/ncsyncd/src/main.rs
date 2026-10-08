@@ -8,7 +8,9 @@
 //! 30 s or notify_push, scheduled and follow-up syncs with back-off. Runs as
 //! a systemd user service (credentials in the keyring) or as an instance of
 //! the `ncsyncd@.service` system template (credentials from systemd).
-//! `ncsync status|pause|resume|sync-now` talk to it over its control socket.
+//! `ncsync status|pause|resume|sync-now` talk to it over its control socket;
+//! the configuration commands of `ncsync` and SIGHUP (`systemctl reload`)
+//! make it re-read its configuration.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -185,13 +187,8 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
         eprintln!("ncsyncd: signal handlers: {e}");
         return ExitCode::FAILURE;
     }
-    let accounts = fm
-        .account_states()
-        .map(|a| (a.id().to_owned(), a.account().clone()))
-        .collect();
     let mut hooks = ReloadHooks {
         options: options.clone(),
-        accounts,
     };
     log::info!(target: "nextcloud.daemon", "ncsyncd {} started: {} accounts, {} folders", env!("CARGO_PKG_VERSION"), fm.account_states().count(), fm.map().len());
     nc_daemon::daemon::run(&mut fm, &tx, &mut rx, &mut hooks).await;

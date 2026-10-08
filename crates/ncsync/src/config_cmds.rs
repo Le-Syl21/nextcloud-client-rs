@@ -3,7 +3,9 @@
 
 //! The configuration subcommands of `ncsync` (`account`, `folder`,
 //! `takeover`, `handback`): argument parsing and printing; the logic is in
-//! `nc_daemon::manage`.
+//! `nc_daemon::manage`. A running `ncsyncd` is told to reload its
+//! configuration after a change (best effort), and the selective sync edits
+//! go through it when it runs (it holds the journals).
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -11,9 +13,10 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 use nc_daemon::config_file::{ConfigLocation, ServiceMode, official_client_config_file};
-use nc_daemon::credentials::{AppPassword, SecretStore};
+use nc_daemon::control::Request;
+use nc_daemon::credentials::{AppPassword, KEYRING_SERVICE, SecretStore};
 use nc_daemon::flow2auth;
-use nc_daemon::manage::{self, Context, ManageError, TakeoverCredentials};
+use nc_daemon::manage::{self, Context, ManageError, RevokeOutcome, TakeoverCredentials};
 use nc_dav::HttpClientOptions;
 
 /// Which configuration file to use.
@@ -55,6 +58,21 @@ pub enum AccountCommand {
     Add(AccountAddArgs),
     /// List the accounts.
     List(ListArgs),
+    /// Remove an account: its credentials are forgotten and its app
+    /// password is revoked on the server.
+    Remove(AccountRemoveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AccountRemoveArgs {
+    /// Account id (see `ncsync account list`).
+    id: String,
+    /// Also remove the folders of the account (their files are kept; the
+    /// journals of folders taken over from the official client too).
+    #[arg(long)]
+    force: bool,
+    #[command(flatten)]
+    http: HttpArgs,
 }
 
 #[derive(Args, Debug)]
@@ -80,6 +98,32 @@ pub enum FolderCommand {
     List(ListArgs),
     /// Remove a folder (its journal is deleted; files are kept).
     Remove(FolderRemoveArgs),
+    /// Stop syncing remote subfolders of a folder (selective sync, "Choose
+    /// what to sync"): their local copies are removed at the next sync,
+    /// except files changed locally since the last sync.
+    Exclude(SelectiveSyncArgs),
+    /// Sync excluded remote subfolders of a folder again.
+    Include(SelectiveSyncArgs),
+    /// List the excluded remote subfolders of a folder.
+    Excluded(ExcludedArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SelectiveSyncArgs {
+    /// Folder alias or local path (see `ncsync folder list`).
+    folder: String,
+    /// Remote subfolders, relative to the folder's remote path
+    /// (e.g. Photos/2020), or local paths inside the folder.
+    #[arg(required = true, value_name = "SUBFOLDER")]
+    paths: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ExcludedArgs {
+    /// Folder alias or local path (see `ncsync folder list`).
+    folder: String,
+    #[command(flatten)]
+    list: ListArgs,
 }
 
 #[derive(Args, Debug)]
@@ -215,6 +259,93 @@ fn keyring(ctx: &Context) -> Option<Box<dyn SecretStore>> {
         .map(|s| Box::new(s) as Box<dyn SecretStore>)
 }
 
+/// The control socket of the daemon using this configuration.
+fn socket_path(ctx: &Context) -> PathBuf {
+    let instance = match &ctx.location.mode {
+        ServiceMode::System { instance } => Some(instance.as_str()),
+        ServiceMode::User => None,
+    };
+    nc_daemon::control::default_socket_path(instance)
+}
+
+/// What the running daemon made of a request.
+enum DaemonAnswer {
+    /// No daemon listens on the socket.
+    NotRunning,
+    Done(serde_json::Value),
+    Refused(String),
+}
+
+fn ask_daemon(ctx: &Context, request: &Request) -> DaemonAnswer {
+    let path = socket_path(ctx);
+    match nc_daemon::control::request(&path, request) {
+        Ok(v) if v["ok"] == true => DaemonAnswer::Done(v),
+        Ok(v) => DaemonAnswer::Refused(v["error"].as_str().unwrap_or("error").to_owned()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            DaemonAnswer::NotRunning
+        }
+        Err(e) => DaemonAnswer::Refused(format!("cannot reach it at {}: {e}", path.display())),
+    }
+}
+
+/// Tells a running daemon to reload its configuration (best effort);
+/// `wipe` are removed folders whose journal it deletes.
+fn reload_daemon(ctx: &Context, wipe: &[String]) -> DaemonAnswer {
+    let config = std::path::absolute(&ctx.location.config_file)
+        .unwrap_or_else(|_| ctx.location.config_file.clone());
+    ask_daemon(
+        ctx,
+        &Request::Reload {
+            config: Some(config.to_string_lossy().into_owned()),
+            wipe: wipe.to_vec(),
+        },
+    )
+}
+
+fn print_reload(answer: &DaemonAnswer) {
+    match answer {
+        DaemonAnswer::NotRunning => {
+            println!("ncsyncd is not running: it will use the change when it starts.")
+        }
+        DaemonAnswer::Done(_) => println!("The running ncsyncd picked up the change."),
+        DaemonAnswer::Refused(e) => eprintln!(
+            "Warning: the running ncsyncd did not reload its configuration ({e}); restart it to use the change."
+        ),
+    }
+}
+
+/// Whether the daemon's reload removed (and so closed or wiped) a folder.
+fn daemon_removed(answer: &DaemonAnswer, alias: &str) -> bool {
+    match answer {
+        DaemonAnswer::Done(v) => v["removed_folders"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == alias)),
+        _ => false,
+    }
+}
+
+/// Removed folders: the daemon wipes the journals of the folders it had
+/// loaded; the others are wiped here.
+fn reload_after_removal(ctx: &Context, removed: &[manage::RemovedFolder]) -> DaemonAnswer {
+    let wipe: Vec<String> = removed
+        .iter()
+        .filter(|f| !f.taken_over)
+        .map(|f| f.definition.alias.clone())
+        .collect();
+    let answer = reload_daemon(ctx, &wipe);
+    for f in removed {
+        if !daemon_removed(&answer, &f.definition.alias) {
+            manage::wipe_journal(f);
+        }
+    }
+    answer
+}
+
 pub fn run_account(cmd: AccountCommand, config: ConfigArgs) -> ExitCode {
     init_logging();
     match cmd {
@@ -300,12 +431,105 @@ pub fn run_account(cmd: AccountCommand, config: ConfigArgs) -> ExitCode {
                             "For a system instance, prefer a systemd credential (the unit imports ncsyncd-<user>-*): systemd-creds encrypt --name={name} <file> /etc/credstore.encrypted/{name}, then remove ncsyncd_passwordFile from the account."
                         );
                     }
-                    hand_over(&ctx, None)
+                    let code = hand_over(&ctx, None);
+                    print_reload(&reload_daemon(&ctx, &[]));
+                    code
                 }
                 Err(e) => fail(e),
             }
         }
+        AccountCommand::Remove(args) => run_account_remove(args, &config),
     }
+}
+
+/// `account remove`: `AccountManager::deleteAccount` (the account and,
+/// with `--force`, its folders leave the configuration; the running daemon
+/// drops them), then `Account::deleteAppToken` and
+/// `credentials()->forgetSensitiveData()`.
+fn run_account_remove(args: AccountRemoveArgs, config: &ConfigArgs) -> ExitCode {
+    let ctx = match context(config, Some(&args.http)) {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let store = keyring(&ctx);
+    let removed = match manage::remove_account(&ctx, &args.id, args.force, store.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    let acc = &removed.account;
+    println!(
+        "Removed account {}: {}@{}.",
+        acc.id,
+        acc.credentials_user(),
+        acc.url
+    );
+    for f in &removed.folders {
+        println!(
+            "Removed folder {} ({}); its files are kept{}.",
+            f.definition.alias,
+            f.definition.local_path,
+            if f.taken_over {
+                ", and its journal too (taken over from the official client)"
+            } else {
+                ""
+            }
+        );
+    }
+    let code = hand_over(&ctx, None);
+    let answer = reload_after_removal(&ctx, &removed.folders);
+    print_reload(&answer);
+    let official = official_client_config_file().ok();
+    let revoked = runtime().map(|rt| {
+        rt.block_on(manage::revoke_app_password(
+            &ctx,
+            &removed,
+            official.as_deref(),
+            store.as_deref(),
+        ))
+    });
+    match revoked {
+        Ok(RevokeOutcome::Revoked) => println!("Revoked its app password on the server."),
+        Ok(RevokeOutcome::SharedWithOfficialClient) => println!(
+            "Kept its app password on the server: the official client has the same account and may use the same app password (a takeover copies it)."
+        ),
+        Ok(RevokeOutcome::NoPassword) => {
+            println!("No app password was found for it: nothing to revoke on the server.")
+        }
+        Ok(RevokeOutcome::Failed(status)) => eprintln!(
+            "Warning: could not revoke its app password on the server (HTTP status {status}); revoke it in the server's personal security settings."
+        ),
+        Err(e) => eprintln!("Warning: could not revoke its app password on the server: {e}"),
+    }
+    match manage::forget_credentials(&ctx, acc, store.as_deref()) {
+        Ok(f) => {
+            if let Some(key) = f.keyring_item {
+                println!("Deleted its keyring item (service {KEYRING_SERVICE}, {key}).");
+            }
+            if let Some(p) = f.removed_password_file {
+                println!("Deleted its password file {}.", p.display());
+            }
+            if let Some(p) = f.kept_password_file {
+                println!(
+                    "Its password file {} was left in place: delete it if nothing else uses it.",
+                    p.display()
+                );
+            }
+            if let Some(p) = f.kept_systemd_credential {
+                println!(
+                    "The systemd credential {} was left in place: remove it from the credential store yourself.",
+                    p.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("Warning: could not delete its stored credentials: {e}"),
+    }
+    if let ServiceMode::System { .. } = ctx.location.mode {
+        let name = nc_daemon::credentials::systemd_credential_name(&ctx.location.mode, &acc.id);
+        println!(
+            "If the instance read a systemd credential {name} (/etc/credstore*), remove it yourself."
+        );
+    }
+    code
 }
 
 pub fn run_folder(cmd: FolderCommand, config: ConfigArgs) -> ExitCode {
@@ -370,22 +594,143 @@ pub fn run_folder(cmd: FolderCommand, config: ConfigArgs) -> ExitCode {
                         "Added folder {}: {} -> {}",
                         def.alias, def.local_path, def.target_path
                     );
-                    hand_over(&ctx, created.as_deref())
+                    let code = hand_over(&ctx, created.as_deref());
+                    print_reload(&reload_daemon(&ctx, &[]));
+                    code
                 }
                 Err(e) => fail(e),
             }
         }
         FolderCommand::Remove(args) => match manage::remove_folder(&ctx, &args.alias, args.force) {
-            Ok(def) => {
+            Ok(removed) => {
                 println!(
                     "Removed folder {} ({}); its files are kept.",
-                    args.alias, def.local_path
+                    args.alias, removed.definition.local_path
                 );
-                hand_over(&ctx, None)
+                let code = hand_over(&ctx, None);
+                let answer = reload_after_removal(&ctx, std::slice::from_ref(&removed));
+                print_reload(&answer);
+                code
             }
             Err(e) => fail(e),
         },
+        FolderCommand::Exclude(args) => run_selective_sync(&ctx, &args.folder, &args.paths, true),
+        FolderCommand::Include(args) => run_selective_sync(&ctx, &args.folder, &args.paths, false),
+        FolderCommand::Excluded(args) => {
+            let folder = match ctx
+                .load()
+                .and_then(|s| manage::find_folder(&s, &args.folder))
+            {
+                Ok(f) => f,
+                Err(e) => return fail(e),
+            };
+            let list = match selective_sync(&ctx, &folder, &[], &[]) {
+                Ok((change, _)) => change.black_list,
+                Err(e) => return fail(e),
+            };
+            if args.list.json {
+                println!("{}", serde_json::json!(list));
+            } else if list.is_empty() {
+                println!("No subfolder of folder {} is excluded.", folder.alias);
+            } else {
+                for p in list {
+                    println!("{p}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
     }
+}
+
+/// The selective sync edit, through the running daemon when it has the
+/// folder (it holds the journal), on the journal directly otherwise.
+/// Returns the change and whether the daemon made it.
+fn selective_sync(
+    ctx: &Context,
+    folder: &manage::FolderSummary,
+    exclude: &[String],
+    include: &[String],
+) -> Result<(nc_daemon::selective_sync::SelectiveSyncChange, bool), String> {
+    let request = Request::SelectiveSync {
+        folder: folder.local_path.clone(),
+        exclude: exclude.to_vec(),
+        include: include.to_vec(),
+    };
+    match ask_daemon(ctx, &request) {
+        DaemonAnswer::Done(v) => {
+            let strings = |k: &str| -> Vec<String> {
+                v[k].as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            };
+            Ok((
+                nc_daemon::selective_sync::SelectiveSyncChange {
+                    black_list: strings("blacklist"),
+                    changes: strings("changes"),
+                    white_list_added: strings("whitelist_added"),
+                },
+                true,
+            ))
+        }
+        // The daemon does not sync this folder: its journal is free.
+        DaemonAnswer::Refused(e) if e.starts_with("no such folder") => {
+            manage::apply_selective_sync(folder, exclude, include)
+                .map(|c| (c, false))
+                .map_err(|e| e.to_string())
+        }
+        DaemonAnswer::NotRunning => manage::apply_selective_sync(folder, exclude, include)
+            .map(|c| (c, false))
+            .map_err(|e| e.to_string()),
+        DaemonAnswer::Refused(e) => Err(format!("ncsyncd: {e}")),
+    }
+}
+
+/// `folder exclude|include`.
+fn run_selective_sync(ctx: &Context, folder: &str, paths: &[String], exclude: bool) -> ExitCode {
+    let folder = match ctx.load().and_then(|s| manage::find_folder(&s, folder)) {
+        Ok(f) => f,
+        Err(e) => return fail(e),
+    };
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|p| manage::selective_sync_path(&folder, p))
+        .collect();
+    let (ex, inc) = if exclude {
+        (paths, Vec::new())
+    } else {
+        (Vec::new(), paths)
+    };
+    let (change, by_daemon) = match selective_sync(ctx, &folder, &ex, &inc) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    if change.changes.is_empty() {
+        println!("Nothing to change.");
+        return ExitCode::SUCCESS;
+    }
+    for c in &change.changes {
+        if change.black_list.contains(c) {
+            println!("Excluded {c}");
+        } else {
+            println!("Included {c}");
+        }
+    }
+    if by_daemon {
+        println!("The running ncsyncd syncs folder {} now.", folder.alias);
+    } else {
+        println!(
+            "ncsyncd is not running: folder {} will be synced when it starts.",
+            folder.alias
+        );
+    }
+    if exclude {
+        println!(
+            "The local copies of the excluded folders are removed by that sync, except files changed locally since the last sync."
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 pub fn run_takeover(args: TakeoverArgs, config: ConfigArgs) -> ExitCode {
@@ -449,7 +794,9 @@ pub fn run_takeover(args: TakeoverArgs, config: ConfigArgs) -> ExitCode {
         }
     }
     println!("Hand it back with: ncsync handback {}", out.alias);
-    hand_over(&ctx, None)
+    let code = hand_over(&ctx, None);
+    print_reload(&reload_daemon(&ctx, &[]));
+    code
 }
 
 pub fn run_handback(args: HandbackArgs, config: ConfigArgs) -> ExitCode {
@@ -468,7 +815,11 @@ pub fn run_handback(args: HandbackArgs, config: ConfigArgs) -> ExitCode {
             if let Some(acc) = out.removed_account {
                 println!("Removed account {} (it had no other folder).", acc.id);
             }
-            hand_over(&ctx, None)
+            let code = hand_over(&ctx, None);
+            // The daemon stops syncing the folder and closes its journal
+            // (kept for the official client) before it answers.
+            print_reload(&reload_daemon(&ctx, &[]));
+            code
         }
         Err(e) => fail(e),
     }

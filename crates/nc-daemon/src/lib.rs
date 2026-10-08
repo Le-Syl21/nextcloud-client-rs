@@ -23,6 +23,7 @@ pub mod instance;
 pub mod manage;
 pub mod network_limits;
 pub mod remote_wipe;
+pub mod selective_sync;
 pub mod settings;
 pub mod startup;
 pub mod sync_result;

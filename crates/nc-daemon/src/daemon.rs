@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::event::{Event, WatcherEvent};
+use crate::control::{Request, Response};
+use crate::event::{Event, FolderId, WatcherEvent};
 use crate::folder::{FolderWatcherHandle, WatcherFactory};
 use crate::folder_man::FolderMan;
 use crate::folder_watcher::{FolderWatcher, FolderWatcherEvent};
@@ -80,8 +81,8 @@ fn notify(state: &[sd_notify::NotifyState]) {
     let _ = sd_notify::notify(state);
 }
 
-/// Posts [`Event::Shutdown`] on SIGTERM/SIGINT and
-/// [`Event::ReloadCredentials`] on SIGHUP.
+/// Posts [`Event::Shutdown`] on SIGTERM/SIGINT and [`Event::Reload`] on
+/// SIGHUP (`systemctl reload`).
 pub fn install_signal_handlers(tx: &UnboundedSender<Event>) -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
@@ -93,7 +94,7 @@ pub fn install_signal_handlers(tx: &UnboundedSender<Event>) -> std::io::Result<(
             let event = tokio::select! {
                 _ = term.recv() => Event::Shutdown,
                 _ = int.recv() => Event::Shutdown,
-                _ = hup.recv() => Event::ReloadCredentials,
+                _ = hup.recv() => Event::Reload,
             };
             if tx.send(event).is_err() {
                 return;
@@ -103,20 +104,47 @@ pub fn install_signal_handlers(tx: &UnboundedSender<Event>) -> std::io::Result<(
     Ok(())
 }
 
+/// The answer to a reload, and the removed folders whose sync is still
+/// stopping: the answer is sent once they are unloaded.
+pub struct ReloadResult {
+    pub response: Response,
+    pub waiting: Vec<FolderId>,
+}
+
+impl ReloadResult {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            response: serde_json::json!({"ok": false, "error": message.into()}),
+            waiting: Vec::new(),
+        }
+    }
+}
+
 /// Hooks of the event loop for what the folder manager does not own.
 pub trait DaemonHooks {
-    /// SIGHUP: re-read credentials; returns `(account id, ready)` pairs.
-    fn reload_credentials(&mut self) -> Vec<(String, bool)>;
+    /// SIGHUP (`config` `None`, nothing wiped) and the `reload` control
+    /// request: re-reads the configuration (see
+    /// [`crate::startup::reload`]). `config` is the file the requester
+    /// changed; `wipe` the removed folders whose journal is deleted.
+    fn reload(&mut self, fm: &mut FolderMan, config: Option<&str>, wipe: &[String])
+    -> ReloadResult;
 }
 
 /// No hooks.
 pub struct NoHooks;
 
 impl DaemonHooks for NoHooks {
-    fn reload_credentials(&mut self) -> Vec<(String, bool)> {
-        Vec::new()
+    fn reload(&mut self, _: &mut FolderMan, _: Option<&str>, _: &[String]) -> ReloadResult {
+        ReloadResult::error("this daemon cannot reload its configuration")
     }
 }
+
+/// A reload answer waiting for removed folders to stop syncing.
+type PendingReply = (
+    Vec<FolderId>,
+    Response,
+    tokio::sync::oneshot::Sender<Response>,
+);
 
 /// How long running syncs get to abort at shutdown.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
@@ -150,6 +178,8 @@ pub async fn run(
     notify(&[sd_notify::NotifyState::Ready]);
     let mut last_status = String::new();
     let mut shutting_down: Option<tokio::time::Instant> = None;
+    // Reload answers waiting for removed folders to stop syncing.
+    let mut pending_replies: Vec<PendingReply> = Vec::new();
     loop {
         let event = match shutting_down {
             Some(deadline) => {
@@ -170,15 +200,28 @@ pub async fn run(
             },
         };
         match event {
+            Event::Control(Request::Reload { config, wipe }, reply) => {
+                let result = hooks.reload(fm, config.as_deref(), &wipe);
+                if result.waiting.is_empty() {
+                    let _ = reply.send(result.response);
+                } else {
+                    pending_replies.push((result.waiting, result.response, reply));
+                }
+            }
             Event::Control(request, reply) => {
                 let response = crate::control::handle(fm, request);
                 let _ = reply.send(response);
             }
             Event::WatchdogTick => notify(&[sd_notify::NotifyState::Watchdog]),
-            Event::ReloadCredentials => {
-                for (id, ready) in hooks.reload_credentials() {
-                    fm.set_account_credentials_ready(&id, ready);
+            Event::Reload => {
+                log::info!(target: LOG, "SIGHUP: reloading the configuration");
+                let mut state = vec![sd_notify::NotifyState::Reloading];
+                if let Ok(now) = sd_notify::NotifyState::monotonic_usec_now() {
+                    state.push(now);
                 }
+                notify(&state);
+                let _ = hooks.reload(fm, None, &[]);
+                notify(&[sd_notify::NotifyState::Ready]);
             }
             Event::Shutdown => {
                 if shutting_down.is_none() {
@@ -189,6 +232,16 @@ pub async fn run(
                 }
             }
             e => fm.handle_event(e),
+        }
+        let mut i = 0;
+        while i < pending_replies.len() {
+            pending_replies[i].0.retain(|id| fm.is_unloading(*id));
+            if pending_replies[i].0.is_empty() {
+                let (_, response, reply) = pending_replies.swap_remove(i);
+                let _ = reply.send(response);
+            } else {
+                i += 1;
+            }
         }
         let status = status_line(fm);
         if status != last_status {

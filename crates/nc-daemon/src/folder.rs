@@ -1082,6 +1082,41 @@ impl Folder {
         }
     }
 
+    /// The part of `FolderMan::unloadFolder` this port needs once the
+    /// folder's engine is back: no more watcher, and the journal is closed
+    /// (and left on disk) so another client can open it.
+    pub fn unload(&mut self) {
+        self.disconnect_folder_watcher();
+        self.journal.close();
+    }
+
+    /// `FolderStatusModel::slotApplySelectiveSync` for this folder: edits the
+    /// selective sync lists of the journal (see [`crate::selective_sync`]);
+    /// when something changed, a running sync is terminated and the changed
+    /// paths are scheduled for local discovery. The caller then schedules
+    /// the folder for an immediate sync when [`SelectiveSyncChange::changes`]
+    /// is not empty.
+    ///
+    /// [`SelectiveSyncChange::changes`]: crate::selective_sync::SelectiveSyncChange::changes
+    pub fn apply_selective_sync(
+        &mut self,
+        exclude: &[String],
+        include: &[String],
+    ) -> Result<crate::selective_sync::SelectiveSyncChange, crate::selective_sync::SelectiveSyncError>
+    {
+        let change = crate::selective_sync::apply(&self.journal, exclude, include)?;
+        // do the sync if there were changes
+        if !change.changes.is_empty() {
+            if self.is_busy() {
+                self.slot_terminate_sync();
+            }
+            for it in &change.changes {
+                self.schedule_path_for_local_discovery(it);
+            }
+        }
+        Ok(change)
+    }
+
     /// `initializeSyncOptions()`.
     fn initialize_sync_options(&self) -> SyncOptions {
         let mut opt = SyncOptions::default();

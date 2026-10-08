@@ -243,8 +243,186 @@ fn official_client_paths(options: &Options) -> Vec<String> {
         .collect()
 }
 
+/// The keyring of the user daemon (`None` for a system instance or when
+/// there is none).
+fn credential_store(options: &Options) -> Option<KeyringStore> {
+    match options.location.mode {
+        ServiceMode::User => KeyringStore::secret_service()
+            .map_err(|e| log::warn!(target: LOG, "The keyring is not available: {e}"))
+            .ok(),
+        ServiceMode::System { .. } => None,
+    }
+}
+
+/// The `Account` of a configured account, with its credentials when they
+/// are found (`AccountManager::loadAccountHelper`). `None` when its URL or
+/// HTTP client is unusable.
+fn build_account(
+    options: &Options,
+    acc: &AccountDefinition,
+    resolver: &CredentialResolver<'_>,
+) -> Option<(Arc<Account>, bool)> {
+    let url = match ServerUrl::parse(&acc.url) {
+        Ok(u) => u,
+        Err(e) => {
+            log::error!(target: LOG, "Account {}: invalid URL {:?}: {}", acc.id, acc.url, e.0);
+            return None;
+        }
+    };
+    let http = http_options(options, acc);
+    let transport = match HttpTransport::new(&http) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!(target: LOG, "Account {}: cannot set up the HTTP client: {e}", acc.id);
+            return None;
+        }
+    };
+    let account = Arc::new(Account::new(url, Arc::new(transport)));
+    // ClientStatusReporting: its databases next to the configuration
+    // (`ConfigFile().configPath()`).
+    if let Some(dir) = options.location.config_file.parent() {
+        nc_sync::client_status_reporting::install(&account, dir.to_owned());
+    }
+    let user = acc.credentials_user();
+    let ready = match resolver.app_password(acc) {
+        Ok((password, source)) => {
+            log::info!(target: LOG, "Account {}: credentials from {source}", acc.id);
+            account.set_credentials(Credentials::new(user.clone(), password.expose()));
+            true
+        }
+        Err(e) => {
+            log::warn!(target: LOG, "Account {}: {e}", acc.id);
+            account.set_credentials(Credentials::new(user.clone(), String::new()));
+            false
+        }
+    };
+    if !acc.dav_user.is_empty() {
+        account.set_dav_user(&acc.dav_user);
+    }
+    if !acc.display_name.is_empty() {
+        account.set_dav_display_name(&acc.display_name);
+    }
+    if !acc.server_version.is_empty() {
+        account.set_server_version(&acc.server_version);
+    }
+    Some((account, ready))
+}
+
+fn add_account(
+    fm: &mut FolderMan,
+    options: &Options,
+    acc: &AccountDefinition,
+    resolver: &CredentialResolver<'_>,
+) -> bool {
+    let Some((account, ready)) = build_account(options, acc, resolver) else {
+        return false;
+    };
+    let push = (!options.no_push).then(|| http_options(options, acc));
+    fm.add_account(&acc.id, account, ready, limits_of(acc), push);
+    true
+}
+
+/// A folder of the configuration, ready to be added to the folder manager.
+struct WantedFolder {
+    account_id: String,
+    definition: Definition,
+    backwards_compatible: bool,
+}
+
+/// The identity of a folder: what makes a loaded folder the same as a
+/// configured one (other changes need a restart).
+fn same_folder(f: &crate::folder::Folder, account_id: &str, def: &FolderDefinition) -> bool {
+    f.alias() == def.alias
+        && f.account_id() == account_id
+        && clean_path(f.path()) == clean_path(&def.local_path)
+        && f.remote_path() == crate::folder::prepare_target_path(&def.target_path)
+}
+
+/// The checks and migrations of `FolderMan::setupFoldersHelper` for one
+/// loaded folder definition: virtual files are refused, so is a folder the
+/// official client also syncs; a journal is moved from an absolute path,
+/// and a changed definition is saved.
+fn prepare_folder(
+    options: &Options,
+    accounts: &[AccountDefinition],
+    official: &[String],
+    folder: crate::folder_definition::LoadedFolder,
+) -> Option<WantedFolder> {
+    let config_path = &options.location.config_file;
+    let def = folder.definition;
+    if let Err(e) = def.check_supported() {
+        log::error!(target: LOG, "{e}");
+        return None;
+    }
+    if official.contains(&clean_path(&def.local_path)) {
+        log::error!(target: LOG, "Folder {} ({}) is also configured in the official desktop client: not syncing it. Run `ncsync takeover {}` (with the official client stopped) to move it to ncsyncd, or remove it from one of the two clients.", def.alias, def.local_path, def.local_path);
+        return None;
+    }
+    let mut def = def;
+    let mut needs_save = folder.needs_save;
+    match &folder.journal_migration {
+        JournalMigration::FromAbsolutePath(old) => {
+            if !move_absolute_journal(old, &def) {
+                log::warn!(target: LOG, "Wasn't able to move 3.0 syncjournal database files to new location. One-time loss off sync settings possible.");
+            }
+            needs_save = true;
+        }
+        JournalMigration::MaybeMigrateLegacyDb => {
+            let _ = nc_journal::journal::maybe_migrate_db(
+                &def.local_path,
+                &def.absolute_journal_path(),
+            );
+        }
+        JournalMigration::None => {}
+    }
+    if def.journal_path.is_empty()
+        && let Some(acc) = accounts.iter().find(|a| a.id == folder.account_id)
+    {
+        def.journal_path = def.default_journal_path(acc);
+    }
+    if needs_save {
+        let group = choose_group(false, folder.save_backwards_compatible, false);
+        let account_id = folder.account_id.clone();
+        let _ = Settings::modify(config_path, |s| {
+            crate::folder_definition::remove_folder(s, &account_id, &folder.escaped_alias);
+            save_folder(s, &account_id, group, &def);
+        });
+    }
+    Some(WantedFolder {
+        account_id: folder.account_id,
+        definition: Definition {
+            alias: def.alias.clone(),
+            local_path: def.local_path.clone(),
+            journal_path: def.journal_path.clone(),
+            target_path: def.target_path.clone(),
+            paused: def.paused,
+            ignore_hidden_files: def.ignore_hidden_files,
+        },
+        backwards_compatible: folder.save_backwards_compatible,
+    })
+}
+
+/// `addFolderInternal` of a prepared folder, with its log line.
+fn add_folder(fm: &mut FolderMan, wanted: WantedFolder) -> Option<String> {
+    let (local, remote) = (
+        wanted.definition.local_path.clone(),
+        wanted.definition.target_path.clone(),
+    );
+    let name = wanted.definition.alias.clone();
+    let Some(alias) = fm.add_folder_from_settings(
+        &wanted.account_id,
+        wanted.definition,
+        wanted.backwards_compatible,
+    ) else {
+        log::error!(target: LOG, "Folder {name}: its account {} is not available", wanted.account_id);
+        return None;
+    };
+    log::info!(target: LOG, "Folder {alias}: {local} <-> {remote}");
+    Some(alias)
+}
+
 /// Loads the configuration into a new folder manager's accounts and
-/// folders. Returns the resolver's view of which accounts have credentials.
+/// folders.
 pub fn setup(fm: &mut FolderMan, options: &Options) -> Result<(), StartupError> {
     let config_path = options.location.config_file.clone();
     let settings = Settings::load(&config_path).map_err(|source| StartupError::Config {
@@ -255,163 +433,332 @@ pub fn setup(fm: &mut FolderMan, options: &Options) -> Result<(), StartupError> 
     if accounts.is_empty() {
         return Err(StartupError::NoAccount(config_path));
     }
-    let store = match options.location.mode {
-        ServiceMode::User => KeyringStore::secret_service()
-            .map_err(|e| log::warn!(target: LOG, "The keyring is not available: {e}"))
-            .ok(),
-        ServiceMode::System { .. } => None,
-    };
+    let store = credential_store(options);
     let resolver = CredentialResolver::new(
         options.location.mode.clone(),
         store.as_ref().map(|s| s as &dyn SecretStore),
     );
     for acc in &accounts {
-        let url = match ServerUrl::parse(&acc.url) {
-            Ok(u) => u,
-            Err(e) => {
-                log::error!(target: LOG, "Account {}: invalid URL {:?}: {}", acc.id, acc.url, e.0);
-                continue;
-            }
-        };
-        let http = http_options(options, acc);
-        let transport = match HttpTransport::new(&http) {
-            Ok(t) => t,
-            Err(e) => {
-                log::error!(target: LOG, "Account {}: cannot set up the HTTP client: {e}", acc.id);
-                continue;
-            }
-        };
-        let account = Arc::new(Account::new(url, Arc::new(transport)));
-        // ClientStatusReporting: its databases next to the configuration
-        // (`ConfigFile().configPath()`).
-        if let Some(dir) = config_path.parent() {
-            nc_sync::client_status_reporting::install(&account, dir.to_owned());
-        }
-        let user = acc.credentials_user();
-        let ready = match resolver.app_password(acc) {
-            Ok((password, source)) => {
-                log::info!(target: LOG, "Account {}: credentials from {source}", acc.id);
-                account.set_credentials(Credentials::new(user.clone(), password.expose()));
-                true
-            }
-            Err(e) => {
-                log::warn!(target: LOG, "Account {}: {e}", acc.id);
-                account.set_credentials(Credentials::new(user.clone(), String::new()));
-                false
-            }
-        };
-        if !acc.dav_user.is_empty() {
-            account.set_dav_user(&acc.dav_user);
-        }
-        if !acc.display_name.is_empty() {
-            account.set_dav_display_name(&acc.display_name);
-        }
-        if !acc.server_version.is_empty() {
-            account.set_server_version(&acc.server_version);
-        }
-        let push = (!options.no_push).then_some(http);
-        fm.add_account(&acc.id, account, ready, limits_of(acc), push);
+        add_account(fm, options, acc, &resolver);
     }
     let official = official_client_paths(options);
-    let loaded = load_folders(&settings, &accounts);
-    for folder in loaded.folders {
-        let def = folder.definition;
-        if let Err(e) = def.check_supported() {
-            log::error!(target: LOG, "{e}");
-            continue;
+    for folder in load_folders(&settings, &accounts).folders {
+        if let Some(wanted) = prepare_folder(options, &accounts, &official, folder) {
+            add_folder(fm, wanted);
         }
-        if official.contains(&clean_path(&def.local_path)) {
-            log::error!(target: LOG, "Folder {} ({}) is also configured in the official desktop client: not syncing it. Run `ncsync takeover {}` (with the official client stopped) to move it to ncsyncd, or remove it from one of the two clients.", def.alias, def.local_path, def.local_path);
-            continue;
-        }
-        let mut def = def;
-        let mut needs_save = folder.needs_save;
-        match &folder.journal_migration {
-            JournalMigration::FromAbsolutePath(old) => {
-                if !move_absolute_journal(old, &def) {
-                    log::warn!(target: LOG, "Wasn't able to move 3.0 syncjournal database files to new location. One-time loss off sync settings possible.");
-                }
-                needs_save = true;
-            }
-            JournalMigration::MaybeMigrateLegacyDb => {
-                let _ = nc_journal::journal::maybe_migrate_db(
-                    &def.local_path,
-                    &def.absolute_journal_path(),
-                );
-            }
-            JournalMigration::None => {}
-        }
-        if def.journal_path.is_empty()
-            && let Some(acc) = accounts.iter().find(|a| a.id == folder.account_id)
-        {
-            def.journal_path = def.default_journal_path(acc);
-        }
-        let definition = Definition {
-            alias: def.alias.clone(),
-            local_path: def.local_path.clone(),
-            journal_path: def.journal_path.clone(),
-            target_path: def.target_path.clone(),
-            paused: def.paused,
-            ignore_hidden_files: def.ignore_hidden_files,
-        };
-        let Some(alias) = fm.add_folder_from_settings(
-            &folder.account_id,
-            definition,
-            folder.save_backwards_compatible,
-        ) else {
-            log::error!(target: LOG, "Folder {}: its account {} is not available", def.alias, folder.account_id);
-            continue;
-        };
-        if needs_save {
-            let group = choose_group(false, folder.save_backwards_compatible, false);
-            let account_id = folder.account_id.clone();
-            let _ = Settings::modify(&config_path, |s| {
-                crate::folder_definition::remove_folder(s, &account_id, &folder.escaped_alias);
-                save_folder(s, &account_id, group, &def);
-            });
-        }
-        log::info!(target: LOG, "Folder {alias}: {} <-> {}", def.local_path, def.target_path);
     }
     Ok(())
 }
 
-/// SIGHUP: re-reads the credentials of every account.
+/// What a [`reload`] changed (aliases and account ids).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ReloadOutcome {
+    pub added_accounts: Vec<String>,
+    pub removed_accounts: Vec<String>,
+    /// Accounts whose credentials changed or were found.
+    pub updated_credentials: Vec<String>,
+    pub added_folders: Vec<String>,
+    pub removed_folders: Vec<String>,
+    /// The removed folders whose journal is wiped (now, or once their
+    /// running sync stopped).
+    pub wiped_folders: Vec<String>,
+    /// The removed folders whose sync is still stopping.
+    #[serde(skip)]
+    pub waiting: Vec<crate::event::FolderId>,
+}
+
+/// Re-reads the configuration of a running daemon (`ncsync` after it changed
+/// it, SIGHUP), the way the official client's `FolderMan` adds and removes
+/// folders at runtime:
+///
+/// 1. accounts that left the configuration (or changed server or login
+///    name) are removed with their folders (`removeAccountState`, the
+///    stored credentials are left alone);
+/// 2. loaded folders no longer configured (or refused now) are removed:
+///    `removeFolder` (journal wiped) for the aliases in `wipe`,
+///    `unloadFolder` (journal closed and kept) for the others; a running
+///    sync is aborted first, and the journal is only touched once its
+///    engine is back ([`ReloadOutcome::waiting`]);
+/// 3. new accounts are added, and the credentials of the others re-read
+///    (an account that found new credentials connects again);
+/// 4. new folders are added and scheduled (`addFolderInternal`).
+///
+/// Global settings (poll intervals, chunk sizes, ...) and changed account
+/// options (proxy) need a restart.
+pub fn reload(
+    fm: &mut FolderMan,
+    options: &Options,
+    wipe: &[String],
+) -> Result<ReloadOutcome, StartupError> {
+    let config_path = options.location.config_file.clone();
+    log::info!(target: LOG, "Reloading the configuration {}", config_path.display());
+    let settings = Settings::load(&config_path).map_err(|source| StartupError::Config {
+        path: config_path.clone(),
+        source,
+    })?;
+    let accounts = load_accounts(&settings).accounts;
+    let official = official_client_paths(options);
+    let loaded = load_folders(&settings, &accounts).folders;
+    let mut out = ReloadOutcome::default();
+
+    // 1. accounts gone (or no longer the same server/user)
+    let same_account = |state: &crate::account_state::AccountState, acc: &AccountDefinition| {
+        let url = ServerUrl::parse(&acc.url).map(|u| u.to_credential_free_string());
+        url.is_ok_and(|u| u == state.account().url().to_credential_free_string())
+            && state.account().credentials().user == acc.credentials_user()
+    };
+    let gone: Vec<String> = fm
+        .account_states()
+        .filter(|state| {
+            !accounts
+                .iter()
+                .any(|a| a.id == state.id() && same_account(state, a))
+        })
+        .map(|state| state.id().to_owned())
+        .collect();
+
+    // 2. folders gone: those of the configuration that would be refused or
+    // belong to a gone account count as gone too.
+    let wanted_ids: Vec<(String, FolderDefinition)> = loaded
+        .iter()
+        .filter(|f| !gone.contains(&f.account_id))
+        .filter(|f| f.definition.check_supported().is_ok())
+        .filter(|f| !official.contains(&clean_path(&f.definition.local_path)))
+        .map(|f| (f.account_id.clone(), f.definition.clone()))
+        .collect();
+    let removed: Vec<String> = fm
+        .map()
+        .values()
+        .filter(|f| {
+            !wanted_ids
+                .iter()
+                .any(|(account_id, def)| same_folder(f, account_id, def))
+        })
+        .map(|f| f.alias().to_owned())
+        .collect();
+    for alias in removed {
+        let wiped = wipe.contains(&alias);
+        if let Some(id) = fm.unload_folder(&alias, wiped) {
+            out.waiting.push(id);
+        }
+        if wiped {
+            out.wiped_folders.push(alias.clone());
+        }
+        out.removed_folders.push(alias);
+    }
+    for id in gone {
+        out.waiting.extend(fm.remove_account_state(&id));
+        out.removed_accounts.push(id);
+    }
+
+    // 3. new accounts, new credentials
+    let store = credential_store(options);
+    let resolver = CredentialResolver::new(
+        options.location.mode.clone(),
+        store.as_ref().map(|s| s as &dyn SecretStore),
+    );
+    for acc in &accounts {
+        let Some(state) = fm.account_state(&acc.id) else {
+            if add_account(fm, options, acc, &resolver) {
+                out.added_accounts.push(acc.id.clone());
+            }
+            continue;
+        };
+        let needs_credentials = matches!(
+            state.state(),
+            crate::account_state::State::SignedOut | crate::account_state::State::AskingCredentials
+        );
+        let current = state.account().credentials().password;
+        match resolver.app_password(acc) {
+            Ok((password, source)) => {
+                if needs_credentials || password.expose() != current {
+                    log::info!(target: LOG, "Account {}: credentials reloaded from {source}", acc.id);
+                    fm.set_account_credentials(
+                        &acc.id,
+                        Credentials::new(acc.credentials_user(), password.expose()),
+                    );
+                    out.updated_credentials.push(acc.id.clone());
+                }
+            }
+            Err(e) => log::warn!(target: LOG, "Account {}: {e}", acc.id),
+        }
+        fm.set_network_limits(&acc.id, limits_of(acc));
+    }
+
+    // 4. new folders
+    for folder in loaded {
+        let loaded_already = fm
+            .map()
+            .values()
+            .any(|f| same_folder(f, &folder.account_id, &folder.definition));
+        if loaded_already {
+            continue;
+        }
+        if let Some(wanted) = prepare_folder(options, &accounts, &official, folder)
+            && let Some(alias) = add_folder(fm, wanted)
+        {
+            out.added_folders.push(alias);
+        }
+    }
+    log::info!(target: LOG, "Configuration reloaded: {} accounts, {} folders", fm.account_states().count(), fm.map().len());
+    Ok(out)
+}
+
+/// The daemon's [`crate::daemon::DaemonHooks`]: [`reload`] for SIGHUP and the
+/// `reload` control request.
 pub struct ReloadHooks {
     pub options: Options,
-    pub accounts: Vec<(String, Arc<Account>)>,
 }
 
 impl crate::daemon::DaemonHooks for ReloadHooks {
-    fn reload_credentials(&mut self) -> Vec<(String, bool)> {
-        let Ok(settings) = Settings::load(&self.options.location.config_file) else {
-            return Vec::new();
-        };
-        let accounts = load_accounts(&settings).accounts;
-        let store = match self.options.location.mode {
-            ServiceMode::User => KeyringStore::secret_service().ok(),
-            ServiceMode::System { .. } => None,
-        };
-        let resolver = CredentialResolver::new(
-            self.options.location.mode.clone(),
-            store.as_ref().map(|s| s as &dyn SecretStore),
-        );
-        let mut out = Vec::new();
-        for (id, account) in &self.accounts {
-            let Some(acc) = accounts.iter().find(|a| &a.id == id) else {
-                continue;
-            };
-            match resolver.app_password(acc) {
-                Ok((password, source)) => {
-                    log::info!(target: LOG, "Account {id}: credentials reloaded from {source}");
-                    account.set_credentials(Credentials::new(
-                        acc.credentials_user(),
-                        password.expose(),
-                    ));
-                    out.push((id.clone(), true));
-                }
-                Err(e) => log::warn!(target: LOG, "Account {id}: {e}"),
+    fn reload(
+        &mut self,
+        fm: &mut FolderMan,
+        config: Option<&str>,
+        wipe: &[String],
+    ) -> crate::daemon::ReloadResult {
+        let ours = &self.options.location.config_file;
+        if let Some(theirs) = config {
+            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+            if canon(Path::new(theirs)) != canon(ours) {
+                return crate::daemon::ReloadResult::error(format!(
+                    "this daemon uses the configuration {}, not {theirs}",
+                    ours.display()
+                ));
             }
         }
-        out
+        match reload(fm, &self.options, wipe) {
+            Ok(out) => {
+                let mut response = serde_json::to_value(&out).unwrap_or_default();
+                response["ok"] = serde_json::Value::Bool(true);
+                response["config"] = serde_json::Value::from(ours.to_string_lossy().as_ref());
+                crate::daemon::ReloadResult {
+                    response,
+                    waiting: out.waiting,
+                }
+            }
+            Err(e) => {
+                log::error!(target: LOG, "Could not reload the configuration: {e}");
+                crate::daemon::ReloadResult::error(e.to_string())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account_config::save_account;
+    use crate::manage::{self, Context};
+
+    fn account(id: &str, dir: &Path) -> AccountDefinition {
+        let mut acc = AccountDefinition::new_webflow(id, "http://127.0.0.1:9", &format!("u{id}"));
+        let pw = dir.join(format!("pw{id}"));
+        std::fs::write(&pw, "secret\n").unwrap();
+        acc.password_file = Some(pw.to_string_lossy().into_owned());
+        acc
+    }
+
+    #[test]
+    fn derived_reload_adds_and_removes_accounts_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = ConfigLocation {
+            mode: ServiceMode::System {
+                instance: "test".to_owned(),
+            },
+            config_file: dir.path().join("ncsyncd.cfg"),
+            state_dir: dir.path().join("state"),
+        };
+        let options = Options {
+            location: location.clone(),
+            trust: false,
+            http_proxy: None,
+            no_watch: true,
+            no_push: true,
+            official_config: Some(dir.path().join("no-official.cfg")),
+        };
+        let ctx = Context {
+            location: location.clone(),
+            http: HttpClientOptions::default(),
+        };
+        let cfg = location.config_file.clone();
+        Settings::modify(&cfg, |s| save_account(s, &account("0", dir.path()))).unwrap();
+        let local = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let one = manage::add_folder(&ctx, &local("A"), "/", None).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut fm = FolderMan::new(
+                &tx,
+                FolderManSettings::default(),
+                Box::new(crate::folder_man::NullSettingsStore),
+                crate::folder_man::no_watcher(),
+            );
+            setup(&mut fm, &options).unwrap();
+            assert_eq!(fm.map().len(), 1);
+
+            // nothing changed
+            assert_eq!(
+                reload(&mut fm, &options, &[]).unwrap(),
+                ReloadOutcome::default()
+            );
+
+            // a folder, an account and its folder
+            let two = manage::add_folder(&ctx, &local("B"), "/Docs", None).unwrap();
+            Settings::modify(&cfg, |s| save_account(s, &account("1", dir.path()))).unwrap();
+            let three = manage::add_folder(&ctx, &local("C"), "/", Some("1")).unwrap();
+            let out = reload(&mut fm, &options, &[]).unwrap();
+            assert_eq!(out.added_accounts, ["1"]);
+            assert_eq!(out.added_folders, [two.alias.clone(), three.alias.clone()]);
+            assert!(out.removed_folders.is_empty());
+            assert_eq!(fm.map().len(), 3);
+            assert_eq!(fm.account_states().count(), 2);
+
+            // folder 1 removed (journal wiped), account 1 removed with its
+            // folder (journal kept)
+            let journal = |def: &FolderDefinition| PathBuf::from(def.absolute_journal_path());
+            std::fs::write(journal(&one), b"").unwrap();
+            std::fs::write(journal(&three), b"").unwrap();
+            manage::remove_folder(&ctx, &one.alias, false).unwrap();
+            Settings::modify(&cfg, |s| {
+                crate::folder_definition::remove_folder(
+                    s,
+                    "1",
+                    &crate::folder_definition::escape_alias(&three.alias),
+                );
+                crate::account_config::remove_account(s, "1");
+            })
+            .unwrap();
+            let out = reload(&mut fm, &options, std::slice::from_ref(&one.alias)).unwrap();
+            assert_eq!(out.removed_accounts, ["1"]);
+            assert_eq!(
+                out.removed_folders,
+                [one.alias.clone(), three.alias.clone()]
+            );
+            assert_eq!(out.wiped_folders, std::slice::from_ref(&one.alias));
+            assert!(out.waiting.is_empty());
+            assert!(!journal(&one).exists());
+            assert!(journal(&three).exists());
+            assert_eq!(
+                fm.map().keys().cloned().collect::<Vec<_>>(),
+                std::slice::from_ref(&two.alias)
+            );
+            assert_eq!(fm.account_states().count(), 1);
+
+            // a folder the official client also syncs is unloaded
+            let official = dir.path().join("official.cfg");
+            std::fs::copy(&cfg, &official).unwrap();
+            let with_official = Options {
+                official_config: Some(official),
+                ..options.clone()
+            };
+            let out = reload(&mut fm, &with_official, &[]).unwrap();
+            assert_eq!(out.removed_folders, std::slice::from_ref(&two.alias));
+            assert!(fm.map().is_empty());
+        });
     }
 }

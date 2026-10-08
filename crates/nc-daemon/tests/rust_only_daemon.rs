@@ -287,3 +287,275 @@ fn rust_only_daemon_locks_documents_opened_in_an_office_application() {
             tokio::join!(daemon::run(&mut fm, &tx, &mut rx, &mut hooks), driver);
     });
 }
+
+/// Reload hooks for the tests: the folders in `wipe` are removed with their
+/// journal (`removeFolder`), the alias `"keep:<alias>"` unloads a folder and
+/// keeps its journal (`unloadFolder`).
+struct UnloadHooks;
+
+impl daemon::DaemonHooks for UnloadHooks {
+    fn reload(
+        &mut self,
+        fm: &mut FolderMan,
+        _config: Option<&str>,
+        wipe: &[String],
+    ) -> daemon::ReloadResult {
+        let mut waiting = Vec::new();
+        for w in wipe {
+            let (alias, wipe) = match w.strip_prefix("keep:") {
+                Some(a) => (a, false),
+                None => (w.as_str(), true),
+            };
+            waiting.extend(fm.unload_folder(alias, wipe));
+        }
+        daemon::ReloadResult {
+            response: serde_json::json!({"ok": true}),
+            waiting,
+        }
+    }
+}
+
+/// rust_only: `ncsync folder exclude|include` over the control socket
+/// (`FolderStatusModel::slotApplySelectiveSync`): a newly excluded folder
+/// loses its local files that are unchanged since the last sync and keeps
+/// the changed ones (`ProcessDirectoryJob::processBlacklisted`), nothing is
+/// deleted on the server, and an included folder is downloaded again.
+/// Then a folder removed by a reload: its journal is wiped once its sync
+/// is back, or kept for an unloaded folder.
+#[test]
+fn rust_only_daemon_selective_sync_and_folder_removal() {
+    let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut settings = FolderManSettings {
+            remote_poll_interval: Duration::from_secs(1),
+            ..FolderManSettings::default()
+        };
+        settings.folder.minimum_file_age_for_upload = Duration::ZERO;
+        let exclude_dir = tempfile::tempdir().unwrap();
+        let exclude = exclude_dir.path().join("sync-exclude.lst");
+        std::fs::write(&exclude, nc_journal::exclude::DEFAULT_SYNC_EXCLUDE_LST).unwrap();
+        settings.folder.exclude_files = vec![exclude.to_string_lossy().into_owned()];
+        let mut fm = FolderMan::new(
+            &tx,
+            settings,
+            Box::new(NullSettingsStore),
+            nc_daemon::folder_man::no_watcher(),
+        );
+        fm.add_fake_connected_account("0", fake_folder.account().clone());
+        let alias = fm
+            .add_folder_from_settings(
+                "0",
+                Definition {
+                    alias: "0".to_owned(),
+                    local_path: fake_folder.local_path(),
+                    journal_path: ".sync_test.db".to_owned(),
+                    target_path: "/".to_owned(),
+                    ..Definition::default()
+                },
+                true,
+            )
+            .unwrap();
+        let journal = fake_folder.local_dir().join(".sync_test.db");
+        let driver = {
+            let tx = tx.clone();
+            let journal = journal.clone();
+            async move {
+                let idle = |st: &serde_json::Value| {
+                    (st["folders"][0]["status"] == "Success"
+                        || st["folders"][0]["status"] == "Problem")
+                        && st["folders"][0]["syncing"] == false
+                        && st["folders"][0]["scheduled"] == false
+                };
+                let wait_idle = async |what: &str| {
+                    for _ in 0..300 {
+                        if idle(&control(&tx, Request::Status).await) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    panic!("timed out waiting for {what}");
+                };
+                wait_idle("the initial sync").await;
+
+                // pause, change A/a2 locally, exclude A
+                assert_eq!(
+                    control(&tx, Request::Pause { folder: None }).await["ok"],
+                    true
+                );
+                fake_folder.local_modifier().append_byte("A/a2");
+                let r = control(
+                    &tx,
+                    Request::SelectiveSync {
+                        folder: alias.clone(),
+                        exclude: vec!["/A".to_owned()],
+                        include: Vec::new(),
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], true, "{r}");
+                assert_eq!(r["blacklist"], serde_json::json!(["A/"]));
+                assert_eq!(r["changes"], serde_json::json!(["A/"]));
+                // a file cannot be excluded, nor a folder inside an excluded one included
+                let r = control(
+                    &tx,
+                    Request::SelectiveSync {
+                        folder: alias.clone(),
+                        exclude: vec!["B/b1".to_owned()],
+                        include: Vec::new(),
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], false, "{r}");
+                let r = control(
+                    &tx,
+                    Request::SelectiveSync {
+                        folder: fake_folder.local_path(),
+                        exclude: Vec::new(),
+                        include: vec!["A/sub".to_owned()],
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], false, "{r}");
+                assert_eq!(
+                    control(&tx, Request::Resume { folder: None }).await["ok"],
+                    true
+                );
+                let a1 = fake_folder.local_dir().join("A/a1");
+                wait_for("A/a1 to be removed locally", || !a1.exists()).await;
+                wait_idle("the sync after the exclusion").await;
+                // the changed file stays, nothing is deleted on the server
+                assert!(fake_folder.local_dir().join("A/a2").exists());
+                let remote = fake_folder.current_remote_state();
+                assert!(remote.find("A/a1").is_some());
+                assert_eq!(remote.find("A/a2").unwrap().size, 4);
+
+                // include it again
+                let r = control(
+                    &tx,
+                    Request::SelectiveSync {
+                        folder: alias.clone(),
+                        exclude: Vec::new(),
+                        include: vec!["A".to_owned()],
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], true, "{r}");
+                assert_eq!(r["blacklist"], serde_json::json!([]));
+                assert_eq!(r["whitelist_added"], serde_json::json!(["A/"]));
+                wait_for("A/a1 to be downloaded again", || a1.exists()).await;
+                wait_idle("the sync after the inclusion").await;
+
+                // unloaded (journal kept), while a sync may be starting
+                assert_eq!(
+                    control(&tx, Request::SyncNow { folder: None }).await["ok"],
+                    true
+                );
+                let r = control(
+                    &tx,
+                    Request::Reload {
+                        config: None,
+                        wipe: vec![format!("keep:{alias}")],
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], true);
+                let st = control(&tx, Request::Status).await;
+                assert_eq!(st["folders"], serde_json::json!([]));
+                assert!(journal.exists());
+                tx.send(Event::Shutdown).unwrap();
+                fake_folder
+            }
+        };
+        let mut hooks = UnloadHooks;
+        let (_, fake_folder) = tokio::join!(daemon::run(&mut fm, &tx, &mut rx, &mut hooks), driver);
+        // The journal was closed: it opens again (no exclusive lock left).
+        let db = nc_journal::journal::SyncJournalDb::new(&journal);
+        assert!(
+            db.get_selective_sync_list(nc_journal::journal::SelectiveSyncListType::WhiteList)
+                .unwrap()
+                .contains(&"A/".to_owned())
+        );
+        drop(db);
+        drop(fake_folder);
+    });
+}
+
+/// rust_only: a folder removed by a reload while its sync runs: the answer
+/// waits for the engine, then the journal is gone (and not recreated).
+#[test]
+fn rust_only_daemon_removed_folder_journal_wiped_after_its_sync() {
+    let fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    // a download that never ends: the sync is still running when the
+    // folder is removed
+    fake_folder.remote_modifier().insert("A/slow", 64, b'S');
+    fake_folder.set_server_override(|request, _| {
+        (request.method() == "GET" && request.uri().path().ends_with("/A/slow"))
+            .then_some(nc_testutils::server::FakeReply::Hang)
+    });
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fm = FolderMan::new(
+            &tx,
+            FolderManSettings::default(),
+            Box::new(NullSettingsStore),
+            nc_daemon::folder_man::no_watcher(),
+        );
+        fm.add_fake_connected_account("0", fake_folder.account().clone());
+        let alias = fm
+            .add_folder_from_settings(
+                "0",
+                Definition {
+                    alias: "0".to_owned(),
+                    local_path: fake_folder.local_path(),
+                    journal_path: ".sync_test.db".to_owned(),
+                    target_path: "/".to_owned(),
+                    ..Definition::default()
+                },
+                true,
+            )
+            .unwrap();
+        let journal = fake_folder.local_dir().join(".sync_test.db");
+        let driver = {
+            let tx = tx.clone();
+            let journal = journal.clone();
+            async move {
+                for _ in 0..100 {
+                    let st = control(&tx, Request::Status).await;
+                    if st["folders"][0]["syncing"] == true {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let st = control(&tx, Request::Status).await;
+                assert_eq!(st["folders"][0]["syncing"], true, "{st}");
+                let r = control(
+                    &tx,
+                    Request::Reload {
+                        config: None,
+                        wipe: vec![alias.clone()],
+                    },
+                )
+                .await;
+                assert_eq!(r["ok"], true);
+                assert!(!journal.exists());
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert!(!journal.exists());
+                tx.send(Event::Shutdown).unwrap();
+            }
+        };
+        let mut hooks = UnloadHooks;
+        tokio::join!(daemon::run(&mut fm, &tx, &mut rx, &mut hooks), driver);
+        drop(fake_folder);
+    });
+}

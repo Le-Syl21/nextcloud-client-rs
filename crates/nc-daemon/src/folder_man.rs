@@ -129,6 +129,10 @@ pub struct FolderMan {
     account_wrap: EventWrapper<Event>,
     /// The `RemoteWipe` of every account.
     remote_wipes: HashMap<String, RemoteWipe>,
+    /// Removed or unloaded folders whose sync is still running, and whether
+    /// their journal is wiped (`removeFolder`) or only closed
+    /// (`unloadFolder`) once their engine is back.
+    unloading: HashMap<FolderId, (Folder, bool)>,
 }
 
 impl FolderMan {
@@ -164,6 +168,7 @@ impl FolderMan {
             requests: Vec::new(),
             account_wrap: Arc::new(Event::Account),
             remote_wipes: HashMap::new(),
+            unloading: HashMap::new(),
         };
         fm.etag_poll_timer
             .start(tx, |g| Event::FolderMan(FolderManEvent::EtagPollTimer(g)));
@@ -488,6 +493,40 @@ impl FolderMan {
         });
     }
 
+    /// `AccountManager::removeAccountState(account)` (`KeepSensitiveData`:
+    /// the credentials stay where they are stored), for an account that left
+    /// the configuration: its remaining folders are unloaded (journals kept),
+    /// then the account state goes. Returns the folders whose sync is still
+    /// running (see [`Self::unload_folder`]).
+    pub fn remove_account_state(&mut self, account_id: &str) -> Vec<FolderId> {
+        let aliases: Vec<String> = self
+            .folder_map
+            .values()
+            .filter(|f| f.account_id() == account_id)
+            .map(|f| f.alias().to_owned())
+            .collect();
+        let waiting = aliases
+            .iter()
+            .filter_map(|alias| self.unload_folder(alias, false))
+            .collect();
+        if let Some(state) = self.accounts.remove(account_id) {
+            log::info!(target: LOG, "Removing account {}", account_display_name(state.account()));
+            state.account().set_invalid_credentials_handler(None);
+        }
+        self.account_limits.remove(account_id);
+        self.remote_wipes.remove(account_id);
+        waiting
+    }
+
+    /// New credentials for a loaded account (the configuration was reloaded):
+    /// the account uses them and validates its connection again.
+    pub fn set_account_credentials(&mut self, account_id: &str, credentials: nc_dav::Credentials) {
+        if let Some(state) = self.accounts.get(account_id) {
+            state.account().set_credentials(credentials);
+        }
+        self.set_account_credentials_ready(account_id, true);
+    }
+
     /// `slotAccountStateChanged()`: schedules folders of newly connected
     /// accounts, terminates and de-schedules folders of disconnected
     /// accounts.
@@ -671,13 +710,43 @@ impl FolderMan {
         log::info!(target: LOG, "Saved folder {alias} to settings");
     }
 
-    /// `removeFolder(folder)`.
+    /// `removeFolder(folder)`: aborts a running sync, de-schedules the
+    /// folder, wipes its journal (`wipeForRemoval`) and removes it from the
+    /// settings. A running engine holds the journal: the wipe then waits for
+    /// it to come back (upstream wipes at once, its engine aborts
+    /// synchronously).
     pub fn remove_folder(&mut self, alias: &str) {
+        self.remove_folder_internal(alias, true, true);
+    }
+
+    /// `unloadFolder(folder)` for a folder that left the configuration (the
+    /// configuration is not written): like [`Self::remove_folder`], with the
+    /// journal closed and left in place unless `wipe`. Returns the folder's
+    /// id when its sync is still running: it is unloaded once its engine is
+    /// back (see [`Self::is_unloading`]).
+    pub fn unload_folder(&mut self, alias: &str, wipe: bool) -> Option<FolderId> {
+        if wipe {
+            return self.remove_folder_internal(alias, true, false);
+        }
+        if self.folder_map.contains_key(alias) {
+            log::info!(target: LOG, "Unloading  {alias}");
+        }
+        self.remove_folder_internal(alias, false, false)
+    }
+
+    fn remove_folder_internal(
+        &mut self,
+        alias: &str,
+        wipe: bool,
+        remove_from_settings: bool,
+    ) -> Option<FolderId> {
         let Some(mut f) = self.folder_map.remove(alias) else {
             log::error!(target: LOG, "Can not remove null folder");
-            return;
+            return None;
         };
-        log::info!(target: LOG, "Removing  {alias}");
+        if wipe {
+            log::info!(target: LOG, "Removing  {alias}");
+        }
         let id = f.id();
         let currently_running = f.is_sync_running();
         if currently_running {
@@ -686,16 +755,74 @@ impl FolderMan {
         }
         self.scheduled_folders.retain(|x| *x != id);
         let _ = f.set_sync_paused(true);
-        f.wipe_for_removal();
-        // remove the folder configuration
-        self.store.remove_folder(f.account_id(), alias);
+        if remove_from_settings {
+            // remove the folder configuration
+            self.store.remove_folder(f.account_id(), alias);
+        }
         self.disabled_folders.remove(&id);
         self.aliases.remove(&id);
         if self.current_etag_job == Some(id) {
             self.current_etag_job = None;
         }
-        // A running folder finishes in the background; its EngineFinished
-        // then schedules the next folder (slotFolderSyncFinished).
+        if currently_running {
+            // A running folder finishes in the background; its EngineFinished
+            // then wipes or closes the journal and schedules the next folder
+            // (slotFolderSyncFinished).
+            f.disconnect_folder_watcher();
+            self.unloading.insert(id, (f, wipe));
+            return Some(id);
+        }
+        Self::finish_unload(f, wipe);
+        // `_currentSyncFolder` and `_lastSyncFolder` are QPointers: they
+        // become null when the folder is deleted. A folder whose engine is
+        // back but whose delayed syncFinished did not fire yet would
+        // otherwise keep the next syncs from starting.
+        if self.last_sync_folder == Some(id) {
+            self.last_sync_folder = None;
+        }
+        if self.current_sync_folder == Some(id) {
+            self.current_sync_folder = None;
+            self.start_scheduled_sync_soon();
+        }
+        None
+    }
+
+    fn finish_unload(mut f: Folder, wipe: bool) {
+        if wipe {
+            f.wipe_for_removal();
+        } else {
+            f.unload();
+        }
+    }
+
+    /// Whether a removed or unloaded folder still waits for its engine.
+    pub fn is_unloading(&self, id: FolderId) -> bool {
+        self.unloading.contains_key(&id)
+    }
+
+    /// `FolderStatusModel::slotApplySelectiveSync` for one folder: see
+    /// [`Folder::apply_selective_sync`]; a change schedules the folder for an
+    /// immediate sync.
+    pub fn apply_selective_sync(
+        &mut self,
+        alias: &str,
+        exclude: &[String],
+        include: &[String],
+    ) -> Option<
+        Result<
+            crate::selective_sync::SelectiveSyncChange,
+            crate::selective_sync::SelectiveSyncError,
+        >,
+    > {
+        let f = self.folder_map.get_mut(alias)?;
+        let id = f.id();
+        let result = f.apply_selective_sync(exclude, include);
+        if let Ok(change) = &result
+            && !change.changes.is_empty()
+        {
+            self.schedule_folder_for_immediate_sync(id);
+        }
+        Some(result)
     }
 
     /// `unloadAndDeleteAllFolders()`.
@@ -1233,10 +1360,7 @@ impl FolderMan {
             Event::Folder(id, e) => self.handle_folder_event(id, e),
             Event::Watcher(id, e) => self.handle_watcher_event(id, e),
             Event::Push(account_id, e) => self.handle_push_event(&account_id, e),
-            Event::Control(..)
-            | Event::Shutdown
-            | Event::WatchdogTick
-            | Event::ReloadCredentials => {}
+            Event::Control(..) | Event::Shutdown | Event::WatchdogTick | Event::Reload => {}
         }
     }
 
@@ -1295,13 +1419,18 @@ impl FolderMan {
 
     fn handle_folder_event(&mut self, id: FolderId, event: FolderEvent) {
         if self.folder_by_id(id).is_none() {
-            // A removed folder: its engine comes back once, and the next
-            // folder can start (removeFolder connects syncFinished).
-            if let FolderEvent::EngineFinished(..) = event
-                && self.current_sync_folder == Some(id)
-            {
-                self.current_sync_folder = None;
-                self.start_scheduled_sync_soon();
+            // A removed folder: its engine comes back once, its journal can
+            // be wiped or closed, and the next folder can start
+            // (removeFolder connects syncFinished).
+            if let FolderEvent::EngineFinished(engine, _) = event {
+                drop(engine);
+                if let Some((f, wipe)) = self.unloading.remove(&id) {
+                    Self::finish_unload(f, wipe);
+                }
+                if self.current_sync_folder == Some(id) {
+                    self.current_sync_folder = None;
+                    self.start_scheduled_sync_soon();
+                }
             }
             return;
         }
@@ -1413,7 +1542,7 @@ impl FolderMan {
 
     /// Whether a folder's sync is still running (for a clean shutdown).
     pub fn any_engine_away(&self) -> bool {
-        self.folder_map.values().any(|f| f.is_sync_running())
+        !self.unloading.is_empty() || self.folder_map.values().any(|f| f.is_sync_running())
     }
 }
 
