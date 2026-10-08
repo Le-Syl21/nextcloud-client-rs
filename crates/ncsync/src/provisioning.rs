@@ -19,11 +19,11 @@
 //! by clap: an option it does not know, or one without its value, prints
 //! the help and exits with 0 (`HelpMode`).
 //!
-//! Two deliberate divergences: without an app password the account is
+//! Deliberate divergences: without an app password the account is
 //! not stored without credentials (the GUI's "log in later"), the user
 //! logs in with Login Flow v2 in the terminal instead, and
-//! `--non-interactive` then refuses the setup; `--trust` applies to the
-//! setup's requests (upstream ignores it there).
+//! `--non-interactive` then refuses the setup; `--trust` and `--httpproxy`
+//! apply to the setup's requests (upstream ignores both there).
 //!
 //! Exit codes: 255 for a rejected command line or setup (`return -1`), 1
 //! when the setup fails once it reached the server, 0 on success.
@@ -105,6 +105,10 @@ struct CmdOptions {
     /// `--trust`: accept an invalid TLS certificate (divergence: upstream
     /// ignores it in provisioning mode).
     trust: bool,
+    /// `--httpproxy`: the HTTP proxy of every request of the setup, Login
+    /// Flow v2 included (divergence: upstream ignores it in provisioning
+    /// mode).
+    http_proxy: Option<String>,
     /// `--non-interactive`: without an app password, refuse instead of
     /// starting Login Flow v2.
     non_interactive: bool,
@@ -145,13 +149,15 @@ pub fn run(args: &[String]) -> ExitCode {
             it.peek().is_some_and(|n: &&String| !n.starts_with('-'))
         };
         match option {
-            "--httpproxy" | "-u" | "--user" | "-p" | "--password" | "--exclude"
-            | "--unsyncedfolders" | "--max-sync-retries" | "--uplimit" | "--downlimit"
-            | "--path"
+            "-u" | "--user" | "-p" | "--password" | "--exclude" | "--unsyncedfolders"
+            | "--max-sync-retries" | "--uplimit" | "--downlimit" | "--path"
                 if next_is_value(&mut it) =>
             {
                 // Parsed and unused in provisioning mode, like upstream.
                 it.next();
+            }
+            "--httpproxy" if next_is_value(&mut it) => {
+                options.http_proxy = it.next().cloned();
             }
             "--password-file" if next_is_value(&mut it) => {
                 options.password_file = it.next().cloned();
@@ -200,13 +206,13 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(f) => location.with_config_file(f),
         None => location,
     };
-    // Upstream's provisioning applies neither --trust nor --httpproxy; --trust
-    // is applied here (divergence), --httpproxy is not.
+    // Upstream's provisioning applies neither --trust nor --httpproxy; both
+    // are applied here (divergence), to every request of the setup.
     let ctx = Context {
         location,
         http: HttpClientOptions {
             trust_invalid_certificates: options.trust,
-            ..HttpClientOptions::default()
+            proxy: options.http_proxy,
         },
     };
     let settings = match ctx.load() {

@@ -905,7 +905,7 @@ keyring, the folder's journal, then "Account alice already exists!" with
 no local folder),
 `rust_only_provisioning_non_empty_local_folder_is_rejected`,
 `rust_only_provisioning_unknown_option_shows_help` (`HelpMode`, exit 0).
-For the two documented divergences (README, "Divergences from upstream"):
+For the three documented divergences (README, "Divergences from upstream"):
 without an app password, Login Flow v2 instead of an account stored
 without credentials —
 `rust_only_provisioning_without_app_password_logs_in_with_login_flow_v2`
@@ -919,7 +919,11 @@ browser logged in as another user: 1, nothing written),
 `--trust` applied to the setup —
 `rust_only_provisioning_trust_accepts_an_invalid_certificate` (a TLS
 server with a self-signed certificate: 1 and nothing written without
-`--trust`, 0 with it).
+`--trust`, 0 with it);
+`--httpproxy` applied to the setup —
+`rust_only_provisioning_httpproxy_carries_every_setup_request` (a local
+forwarding proxy: with `--httpproxy` it carries every request the server
+gets, `login/v2` and its poll included; without it, none).
 Derived unit tests: `account_setup::tests::derived_qurl_validity`,
 `derived_display_name`.
 

@@ -102,8 +102,8 @@ ncsync sync --userid alice --serverurl https://cloud.example.com --apppassword "
   existing account, non-empty local folder) exits with 255, like
   `nextcloudcmd`'s `return -1`;
 * `--trust` applies to the setup (a server with a self-signed certificate
-  can be provisioned), unlike upstream; `--httpproxy` does not, as
-  upstream.
+  can be provisioned), and so does `--httpproxy` (every request, the Login
+  Flow v2 polling included), unlike upstream.
 
 `--confdir DIR` also applies to the sync mode: the client status reporting
 database (below) goes there.
@@ -293,8 +293,13 @@ Deliberate behavioural differences with the official client v34.0.5:
 * **`--trust` in provisioning mode.** Upstream parses `--trust` but does
   not apply it to the account setup, so a server with a self-signed
   certificate cannot be provisioned from the command line; `ncsync`
-  applies it to every request of the setup (`--httpproxy` is still
-  ignored there, as upstream).
+  applies it to every request of the setup.
+* **`--httpproxy` in provisioning mode.** Upstream parses `--httpproxy`
+  but does not apply it to the account setup, so a machine that only
+  reaches the server through an HTTP proxy cannot be provisioned from the
+  command line; `ncsync` sends every request of the setup through it
+  (`status.php`, Login Flow v2 and its polling, `ocs/v1.php/cloud/user`,
+  the PROPFIND).
 
 ## Licensing
 

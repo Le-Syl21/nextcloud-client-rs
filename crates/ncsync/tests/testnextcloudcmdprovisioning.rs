@@ -59,6 +59,14 @@ impl Sandbox {
             .env_remove("CREDENTIALS_DIRECTORY")
             .env_remove("NC_USER")
             .env_remove("NC_PASSWORD")
+            // No proxy from the environment (reqwest's system proxy): only
+            // --httpproxy may send a request through one.
+            .env_remove("http_proxy")
+            .env_remove("HTTP_PROXY")
+            .env_remove("https_proxy")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("all_proxy")
+            .env_remove("ALL_PROXY")
             .stdin(Stdio::null())
             .stdout(file.try_clone().unwrap())
             .stderr(file)
@@ -686,6 +694,175 @@ fn rust_only_provisioning_trust_accepts_an_invalid_certificate() {
     assert!(
         cfg.contains(&format!("0\\url={}", server.base_url())),
         "{cfg}"
+    );
+}
+
+/// A forwarding HTTP proxy on 127.0.0.1: it takes absolute-form requests
+/// (`GET http://host:port/path HTTP/1.1`), records their target, and
+/// forwards them to the origin with a `Via: test-proxy` header, one request
+/// per connection (the origin answers with `Connection: close`).
+struct TestProxy {
+    port: u16,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    targets: Arc<std::sync::Mutex<Vec<String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TestProxy {
+    fn start() -> Self {
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread = {
+            let (stop, targets) = (stop.clone(), targets.clone());
+            std::thread::spawn(move || {
+                for client in listener.incoming() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Ok(client) = client {
+                        let _ = Self::forward(client, &targets);
+                    }
+                }
+            })
+        };
+        Self {
+            port,
+            stop,
+            targets,
+            thread: Some(thread),
+        }
+    }
+
+    fn forward(
+        client: std::net::TcpStream,
+        targets: &std::sync::Mutex<Vec<String>>,
+    ) -> std::io::Result<()> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let mut reader = BufReader::new(client.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let mut parts = line.split_whitespace();
+        let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+            return Ok(());
+        };
+        targets.lock().unwrap().push(format!("{method} {target}"));
+        let Some(rest) = target.strip_prefix("http://") else {
+            return Ok(());
+        };
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let path = if path.is_empty() { "/" } else { path };
+        let mut head = format!("{method} {path} HTTP/1.1\r\n");
+        let mut length = 0;
+        loop {
+            let mut h = String::new();
+            if reader.read_line(&mut h)? == 0 || h.trim_end().is_empty() {
+                break;
+            }
+            let name = h.split(':').next().unwrap_or_default().to_ascii_lowercase();
+            if name == "content-length" {
+                length = h[h.find(':').unwrap() + 1..].trim().parse().unwrap_or(0);
+            }
+            if name != "connection" && name != "proxy-connection" {
+                head.push_str(&h);
+            }
+        }
+        head.push_str("Via: test-proxy\r\nConnection: close\r\n\r\n");
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body)?;
+        let mut origin = std::net::TcpStream::connect(authority)?;
+        origin.write_all(head.as_bytes())?;
+        origin.write_all(&body)?;
+        let mut response = Vec::new();
+        origin.read_to_end(&mut response)?;
+        let mut client = client;
+        client.write_all(&response)?;
+        client.flush()
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// `METHOD target` of every request received, in order.
+    fn targets(&self) -> Vec<String> {
+        self.targets.lock().unwrap().clone()
+    }
+}
+
+impl Drop for TestProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+// Divergence: --httpproxy applies to the setup's requests (upstream ignores
+// it in provisioning mode): every request, the Login Flow v2 polling
+// included, goes through the proxy; without --httpproxy none does.
+#[test]
+fn rust_only_provisioning_httpproxy_carries_every_setup_request() {
+    let run = |with_proxy: bool| {
+        let sb = Sandbox::new();
+        let server = login_flow_server("alice");
+        let proxy = TestProxy::start();
+        let conf_dir = sb.path().join("conf");
+        let local = sb.path().join("sync");
+        let mut args = vec![
+            "--confdir".to_owned(),
+            conf_dir.to_str().unwrap().to_owned(),
+            "--userid".to_owned(),
+            "alice".to_owned(),
+            "--serverurl".to_owned(),
+            server.base_url(),
+            "--localdirpath".to_owned(),
+            local.to_str().unwrap().to_owned(),
+        ];
+        if with_proxy {
+            args.splice(0..0, ["--httpproxy".to_owned(), proxy.url()]);
+        }
+        let (output, exit_code) = sb.run_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(exit_code, 0, "{output}");
+        assert!(
+            output.contains("setup from command line success."),
+            "{output}"
+        );
+        assert!(config_has_account(&conf_dir));
+        (server.requests(), proxy.targets(), server.base_url())
+    };
+
+    // With --httpproxy: the proxy sees every request the server gets.
+    let (requests, targets, base) = run(true);
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|r| r.has_header("via")),
+        "a request bypassed the proxy: {requests:?}"
+    );
+    assert_eq!(targets.len(), requests.len(), "{targets:?} {requests:?}");
+    for expected in [
+        format!("POST {base}/index.php/login/v2"),
+        format!("POST {base}/login/v2/poll"),
+        format!("GET {base}/ocs/v1.php/cloud/user"),
+        format!("PROPFIND {base}/remote.php/dav/files/alice/"),
+    ] {
+        assert!(
+            targets.iter().any(|t| t.starts_with(&expected)),
+            "{expected} not proxied: {targets:?}"
+        );
+    }
+
+    // Without --httpproxy: the proxy sees nothing.
+    let (requests, targets, _) = run(false);
+    assert!(targets.is_empty(), "{targets:?}");
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|r| !r.has_header("via")),
+        "{requests:?}"
     );
 }
 
