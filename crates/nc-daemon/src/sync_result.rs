@@ -12,8 +12,8 @@ use std::time::SystemTime;
 
 use nc_sync::{Direction, Instruction, Status as ItemStatus, SyncFileItem};
 
-/// `SyncResult::Status`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `SyncResult::Status` (serialized as its `Q_ENUM` key, see [`Self::name`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SyncStatus {
     #[default]
     Undefined,

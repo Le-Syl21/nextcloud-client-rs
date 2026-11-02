@@ -13,6 +13,8 @@ use nc_daemon::daemon::{self, NoHooks};
 use nc_daemon::event::Event;
 use nc_daemon::folder::Definition;
 use nc_daemon::folder_man::{FolderMan, FolderManSettings, NullSettingsStore};
+use nc_daemon::sync_result::SyncStatus;
+use nc_daemon::ui_event::UiEvent;
 use nc_testutils::{FakeFolder, FileInfo, FileModifier};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -58,6 +60,7 @@ fn rust_only_daemon_polls_watches_and_obeys_control_requests() {
             Box::new(NullSettingsStore),
             daemon::inotify_watcher_factory(),
         );
+        let mut events = fm.subscribe();
         fm.add_fake_connected_account("0", fake_folder.account().clone());
         let alias = fm
             .add_folder_from_settings(
@@ -141,6 +144,29 @@ fn rust_only_daemon_polls_watches_and_obeys_control_requests() {
             fake_folder.current_local_state(),
             fake_folder.current_remote_state()
         );
+
+        // What a GUI saw on the UiEvent stream.
+        let mut seen = Vec::new();
+        while let Ok(e) = events.try_recv() {
+            seen.push(e);
+        }
+        let has = |f: &dyn Fn(&UiEvent) -> bool| seen.iter().any(f);
+        assert!(has(
+            &|e| matches!(e, UiEvent::AccountStateChanged { account } if account.id == "0")
+        ));
+        assert!(has(
+            &|e| matches!(e, UiEvent::ItemCompleted { folder, item }
+            if folder == "0" && item.file == "A/remote" && item.direction == "Down")
+        ));
+        assert!(has(&|e| matches!(e, UiEvent::ItemCompleted { item, .. }
+            if item.file == "B/local" && item.direction == "Up")));
+        assert!(has(
+            &|e| matches!(e, UiEvent::Progress { folder, .. } if folder == "0")
+        ));
+        assert!(has(&|e| matches!(e, UiEvent::FolderStateChanged { folder }
+            if folder.paused && folder.status == SyncStatus::Paused)));
+        assert!(has(&|e| matches!(e, UiEvent::FolderStateChanged { folder }
+            if !folder.paused && folder.status == SyncStatus::Success)));
     });
 }
 
@@ -557,5 +583,83 @@ fn rust_only_daemon_removed_folder_journal_wiped_after_its_sync() {
         let mut hooks = UnloadHooks;
         tokio::join!(daemon::run(&mut fm, &tx, &mut rx, &mut hooks), driver);
         drop(fake_folder);
+    });
+}
+
+/// rust_only: an account without credentials asks for them, and the event
+/// loop hands the request to its hooks (it used to be dropped) and to the
+/// UiEvent subscribers.
+#[test]
+fn rust_only_daemon_hands_credentials_needed_to_its_hooks() {
+    use nc_daemon::daemon::{DaemonHooks, ReloadResult};
+    use nc_daemon::folder_man::ManagerRequest;
+
+    struct Recorder {
+        seen: Vec<ManagerRequest>,
+        tx: UnboundedSender<Event>,
+    }
+    impl DaemonHooks for Recorder {
+        fn reload(&mut self, _: &mut FolderMan, _: Option<&str>, _: &[String]) -> ReloadResult {
+            ReloadResult::error("no reload")
+        }
+        fn manager_request(&mut self, _: &mut FolderMan, request: ManagerRequest) {
+            self.seen.push(request);
+            let _ = self.tx.send(Event::Shutdown);
+        }
+    }
+
+    let fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
+    fake_folder.set_server_override(|request, _| {
+        request.uri().path().ends_with("/status.php").then(|| {
+            nc_testutils::server::FakeReply::Response(nc_testutils::server::json_reply(
+                200,
+                r#"{"installed":true,"maintenance":false,"needsDbUpgrade":false,"version":"34.0.0.0","versionstring":"34.0.0","productname":"Nextcloud"}"#,
+            ))
+        })
+    });
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tokio::task::LocalSet::new().block_on(&rt, async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fm = FolderMan::new(
+            &tx,
+            FolderManSettings::default(),
+            Box::new(NullSettingsStore),
+            nc_daemon::folder_man::no_watcher(),
+        );
+        let mut events = fm.subscribe();
+        fm.add_account(
+            "0",
+            fake_folder.account().clone(),
+            false,
+            Default::default(),
+            None,
+        );
+        let mut hooks = Recorder {
+            seen: Vec::new(),
+            tx: tx.clone(),
+        };
+        let watchdog = {
+            let tx = tx.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = tx.send(Event::Shutdown);
+            }
+        };
+        tokio::select! {
+            _ = daemon::run(&mut fm, &tx, &mut rx, &mut hooks) => {}
+            _ = watchdog => {}
+        }
+        assert_eq!(hooks.seen, [ManagerRequest::CredentialsNeeded("0".into())]);
+        let mut credentials_needed = false;
+        while let Ok(e) = events.try_recv() {
+            credentials_needed |= e
+                == UiEvent::CredentialsNeeded {
+                    account: "0".into(),
+                };
+        }
+        assert!(credentials_needed);
     });
 }

@@ -22,7 +22,6 @@
 //! blacklist (no change when both lists are empty).
 
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -181,66 +180,13 @@ fn sync_now(fm: &mut FolderMan, folder: Option<&str>) -> Response {
     json!({"ok": true, "folders": aliases})
 }
 
-fn secs(t: Option<std::time::SystemTime>) -> Value {
-    t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(Value::Null, |d| json!(d.as_secs()))
-}
-
-/// `status`: the accounts and the folders.
+/// `status`: the accounts and the folders (a
+/// [`crate::ui_event::Snapshot`] with `"ok": true`).
 pub fn status(fm: &FolderMan) -> Response {
-    let accounts: Vec<Value> = fm
-        .account_states()
-        .map(|a| {
-            json!({
-                "id": a.id(),
-                "url": a.account().url().to_credential_free_string(),
-                "user": a.account().dav_user(),
-                "state": a.state().name(),
-                "connection_status": a.connection_status().name(),
-                "errors": a.connection_errors(),
-                "server_version": a.account().server_version(),
-            })
-        })
-        .collect();
-    let queue = fm.schedule_queue();
-    let current = fm.current_sync_folder().map(str::to_owned);
-    let folders: Vec<Value> = fm
-        .map()
-        .values()
-        .map(|f| {
-            let r = f.sync_result();
-            let progress = f.progress().map(|p| {
-                json!({
-                    "status": format!("{:?}", p.status),
-                    "completed_files": p.completed_files(),
-                    "total_files": p.total_files(),
-                    "completed_size": p.completed_size(),
-                    "total_size": p.total_size(),
-                })
-            });
-            json!({
-                "alias": f.alias(),
-                "account": f.account_id(),
-                "local_path": f.path(),
-                "remote_path": f.remote_path(),
-                "paused": f.sync_paused(),
-                "syncing": f.is_sync_running(),
-                "scheduled": queue.iter().any(|q| q == f.alias()),
-                "current": current.as_deref() == Some(f.alias()),
-                "status": r.status().name(),
-                "status_string": r.status_string(),
-                "last_status_time": secs(r.sync_time()),
-                "errors": r.error_strings(),
-                "consecutive_failing_syncs": f.consecutive_failing_syncs(),
-                "seconds_since_last_sync": f.msec_since_last_sync().as_secs(),
-                "last_sync_duration_ms": f.msec_last_sync_duration().as_millis() as u64,
-                "unresolved_conflicts": r.has_unresolved_conflicts(),
-                "watcher": f.has_folder_watcher(),
-                "progress": progress,
-            })
-        })
-        .collect();
-    json!({"ok": true, "accounts": accounts, "folders": folders})
+    let mut v =
+        serde_json::to_value(crate::ui_event::Snapshot::of(fm)).unwrap_or_else(|_| json!({}));
+    v["ok"] = Value::Bool(true);
+    v
 }
 
 /// Listens on `path` and posts every request to the event queue.

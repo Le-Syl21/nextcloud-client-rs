@@ -29,3 +29,4 @@ pub mod startup;
 pub mod sync_result;
 pub mod takeover;
 pub mod timer;
+pub mod ui_event;

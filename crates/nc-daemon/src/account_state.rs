@@ -33,8 +33,8 @@ use crate::timer::{Timer, single_shot};
 
 const LOG: &str = "nextcloud.gui.account.state";
 
-/// `AccountState::State`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `AccountState::State` (serialized as its `Q_ENUM` key, see [`Self::name`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     /// Not even attempting to connect, most likely because the
     /// user explicitly signed out or cancelled a credential dialog.

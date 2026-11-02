@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::control::{Request, Response};
 use crate::event::{Event, FolderId, WatcherEvent};
 use crate::folder::{FolderWatcherHandle, WatcherFactory};
-use crate::folder_man::FolderMan;
+use crate::folder_man::{FolderMan, ManagerRequest};
 use crate::folder_watcher::{FolderWatcher, FolderWatcherEvent};
 use crate::timer::Timer;
 
@@ -128,6 +128,13 @@ pub trait DaemonHooks {
     /// changed; `wipe` the removed folders whose journal is deleted.
     fn reload(&mut self, fm: &mut FolderMan, config: Option<&str>, wipe: &[String])
     -> ReloadResult;
+
+    /// What the folder manager asks its owner ([`FolderMan::take_requests`],
+    /// drained after every event). A GUI opens its re-authentication
+    /// window for [`ManagerRequest::CredentialsNeeded`]; the folder manager
+    /// already logged how to fix it and told the [`crate::ui_event::UiEvent`]
+    /// subscribers.
+    fn manager_request(&mut self, _fm: &mut FolderMan, _request: ManagerRequest) {}
 }
 
 /// No hooks.
@@ -232,6 +239,9 @@ pub async fn run(
                 }
             }
             e => fm.handle_event(e),
+        }
+        for request in fm.take_requests() {
+            hooks.manager_request(fm, request);
         }
         let mut i = 0;
         while i < pending_replies.len() {

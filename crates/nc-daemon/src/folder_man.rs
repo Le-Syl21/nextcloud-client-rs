@@ -39,6 +39,9 @@ use crate::folder::{Definition, EtagJob, Folder, FolderAction, FolderSettings, W
 use crate::network_limits::NetworkLimits;
 use crate::remote_wipe::{self, RemoteWipe};
 use crate::timer::{Timer, single_shot};
+use crate::ui_event::{
+    AccountSnapshot, CompletedItem, FolderSnapshot, ProgressSummary, UI_EVENT_CAPACITY, UiEvent,
+};
 
 const LOG: &str = "nextcloud.gui.folder.manager";
 
@@ -91,10 +94,11 @@ impl FolderSettingsStore for NullSettingsStore {
     fn remove_folder(&mut self, _: &str, _: &str) {}
 }
 
-/// What the folder manager asks its owner (the daemon) to do.
+/// What the folder manager asks its owner (the daemon's event loop, which
+/// hands them to its [`crate::daemon::DaemonHooks`]) to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManagerRequest {
-    /// The account needs new credentials.
+    /// The account needs new credentials (upstream's `askFromUser()`).
     CredentialsNeeded(String),
 }
 
@@ -133,6 +137,8 @@ pub struct FolderMan {
     /// their journal is wiped (`removeFolder`) or only closed
     /// (`unloadFolder`) once their engine is back.
     unloading: HashMap<FolderId, (Folder, bool)>,
+    /// The events for a GUI ([`Self::subscribe`]).
+    ui: tokio::sync::broadcast::Sender<UiEvent>,
 }
 
 impl FolderMan {
@@ -169,6 +175,7 @@ impl FolderMan {
             account_wrap: Arc::new(Event::Account),
             remote_wipes: HashMap::new(),
             unloading: HashMap::new(),
+            ui: tokio::sync::broadcast::channel(UI_EVENT_CAPACITY).0,
         };
         fm.etag_poll_timer
             .start(tx, |g| Event::FolderMan(FolderManEvent::EtagPollTimer(g)));
@@ -180,6 +187,51 @@ impl FolderMan {
     /// The requests for the owner accumulated since the last call.
     pub fn take_requests(&mut self) -> Vec<ManagerRequest> {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Subscribes to the [`UiEvent`]s (the signals a GUI connects to).
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<UiEvent> {
+        self.ui.subscribe()
+    }
+
+    /// The sending side of the [`UiEvent`]s, to subscribe from another
+    /// thread (`broadcast::Sender::subscribe`).
+    pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<UiEvent> {
+        self.ui.clone()
+    }
+
+    fn emit(&self, event: impl FnOnce() -> Option<UiEvent>) {
+        // Building a snapshot is wasted when nobody listens.
+        if self.ui.receiver_count() > 0
+            && let Some(e) = event()
+        {
+            let _ = self.ui.send(e);
+        }
+    }
+
+    fn emit_account(&self, id: &str) {
+        self.emit(|| {
+            self.accounts.get(id).map(|a| UiEvent::AccountStateChanged {
+                account: AccountSnapshot::of(a),
+            })
+        });
+    }
+
+    fn emit_folder(&self, id: FolderId) {
+        self.emit(|| {
+            self.folder_by_id(id).map(|f| UiEvent::FolderStateChanged {
+                folder: FolderSnapshot::of(self, f),
+            })
+        });
+    }
+
+    fn folder_alias(&self, id: FolderId) -> String {
+        self.aliases.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Whether the folder waits in the schedule queue.
+    pub fn is_scheduled(&self, id: FolderId) -> bool {
+        self.scheduled_folders.contains(&id)
     }
 
     pub fn settings(&self) -> &FolderManSettings {
@@ -211,6 +263,7 @@ impl FolderMan {
         state.start(&self.tx, self.account_wrap.clone());
         self.accounts.insert(id.to_owned(), state);
         self.account_limits.insert(id.to_owned(), limits);
+        self.emit_account(id);
     }
 
     /// Adds an account that is connected and never checks its connection
@@ -221,6 +274,7 @@ impl FolderMan {
             .insert(id.to_owned(), AccountState::new_fake_connected(id, account));
         self.account_limits
             .insert(id.to_owned(), NetworkLimits::default());
+        self.emit_account(id);
     }
 
     /// The `RemoteWipe` of a new account (`AccountState` creates it) and
@@ -305,7 +359,10 @@ impl FolderMan {
     fn handle_account_signals(&mut self, id: &str, signals: Vec<AccountSignal>) {
         for signal in signals {
             match signal {
-                AccountSignal::StateChanged(_) => self.slot_account_state_changed(id),
+                AccountSignal::StateChanged(_) => {
+                    self.emit_account(id);
+                    self.slot_account_state_changed(id);
+                }
                 // Folder::canSyncChanged → the socket API only.
                 AccountSignal::IsConnectedChanged => {}
                 AccountSignal::TermsOfServiceChanged(state) => {
@@ -329,6 +386,11 @@ impl FolderMan {
                     log::warn!(target: LOG, "Account {id} needs credentials: run `ncsync account add <server_url>` (or provide the systemd credential) and reload the daemon");
                     self.requests
                         .push(ManagerRequest::CredentialsNeeded(id.to_owned()));
+                    self.emit(|| {
+                        Some(UiEvent::CredentialsNeeded {
+                            account: id.to_owned(),
+                        })
+                    });
                 }
             }
         }
@@ -478,6 +540,11 @@ impl FolderMan {
         // Forget account credentials, cookies
         account.forget_sensitive_data();
         self.store.remove_account(account_id);
+        self.emit(|| {
+            Some(UiEvent::AccountRemoved {
+                account: account_id.to_owned(),
+            })
+        });
         tokio::task::spawn_local(async move {
             delete_job.await;
             // accountRemoved → RemoteWipe: notifyServerSuccess() when the wipe
@@ -515,6 +582,11 @@ impl FolderMan {
         }
         self.account_limits.remove(account_id);
         self.remote_wipes.remove(account_id);
+        self.emit(|| {
+            Some(UiEvent::AccountRemoved {
+                account: account_id.to_owned(),
+            })
+        });
         waiting
     }
 
@@ -689,6 +761,7 @@ impl FolderMan {
         folder.register_folder_watcher(&self.watcher_factory);
         self.aliases.insert(id, alias.clone());
         self.folder_map.insert(alias.clone(), folder);
+        self.emit_folder(id);
         Some(alias)
     }
 
@@ -744,6 +817,11 @@ impl FolderMan {
             log::error!(target: LOG, "Can not remove null folder");
             return None;
         };
+        self.emit(|| {
+            Some(UiEvent::FolderRemoved {
+                folder: alias.to_owned(),
+            })
+        });
         if wipe {
             log::info!(target: LOG, "Removing  {alias}");
         }
@@ -832,6 +910,13 @@ impl FolderMan {
             if f.is_sync_running() {
                 f.slot_terminate_sync();
             }
+        }
+        for alias in self.folder_map.keys() {
+            self.emit(|| {
+                Some(UiEvent::FolderRemoved {
+                    folder: alias.clone(),
+                })
+            });
         }
         self.folder_map.clear();
         self.aliases.clear();
@@ -956,6 +1041,7 @@ impl FolderMan {
         };
         f.prepare_to_sync();
         self.scheduled_folders.push_back(id);
+        self.emit_folder(id);
         self.start_scheduled_sync_soon();
     }
 
@@ -982,6 +1068,7 @@ impl FolderMan {
         f.prepare_to_sync();
         self.scheduled_folders.retain(|x| *x != id);
         self.scheduled_folders.push_front(id);
+        self.emit_folder(id);
         self.start_scheduled_sync_soon();
     }
 
@@ -1317,6 +1404,13 @@ impl FolderMan {
 
     /// The `FolderAction`s of a folder method: the signal connections.
     fn run_actions(&mut self, id: FolderId, actions: Vec<FolderAction>) {
+        // syncStateChange / syncFinished: the GUI is told once the slots ran.
+        let state_changed = actions.iter().any(|a| {
+            matches!(
+                a,
+                FolderAction::SyncStateChange | FolderAction::SyncFinished
+            )
+        });
         for action in actions {
             match action {
                 FolderAction::Schedule => self.schedule_folder(id),
@@ -1349,6 +1443,9 @@ impl FolderMan {
                     }
                 }
             }
+        }
+        if state_changed {
+            self.emit_folder(id);
         }
     }
 
@@ -1480,6 +1577,7 @@ impl FolderMan {
             }
             e => e,
         };
+        let ui = self.ui_event_of(id, &event);
         let Some(f) = self.folder_by_id_mut(id) else {
             return;
         };
@@ -1526,7 +1624,46 @@ impl FolderMan {
             FolderEvent::AllFilesDeletedRestore => f.all_files_deleted_restore(),
             FolderEvent::EngineFinished(engine, success) => f.engine_finished(*engine, success),
         };
+        if let Some(ui) = ui {
+            self.emit(|| ui.resolve());
+        }
         self.run_actions(id, actions);
+    }
+
+    /// The [`UiEvent`] of an engine signal. A completed item is read once
+    /// the folder's slot ran (the slot may change it, for example when
+    /// errors are silenced).
+    fn ui_event_of(&self, id: FolderId, event: &FolderEvent) -> Option<PendingUiEvent> {
+        if self.ui.receiver_count() == 0 {
+            return None;
+        }
+        let folder = self.folder_alias(id);
+        Some(PendingUiEvent::Ready(Box::new(match event {
+            FolderEvent::ItemCompleted(item, category) => {
+                return Some(PendingUiEvent::Item(folder, item.clone(), *category));
+            }
+            FolderEvent::TransmissionProgress(pi) => UiEvent::Progress {
+                folder,
+                progress: ProgressSummary::of(pi),
+            },
+            FolderEvent::SyncError(message, _) if message.is_empty() => return None,
+            FolderEvent::SyncError(message, category) => UiEvent::SyncError {
+                folder,
+                message: message.clone(),
+                category: format!("{category:?}"),
+            },
+            FolderEvent::NewBigFolder(path, external) => UiEvent::NewBigFolder {
+                folder,
+                path: path.clone(),
+                external: *external,
+            },
+            FolderEvent::ExistingFolderNowBig(path) => UiEvent::ExistingFolderNowBig {
+                folder,
+                path: path.clone(),
+            },
+            FolderEvent::AllFilesDeletedRestore => UiEvent::AllFilesDeletedRestored { folder },
+            _ => return None,
+        })))
     }
 
     /// Stops everything (`Application::slotCleanup`): aborts running syncs.
@@ -1543,6 +1680,35 @@ impl FolderMan {
     /// Whether a folder's sync is still running (for a clean shutdown).
     pub fn any_engine_away(&self) -> bool {
         !self.unloading.is_empty() || self.folder_map.values().any(|f| f.is_sync_running())
+    }
+}
+
+/// A [`UiEvent`] of an engine signal, sent once the folder handled it.
+enum PendingUiEvent {
+    Ready(Box<UiEvent>),
+    Item(String, nc_sync::SyncFileItemPtr, nc_sync::ErrorCategory),
+}
+
+impl PendingUiEvent {
+    fn resolve(self) -> Option<UiEvent> {
+        match self {
+            Self::Ready(e) => Some(*e),
+            Self::Item(folder, item, category) => {
+                let item = item.borrow();
+                // Folder::slotItemCompleted: only the updates that deserve
+                // to be shown in the UI reach the ProgressDispatcher.
+                if matches!(
+                    item.instruction,
+                    nc_sync::Instruction::None | nc_sync::Instruction::UpdateMetadata
+                ) {
+                    return None;
+                }
+                Some(UiEvent::ItemCompleted {
+                    folder,
+                    item: CompletedItem::of(&item, category),
+                })
+            }
+        }
     }
 }
 
