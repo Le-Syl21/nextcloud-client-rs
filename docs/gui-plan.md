@@ -1377,3 +1377,4 @@ Taken by Sylvain on 2026-11-02.
 | D7 | Installers | **Binaries first** (archives with the binary, plus the `.desktop` file on Linux); installers later. Without an installer, Windows toasts carry a generic origin until the AppUserModelID is registered by one. |
 | D8 | macOS notifications | Deprecated `NSUserNotification` path for v1. |
 | D9 | MSRV | Bump to 1.89 for `File::try_lock`. |
+| D10 | Sign-out from a GUI attached to ncsyncd | Signing out forgets the stored app password (upstream's invalidateToken), so a headless daemon could only come back through a Login Flow. **When the GUI drives a remote ncsyncd, its "Sign out" action is replaced by "Pause"**; signing out stays available behind an explicit confirmation that says the daemon will need a new login. The in-process GUI keeps upstream's sign-out. |
