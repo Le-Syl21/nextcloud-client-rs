@@ -22,3 +22,6 @@ sd-notify = "0.5.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

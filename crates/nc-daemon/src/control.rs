@@ -3,10 +3,11 @@
 
 //! The control socket of `ncsyncd`: `ncsync status|pause|resume|sync-now`.
 //!
-//! A Unix stream socket; each connection carries one request, a JSON object
-//! on one line, and gets one JSON object on one line back. The socket is
-//! created with mode 0600 in the daemon's runtime directory, so only its
-//! user (or root) can drive it.
+//! A Unix stream socket, named after the configuration it serves
+//! ([`crate::guard::default_endpoint`]); each connection carries one
+//! request, a JSON object on one line, and gets one JSON object on one line
+//! back. The socket is created with mode 0600 in the daemon's runtime
+//! directory, so only its user (or root) can drive it.
 //!
 //! Requests: `{"command":"status"}`, `{"command":"pause","folder":"1"}`,
 //! `{"command":"resume"}` (no folder: all folders),
@@ -80,18 +81,10 @@ fn error(message: impl Into<String>) -> Response {
     json!({"ok": false, "error": message.into()})
 }
 
-/// The default socket path: `$XDG_RUNTIME_DIR/ncsyncd/control.sock` for
-/// a user daemon, `/run/ncsyncd/<instance>/control.sock` for an instance of
-/// the system service.
-pub fn default_socket_path(instance: Option<&str>) -> PathBuf {
-    if let Some(i) = instance {
-        return PathBuf::from(format!("/run/ncsyncd/{i}/control.sock"));
-    }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("/tmp/ncsyncd-{}", rustix::process::getuid().as_raw()));
-    PathBuf::from(base).join("ncsyncd").join("control.sock")
+/// The default socket of the daemon using `location`'s configuration:
+/// see [`crate::guard::default_endpoint`].
+pub fn default_socket_path(location: &crate::config_file::ConfigLocation) -> PathBuf {
+    crate::guard::default_endpoint(location)
 }
 
 /// Answers a request (on the daemon's event loop).

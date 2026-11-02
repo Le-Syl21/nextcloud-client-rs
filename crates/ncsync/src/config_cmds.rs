@@ -261,11 +261,7 @@ fn keyring(ctx: &Context) -> Option<Box<dyn SecretStore>> {
 
 /// The control socket of the daemon using this configuration.
 fn socket_path(ctx: &Context) -> PathBuf {
-    let instance = match &ctx.location.mode {
-        ServiceMode::System { instance } => Some(instance.as_str()),
-        ServiceMode::User => None,
-    };
-    nc_daemon::control::default_socket_path(instance)
+    nc_daemon::control::default_socket_path(&ctx.location)
 }
 
 /// What the running daemon made of a request.

@@ -5,7 +5,7 @@
 # (never as root): ncsyncd@alice runs as alice.
 #   /var/lib/ncsyncd/<user>/ncsyncd.cfg   the configuration (nextcloud.cfg format)
 #   /var/lib/ncsyncd/<user>/              state, owned by <user> (journals live in the folders)
-#   /run/ncsyncd/<user>/control.sock      the control socket
+#   /run/ncsyncd/<user>/<hash>.sock       the control socket (<hash> names the configuration)
 # Credentials, one per account, either
 #   - a systemd credential ncsyncd-<user>-<account id> in the credential store
 #     (/etc/credstore.encrypted, /etc/credstore, ...), imported below:

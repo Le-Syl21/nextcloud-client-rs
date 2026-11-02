@@ -1535,6 +1535,7 @@ dependencies = [
  "inotify",
  "keyring-core",
  "log",
+ "md-5",
  "nc-dav",
  "nc-journal",
  "nc-sync",
@@ -1669,6 +1670,7 @@ dependencies = [
  "log",
  "nc-daemon",
  "sd-notify",
+ "tempfile",
  "tokio",
 ]
 

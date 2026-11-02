@@ -9,18 +9,25 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
+use nc_daemon::config_file::ConfigLocation;
 use nc_daemon::control::{Request, default_socket_path, request};
 
 /// Which daemon to talk to.
 #[derive(Args, Debug, Clone)]
 pub struct ControlArgs {
-    /// The daemon's control socket (default $XDG_RUNTIME_DIR/ncsyncd/control.sock,
-    /// or /run/ncsyncd/NAME/control.sock with --instance).
+    /// The daemon's control socket (default: the one of the daemon using the
+    /// configuration, $XDG_RUNTIME_DIR/ncsyncd/HASH.sock, or
+    /// /run/ncsyncd/NAME/HASH.sock with --instance).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Talk to the system instance ncsyncd@NAME.
     #[arg(long, value_name = "NAME")]
     instance: Option<String>,
+    /// The daemon's configuration file, which names its socket (default
+    /// ~/.config/ncsyncd/ncsyncd.cfg, or /var/lib/ncsyncd/NAME/ncsyncd.cfg
+    /// with --instance).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
     /// Print the daemon's JSON answer.
     #[arg(long)]
     json: bool,
@@ -35,11 +42,29 @@ pub struct FolderArg {
     control: ControlArgs,
 }
 
+/// The socket to talk to.
+pub fn socket_of(control: &ControlArgs) -> Result<PathBuf, ExitCode> {
+    if let Some(s) = &control.socket {
+        return Ok(s.clone());
+    }
+    let location = match &control.instance {
+        Some(i) => ConfigLocation::system(i),
+        None => ConfigLocation::user(),
+    };
+    match location {
+        Ok(l) => Ok(default_socket_path(&match &control.config {
+            Some(c) => l.with_config_file(c),
+            None => l,
+        })),
+        Err(e) => {
+            eprintln!("{e}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn send(control: &ControlArgs, req: &Request) -> Result<serde_json::Value, ExitCode> {
-    let path = control
-        .socket
-        .clone()
-        .unwrap_or_else(|| default_socket_path(control.instance.as_deref()));
+    let path = socket_of(control)?;
     match request(&path, req) {
         Ok(v) => Ok(v),
         Err(e) => {

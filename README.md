@@ -71,7 +71,7 @@ sudo install -m755 ncsync ncsyncd /usr/bin/
 The units in `systemd/` start `/usr/bin/ncsyncd`; if you put it elsewhere
 (`/usr/local/bin`, `~/.cargo/bin`), change their `ExecStart=`.
 
-**From source** (Rust 1.88 or later; SQLite is built in, no system library is needed):
+**From source** (Rust 1.89 or later; SQLite is built in, no system library is needed):
 
 ```sh
 cargo install --locked --git https://github.com/Le-Syl21/nextcloud-client-rs ncsync ncsyncd
@@ -304,8 +304,13 @@ ncsync sync-now [ALIAS|PATH]    # like the tray's "Sync now"
 ncsync status --instance alice  # a system instance (as root or alice)
 ```
 
-The control socket is `$XDG_RUNTIME_DIR/ncsyncd/control.sock` (user) or
-`/run/ncsyncd/<user>/control.sock` (system), mode 0600. The daemon reports `READY`, a
+One program at a time uses a configuration file: `ncsyncd` takes an exclusive lock
+(`instance-<hash>.lock` in its state directory, `<hash>` naming the configuration file)
+before it reads it, so a second `ncsyncd` on the same file is refused with the pid of the
+first. The OS frees the lock when the process ends, even after a crash. The control socket
+carries the same name: `$XDG_RUNTIME_DIR/ncsyncd/<hash>.sock` (user) or
+`/run/ncsyncd/<user>/<hash>.sock` (system), mode 0600; `ncsync` finds it from the
+configuration (`--config`, `--instance`) or takes `--socket`. The daemon reports `READY`, a
 one-line `STATUS` and the watchdog to systemd (`Type=notify`, `WatchdogSec=120`); the
 watchdog is fed from the event loop, so a stuck loop gets the service restarted.
 
@@ -538,7 +543,7 @@ sudo install -m755 ncsync ncsyncd /usr/bin/
 Les unités du dossier `systemd/` lancent `/usr/bin/ncsyncd` ; si vous le placez ailleurs
 (`/usr/local/bin`, `~/.cargo/bin`), modifiez leur `ExecStart=`.
 
-**Depuis les sources** (Rust 1.88 ou plus récent ; SQLite est intégré, aucune bibliothèque
+**Depuis les sources** (Rust 1.89 ou plus récent ; SQLite est intégré, aucune bibliothèque
 système n'est nécessaire) :
 
 ```sh
@@ -782,8 +787,14 @@ ncsync sync-now [ALIAS|CHEMIN]  # comme « Synchroniser maintenant » de l'icôn
 ncsync status --instance alice  # un service système (en root ou en alice)
 ```
 
-La socket de contrôle est `$XDG_RUNTIME_DIR/ncsyncd/control.sock` (utilisateur) ou
-`/run/ncsyncd/<utilisateur>/control.sock` (système), droits 0600. Le service signale à
+Un seul programme à la fois utilise un fichier de configuration : `ncsyncd` prend un verrou
+exclusif (`instance-<hash>.lock` dans son dossier d'état, `<hash>` désignant le fichier de
+configuration) avant de le lire, si bien qu'un second `ncsyncd` sur le même fichier est
+refusé, avec le pid du premier. Le système libère le verrou à la fin du processus, même
+après un plantage. La socket de contrôle porte le même nom :
+`$XDG_RUNTIME_DIR/ncsyncd/<hash>.sock` (utilisateur) ou
+`/run/ncsyncd/<utilisateur>/<hash>.sock` (système), droits 0600 ; `ncsync` la retrouve à
+partir de la configuration (`--config`, `--instance`) ou prend `--socket`. Le service signale à
 systemd `READY`, un `STATUS` d'une ligne et le chien de garde (`Type=notify`,
 `WatchdogSec=120`) ; le chien de garde est nourri par la boucle d'événements elle-même, si
 bien qu'une boucle bloquée fait redémarrer le service.

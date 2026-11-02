@@ -81,7 +81,11 @@ echo "2. daemon start and initial sync"
 "$ncsyncd" --official-config /nonexistent > "$work/daemon.log" 2>&1 &
 echo $! > "$work/daemon.pid"
 trap pkill_daemon EXIT
-wait_for 60 "control socket" test -S "$XDG_RUNTIME_DIR/ncsyncd/control.sock"
+# the socket is named after the configuration ($XDG_RUNTIME_DIR/ncsyncd/<hash>.sock)
+daemon_up() { "$ncsync" status >/dev/null 2>&1; }
+wait_for 60 "control socket" daemon_up
+out="$("$ncsyncd" --official-config /nonexistent 2>&1)" && fail "a second ncsyncd on the same configuration was not refused"
+grep -q "already in use by ncsyncd (pid $(cat "$work/daemon.pid"))" <<<"$out" || fail "refusal message: $out"
 wait_for 90 "initial download" test -f "$work/local/Readme.md"
 status() { "$ncsync" status --json; }
 wait_for 60 "push ready" grep -q "Push notifications ready" "$work/daemon.log"
@@ -173,7 +177,7 @@ cp "$cfg" "$work/official.cfg"
 echo $! > "$work/daemon.pid"
 trap pkill_daemon EXIT
 wait_for 60 "refusal" grep -q "is also configured in the official desktop client" "$work/daemon2.log"
-wait_for 30 "control socket" test -S "$XDG_RUNTIME_DIR/ncsyncd/control.sock"
+wait_for 30 "control socket" daemon_up
 [[ "$(status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["folders"]))')" == 0 ]] || fail "refused folder is loaded"
 pkill_daemon
 trap - EXIT

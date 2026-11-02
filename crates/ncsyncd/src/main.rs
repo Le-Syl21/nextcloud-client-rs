@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use nc_daemon::config_file::{ConfigFile, ConfigLocation, ServiceMode};
+use nc_daemon::config_file::{ConfigFile, ConfigLocation};
 use nc_daemon::folder_man::FolderMan;
 use nc_daemon::settings::Settings;
 use nc_daemon::startup::{self, FileSettingsStore, Options, ReloadHooks};
@@ -37,8 +37,9 @@ struct Cli {
     /// /var/lib/ncsyncd/USER/ncsyncd.cfg with --instance USER).
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Control socket (default $XDG_RUNTIME_DIR/ncsyncd/control.sock, or
-    /// /run/ncsyncd/NAME/control.sock with --instance).
+    /// Control socket (default $XDG_RUNTIME_DIR/ncsyncd/HASH.sock, or
+    /// /run/ncsyncd/NAME/HASH.sock with --instance, HASH naming the
+    /// configuration file).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// The official client's configuration, to refuse folders it also syncs
@@ -119,14 +120,18 @@ fn main() -> ExitCode {
         eprintln!("ncsyncd: {e}");
         return ExitCode::FAILURE;
     }
-    let instance = match &location.mode {
-        ServiceMode::System { instance } => Some(instance.clone()),
-        ServiceMode::User => None,
+    // One program per configuration, decided before anything reads it.
+    let guard = match nc_daemon::guard::InstanceGuard::acquire(&location, "ncsyncd") {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("ncsyncd: {e}");
+            return ExitCode::FAILURE;
+        }
     };
     let socket = cli
         .socket
         .clone()
-        .unwrap_or_else(|| nc_daemon::control::default_socket_path(instance.as_deref()));
+        .unwrap_or_else(|| nc_daemon::control::default_socket_path(&location));
     let options = Options {
         location: location.clone(),
         trust: cli.trust,
@@ -146,7 +151,9 @@ fn main() -> ExitCode {
         }
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, run(options, socket))
+    let code = local.block_on(&rt, run(options, socket));
+    drop(guard);
+    code
 }
 
 async fn run(options: Options, socket: PathBuf) -> ExitCode {

@@ -19,6 +19,7 @@ pub mod folder;
 pub mod folder_definition;
 pub mod folder_man;
 pub mod folder_watcher;
+pub mod guard;
 pub mod instance;
 pub mod manage;
 pub mod network_limits;

@@ -6,8 +6,9 @@ upstream tests. When a crate differs on behaviour the upstream tests cover,
 or nothing exists, the upstream code is ported and the reason is given here.
 
 Versions were checked on crates.io on 2026-10-07. The toolchain is Rust
-stable 1.99 with edition 2024. `rust-version = "1.88"` is the minimum the code
-needs (let-chains, `slice::as_chunks`).
+stable 1.99 with edition 2024. `rust-version = "1.89"` is the minimum the code
+needs (let-chains, `slice::as_chunks`, `File::try_lock` for the instance
+guard).
 
 ## Phase 0 (in the tree)
 
