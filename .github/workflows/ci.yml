@@ -2,10 +2,11 @@ name: CI
 
 # Nothing builds on a push: work lands directly on main, is built and tested
 # locally, and the builds run at a tag (before anything is signed or
-# published) or on demand. A manual run (workflow_dispatch) lints, tests and
-# builds every target but signs and publishes nothing: those jobs only run
-# for a v* tag.
+# published), on a pull request (Dependabot's) or on demand. A pull request
+# or a manual run (workflow_dispatch) lints, tests and builds every target
+# but signs and publishes nothing: those jobs only run for a v* tag.
 on:
+  pull_request:
   push:
     tags: ['v*']
   workflow_dispatch:
