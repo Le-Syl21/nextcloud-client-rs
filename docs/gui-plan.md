@@ -1,6 +1,7 @@
 # GUI and multi-OS plan
 
-Status: study, 2026-11-02. Nothing in this document is implemented yet.
+Status: study, 2026-11-02. P0 (§9) is implemented: see the notes there for
+what it left to later phases.
 
 Goal: a real multi-OS (Linux, Windows, macOS) desktop client. A new GUI
 binary built with egui/eframe 0.37 on the glow backend, with a light, dark or
@@ -1118,6 +1119,29 @@ needs the engine on its OS.
   implementation and a remote one over the control endpoint.
 - Port the aggregate tray-state and tooltip computation (§4.2) as a pure
   function.
+
+**Done (2026-11-02):** `nc_daemon::ui_event` (the `UiEvent` broadcast and
+the snapshots), `FolderMan::take_requests()` drained into
+`DaemonHooks::manager_request`, ncsyncd's `SystemdHooks`
+(`crates/ncsyncd/src/systemd.rs`), `nc_daemon::guard`,
+`nc_daemon::operations` and the new `control::Request`s, `nc_daemon::client`
+(`EngineClient`, `InProcess`, `Remote`), `nc_daemon::tray_status`, and
+`ncsync events`. Left for later phases:
+
+- The prompts that carry a reply (`NewBigFolder`, `AboutToRemoveAllFiles`,
+  `SslErrors`, `ProxyAuthRequired`) and an "accept a prompt" request. The
+  engine's `aboutToRemoveAllFiles` callback answers synchronously, so a
+  dialog needs that callback made asynchronous first (P5, with the dialogs);
+  `NewBigFolder`, `ExistingFolderNowBig` and the restored mass deletion are
+  sent as notifications. There is no SSL-error or proxy-authentication path
+  in the engine yet.
+- `QuotaChanged` and `ConflictsChanged` as events of their own: there is no
+  quota job yet (P6), and the unresolved-conflicts flag travels in
+  `FolderStateChanged`.
+- `ProgressInfo` keeps no transfer-rate estimates, so `eta_msecs` is always
+  `None` and the tooltip never shows "(%1 left)".
+- The control endpoint is still a tokio `UnixListener`; `interprocess` and
+  named pipes come with P1.
 
 **Test:**
 

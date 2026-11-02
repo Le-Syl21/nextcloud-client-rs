@@ -4,6 +4,25 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); the behavioural reference is the
 official Nextcloud desktop client v34.0.5.
 
+## Unreleased
+
+- **One program per configuration.** `ncsyncd` takes an exclusive lock on its
+  configuration file (`instance-<hash>.lock` in its state directory) before reading it; a
+  second `ncsyncd` on the same file is refused and names the pid holding it. The OS frees
+  the lock on any exit, crashes included. The control socket is now named after the same
+  hash (`$XDG_RUNTIME_DIR/ncsyncd/<hash>.sock`, `/run/ncsyncd/<user>/<hash>.sock`);
+  `ncsync status|pause|resume|sync-now` find it from the configuration (new `--config`) or
+  take `--socket`. Rust 1.89 is now needed.
+- **Engine API for a GUI (phase P0 of `docs/gui-plan.md`).** The control socket carries an
+  event stream (`subscribe`; `ncsync events` prints it) and the GUI's operations: add and
+  remove accounts (also by Login Flow v2), sign in and out, add and remove folders,
+  bandwidth limits. `nc_daemon::client` gives a GUI one engine interface, in process or
+  attached to a running `ncsyncd`; `nc_daemon::tray_status` ports the tray state and
+  tooltip.
+- A missing or refused credential is no longer silently dropped by the daemon: it is logged
+  with how to fix it, sent to subscribers, and the systemd `STATUS` line names the accounts
+  that need to sign in.
+
 ## 0.1.0-beta.3 (2026-10-08)
 
 - **Live reload of `ncsyncd`.** `ncsync account add|remove`, `folder add|remove`,
