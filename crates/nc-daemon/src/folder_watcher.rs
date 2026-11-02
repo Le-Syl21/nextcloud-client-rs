@@ -415,7 +415,7 @@ impl FolderWatcher {
         let (sys, fd): (Box<dyn InotifySys>, Option<AsyncFd<Inotify>>) = match Inotify::init() {
             Ok(inotify) => {
                 let sys = Box::new(LinuxInotify::new(inotify.watches()));
-                match AsyncFd::new(inotify) {
+                match register(inotify) {
                     Ok(fd) => (sys, Some(fd)),
                     Err(e) => {
                         warn!(target: LOG, "notify_init() failed: {e}");
@@ -558,6 +558,15 @@ impl FolderWatcher {
     pub fn folder_account_capabilities_changed(&self, files_lock_available: bool) {
         self.set_should_watch_for_file_unlocking(files_lock_available);
     }
+}
+
+/// Registers the inotify descriptor with tokio's reactor, the
+/// `QSocketNotifier` constructor of `FolderWatcherPrivate`.
+#[allow(unsafe_code)]
+fn register(inotify: Inotify) -> std::io::Result<AsyncFd<Inotify>> {
+    // SAFETY: `Inotify` owns its descriptor: it stays open, and is the one
+    // `as_raw_fd()` returns, until the `AsyncFd` drops the `Inotify`.
+    Ok(unsafe { AsyncFd::register(inotify) }?)
 }
 
 /// The `QSocketNotifier` of `FolderWatcherPrivate`: calls
