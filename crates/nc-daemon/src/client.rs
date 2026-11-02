@@ -105,7 +105,8 @@ pub type Built = (FolderMan, Box<dyn DaemonHooks>);
 /// The engine running in this process, on its own thread.
 pub struct InProcess {
     inbound: mpsc::UnboundedSender<Inbound>,
-    ui: broadcast::Sender<UiEvent>,
+    /// Weak, so the subscriptions end with the engine.
+    ui: broadcast::WeakSender<UiEvent>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -163,7 +164,7 @@ impl InProcess {
         match ready_rx.recv() {
             Ok(Ok(ui)) => Ok(Self {
                 inbound,
-                ui,
+                ui: ui.downgrade(),
                 thread: Some(thread),
             }),
             Ok(Err(e)) => {
@@ -209,9 +210,12 @@ impl EngineClient for InProcess {
     }
 
     fn subscribe(&self) -> Subscription {
-        Subscription {
-            rx: self.ui.subscribe(),
-        }
+        let rx = match self.ui.upgrade() {
+            Some(ui) => ui.subscribe(),
+            // The engine stopped: a closed subscription.
+            None => broadcast::channel(1).1,
+        };
+        Subscription { rx }
     }
 }
 
