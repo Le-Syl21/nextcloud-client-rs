@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-//! `ncsync status|pause|resume|sync-now`: requests to a running `ncsyncd`
+//! `ncsync status|pause|resume|sync-now|events`: requests to a running `ncsyncd`
 //! over its control socket. The answer is printed as JSON with `--json`,
 //! as a short summary otherwise.
 
@@ -166,4 +166,36 @@ pub fn run_folder_request(
             .collect();
         println!("{done}: {}", folders.join(", "));
     })
+}
+
+/// `ncsync events`: subscribes to the daemon's event stream and prints it
+/// until the daemon stops (or Ctrl+C).
+pub fn run_events(control: ControlArgs) -> ExitCode {
+    use nc_daemon::client::Remote;
+    use std::io::Write;
+    let path = match socket_of(&control) {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let mut sub = match Remote::new(&path).try_subscribe() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "Cannot reach ncsyncd at {}: {e} (is the daemon running?)",
+                path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut out = std::io::stdout().lock();
+    while let Some(event) = sub.blocking_recv() {
+        let Ok(text) = serde_json::to_string(&event) else {
+            continue;
+        };
+        if writeln!(out, "{text}").and_then(|()| out.flush()).is_err() {
+            return ExitCode::SUCCESS;
+        }
+    }
+    eprintln!("ncsyncd stopped");
+    ExitCode::SUCCESS
 }

@@ -580,6 +580,33 @@ impl AccountState {
         self.set_state(State::SignedOut, tx, wrap, signals);
     }
 
+    /// `signOutByUi()` from the GUI ("Log out").
+    pub fn sign_out<E: 'static>(
+        &mut self,
+        tx: &UnboundedSender<E>,
+        wrap: &EventWrapper<E>,
+    ) -> Vec<AccountSignal> {
+        let mut signals = Vec::new();
+        self.sign_out_by_ui(tx, wrap, &mut signals);
+        signals
+    }
+
+    /// `signIn()` ("Log in"): only a signed-out account changes; leaving
+    /// `SignedOut` for `Disconnected` checks the connection at once
+    /// (`setState`).
+    pub fn sign_in<E: 'static>(
+        &mut self,
+        tx: &UnboundedSender<E>,
+        wrap: &EventWrapper<E>,
+    ) -> Vec<AccountSignal> {
+        let mut signals = Vec::new();
+        if self.state == State::SignedOut {
+            self.waiting_for_new_credentials = false;
+            self.set_state(State::Disconnected, tx, wrap, &mut signals);
+        }
+        signals
+    }
+
     /// `slotHandleRemoteWipeCheck()` (connected to
     /// `Account::invalidCredentials`).
     pub fn slot_handle_remote_wipe_check<E: 'static>(

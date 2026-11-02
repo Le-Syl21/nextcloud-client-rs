@@ -188,7 +188,7 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
         eprintln!("ncsyncd: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = nc_daemon::control::serve(&socket, tx.clone()) {
+    if let Err(e) = nc_daemon::control::serve(&socket, tx.clone(), fm.ui_sender()) {
         eprintln!("ncsyncd: control socket {}: {e}", socket.display());
         return ExitCode::FAILURE;
     }
@@ -196,9 +196,7 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
         eprintln!("ncsyncd: signal handlers: {e}");
         return ExitCode::FAILURE;
     }
-    let mut hooks = systemd::SystemdHooks::new(ReloadHooks {
-        options: options.clone(),
-    });
+    let mut hooks = systemd::SystemdHooks::new(ReloadHooks::new(options.clone()));
     log::info!(target: "nextcloud.daemon", "ncsyncd {} started: {} accounts, {} folders", env!("CARGO_PKG_VERSION"), fm.account_states().count(), fm.map().len());
     nc_daemon::daemon::run(&mut fm, &tx, &mut rx, &mut hooks).await;
     let _ = std::fs::remove_file(&socket);

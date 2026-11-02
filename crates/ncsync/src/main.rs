@@ -81,6 +81,9 @@ enum Command {
     /// Sync a folder now (all folders by default), like the desktop
     /// client's "Sync now".
     SyncNow(control_cmds::FolderArg),
+    /// Print the events of a running ncsyncd as they happen, one JSON
+    /// object per line (what a GUI attached to it receives).
+    Events(control_cmds::ControlArgs),
 }
 
 #[derive(Args, Debug)]
@@ -234,6 +237,7 @@ fn main() -> ExitCode {
             |folder| nc_daemon::control::Request::SyncNow { folder },
             "sync scheduled",
         ),
+        Command::Events(c) => control_cmds::run_events(c),
     }
 }
 

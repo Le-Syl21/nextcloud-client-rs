@@ -8,6 +8,7 @@
 pub mod account_config;
 pub mod account_setup;
 pub mod account_state;
+pub mod client;
 pub mod config_file;
 pub mod connection_validator;
 pub mod control;
@@ -23,6 +24,7 @@ pub mod guard;
 pub mod instance;
 pub mod manage;
 pub mod network_limits;
+pub mod operations;
 pub mod remote_wipe;
 pub mod selective_sync;
 pub mod settings;

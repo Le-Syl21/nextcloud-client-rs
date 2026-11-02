@@ -302,7 +302,12 @@ ncsync pause [ALIAS|PATH]       # all folders without an argument
 ncsync resume [ALIAS|PATH]
 ncsync sync-now [ALIAS|PATH]    # like the tray's "Sync now"
 ncsync status --instance alice  # a system instance (as root or alice)
+ncsync events                   # the daemon's events as they happen, one JSON object per line
 ```
+
+The same socket carries what a GUI needs to drive a running daemon: adding and removing
+accounts (also through Login Flow v2) and folders, signing in and out, bandwidth limits,
+and the event stream `ncsync events` prints.
 
 One program at a time uses a configuration file: `ncsyncd` takes an exclusive lock
 (`instance-<hash>.lock` in its state directory, `<hash>` naming the configuration file)
@@ -785,7 +790,12 @@ ncsync pause [ALIAS|CHEMIN]     # tous les dossiers sans argument
 ncsync resume [ALIAS|CHEMIN]
 ncsync sync-now [ALIAS|CHEMIN]  # comme « Synchroniser maintenant » de l'icône de notification
 ncsync status --instance alice  # un service système (en root ou en alice)
+ncsync events                   # les événements du service au fil de l'eau, un objet JSON par ligne
 ```
+
+La même socket porte ce dont une interface graphique a besoin pour piloter un service en
+marche : ajout et retrait de comptes (aussi par Login Flow v2) et de dossiers, connexion et
+déconnexion, limites de bande passante, et le flux d'événements qu'affiche `ncsync events`.
 
 Un seul programme à la fois utilise un fichier de configuration : `ncsyncd` prend un verrou
 exclusif (`instance-<hash>.lock` dans son dossier d'état, `<hash>` désignant le fichier de

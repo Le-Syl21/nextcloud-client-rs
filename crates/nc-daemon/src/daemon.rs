@@ -124,6 +124,23 @@ pub trait DaemonHooks {
     fn reload(&mut self, fm: &mut FolderMan, config: Option<&str>, wipe: &[String])
     -> ReloadResult;
 
+    /// A control request the folder manager does not answer by itself
+    /// (see [`Request::is_folder_man_request`]): the GUI's operations on the
+    /// configuration, `show`. The answer goes to `reply`, now or later (an
+    /// operation may run as a task and post an [`Event::Completed`]).
+    fn control(
+        &mut self,
+        _fm: &mut FolderMan,
+        request: Request,
+        _tx: &UnboundedSender<Event>,
+        reply: tokio::sync::oneshot::Sender<Response>,
+    ) {
+        let _ = reply.send(crate::control::error(format!(
+            "{} is not available here",
+            request.command()
+        )));
+    }
+
     /// What the folder manager asks its owner ([`FolderMan::take_requests`],
     /// drained after every event). A GUI opens its re-authentication
     /// window for [`ManagerRequest::CredentialsNeeded`]; the folder manager
@@ -221,9 +238,30 @@ pub async fn run(
                     pending_replies.push((result.waiting, result.response, reply));
                 }
             }
-            Event::Control(request, reply) => {
+            Event::Control(request, reply) if request.is_folder_man_request() => {
                 let response = crate::control::handle(fm, request);
                 let _ = reply.send(response);
+            }
+            Event::Control(request, reply) => hooks.control(fm, request, tx, reply),
+            Event::Completed(c) => {
+                let crate::event::Completion {
+                    wipe,
+                    mut response,
+                    reply,
+                    event,
+                } = *c;
+                let result = hooks.reload(fm, None, &wipe);
+                if response.is_object() {
+                    response["reload"] = result.response;
+                } else {
+                    response = result.response;
+                }
+                if let Some(e) = event {
+                    fm.publish(e);
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(response);
+                }
             }
             Event::WatchdogTick => hooks.watchdog(),
             Event::Reload => {

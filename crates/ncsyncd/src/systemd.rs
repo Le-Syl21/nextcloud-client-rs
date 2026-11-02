@@ -122,4 +122,14 @@ impl DaemonHooks for SystemdHooks {
         }
         self.inner.manager_request(fm, request);
     }
+
+    fn control(
+        &mut self,
+        fm: &mut FolderMan,
+        request: nc_daemon::control::Request,
+        tx: &UnboundedSender<Event>,
+        reply: tokio::sync::oneshot::Sender<nc_daemon::control::Response>,
+    ) {
+        self.inner.control(fm, request, tx, reply);
+    }
 }

@@ -229,6 +229,36 @@ impl FolderMan {
         self.aliases.get(&id).cloned().unwrap_or_default()
     }
 
+    /// Sends an event to the UI subscribers (the hooks' own events, such as
+    /// [`UiEvent::LoginFinished`]).
+    pub fn publish(&self, event: UiEvent) {
+        let _ = self.ui.send(event);
+    }
+
+    /// `AccountState::signOutByUi()` (the stored credentials are the
+    /// caller's business).
+    pub fn sign_out(&mut self, id: &str) -> bool {
+        let wrap = self.account_wrap.clone();
+        let Some(state) = self.accounts.get_mut(id) else {
+            return false;
+        };
+        let signals = state.sign_out(&self.tx, &wrap);
+        self.handle_account_signals(id, signals);
+        true
+    }
+
+    /// `AccountState::signIn()`: a signed-out account tries to connect
+    /// again.
+    pub fn sign_in(&mut self, id: &str) -> bool {
+        let wrap = self.account_wrap.clone();
+        let Some(state) = self.accounts.get_mut(id) else {
+            return false;
+        };
+        let signals = state.sign_in(&self.tx, &wrap);
+        self.handle_account_signals(id, signals);
+        true
+    }
+
     /// Whether the folder waits in the schedule queue.
     pub fn is_scheduled(&self, id: FolderId) -> bool {
         self.scheduled_folders.contains(&id)
@@ -1457,7 +1487,11 @@ impl FolderMan {
             Event::Folder(id, e) => self.handle_folder_event(id, e),
             Event::Watcher(id, e) => self.handle_watcher_event(id, e),
             Event::Push(account_id, e) => self.handle_push_event(&account_id, e),
-            Event::Control(..) | Event::Shutdown | Event::WatchdogTick | Event::Reload => {}
+            Event::Control(..)
+            | Event::Completed(_)
+            | Event::Shutdown
+            | Event::WatchdogTick
+            | Event::Reload => {}
         }
     }
 

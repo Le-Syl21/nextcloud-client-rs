@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-//! The control socket of `ncsyncd`: `ncsync status|pause|resume|sync-now`.
+//! The control endpoint of the engine: `ncsync status|pause|resume|sync-now`
+//! and the GUI's operations (decision D3 of `docs/gui-plan.md`: a GUI
+//! attached to a running `ncsyncd` drives it with the same requests it
+//! sends to its own engine, see [`crate::client`]).
 //!
 //! A Unix stream socket, named after the configuration it serves
 //! ([`crate::guard::default_endpoint`]); each connection carries one
@@ -21,16 +24,31 @@
 //! `selective-sync` edits a folder's selective sync lists
 //! (`FolderStatusModel::slotApplySelectiveSync`) and answers with its
 //! blacklist (no change when both lists are empty).
+//!
+//! The GUI's operations change the configuration file and reload it, the
+//! way the official client's dialogs change `AccountManager` and
+//! `FolderMan` (handled by the event loop's
+//! [`crate::daemon::DaemonHooks::control`], see [`crate::operations`]):
+//! `add-account`, `start-login` / `cancel-login` (Login Flow v2),
+//! `remove-account`, `sign-in` / `sign-out`, `add-folder`,
+//! `remove-folder` and `set-network-limits`. `show` raises a GUI's window
+//! (single instance); `ncsyncd` has none.
+//!
+//! `{"command":"subscribe"}` turns the connection into an event stream:
+//! after `{"ok":true}`, every [`crate::ui_event::UiEvent`] is written as one
+//! JSON line until the client disconnects.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::Event;
 use crate::folder_man::FolderMan;
+use crate::ui_event::UiEvent;
 
 const LOG: &str = "nextcloud.daemon.control";
 
@@ -72,12 +90,133 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,
     },
+    /// Stream the [`crate::ui_event::UiEvent`]s on this connection.
+    Subscribe,
+    /// Raise the main window (a second GUI launch, like
+    /// KDSingleApplication's message).
+    Show,
+    /// Add an account with an app password, or replace the credentials of
+    /// the account with the same server and login name (`ncsync account
+    /// add --app-password-file`).
+    AddAccount {
+        server_url: String,
+        login_name: String,
+        app_password: Secret,
+    },
+    /// Start a Login Flow v2 (`Flow2Auth`): answered with the login link
+    /// and an id at once; once the user granted access, the account is
+    /// added (or its credentials replaced) and
+    /// [`crate::ui_event::UiEvent::LoginFinished`] is sent.
+    StartLogin {
+        server_url: String,
+    },
+    /// Stop waiting for a login started with [`Request::StartLogin`].
+    CancelLogin {
+        login: u64,
+    },
+    /// `AccountManager::deleteAccount`: the account leaves the
+    /// configuration (refused while it has folders, unless `force`: they
+    /// are removed too, their files kept), its app password is revoked on
+    /// the server (unless the official client may share it) and its stored
+    /// credentials are forgotten.
+    RemoveAccount {
+        account: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
+    /// `AccountState::signIn()`, then the stored credentials are read again.
+    SignIn {
+        account: String,
+    },
+    /// `AccountState::signOutByUi()`: the credentials are forgotten (also
+    /// the stored ones, like `HttpCredentials::invalidateToken`) and the
+    /// account signed out.
+    SignOut {
+        account: String,
+    },
+    /// "Add Folder Sync Connection" (`AccountSettings::slotFolderWizardAccepted`).
+    AddFolder {
+        local_path: String,
+        #[serde(default = "root_path")]
+        remote_path: String,
+        /// The account id (may be left out when there is one account).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    /// "Remove folder sync connection" (`FolderMan::removeFolder`): the
+    /// files are kept, the journal deleted. A folder taken over from the
+    /// official client is refused unless `force` (its journal is then
+    /// kept).
+    RemoveFolder {
+        /// The folder's alias or local path.
+        folder: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
+    /// The bandwidth limits of an account ("Connection settings"); a limit
+    /// left out is unchanged.
+    SetNetworkLimits {
+        account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upload: Option<TransferLimit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        download: Option<TransferLimit>,
+    },
+}
+
+fn root_path() -> String {
+    "/".to_owned()
+}
+
+/// One direction's bandwidth limit: `Account::{upload,download}LimitSetting`
+/// (`NoLimit` or `ManualLimit`) and the limit in KB/s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferLimit {
+    /// `ManualLimit` when true, `NoLimit` otherwise.
+    pub manual: bool,
+    /// KB/s (kept even without a limit, like upstream).
+    pub kbps: u32,
+}
+
+/// A secret in a request: serialized as is, never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
+impl Request {
+    /// The `command` name.
+    pub fn command(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v["command"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Whether the folder manager answers the request by itself
+    /// ([`handle`]); the others go to the event loop's hooks.
+    pub fn is_folder_man_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Status
+                | Self::Pause { .. }
+                | Self::Resume { .. }
+                | Self::SyncNow { .. }
+                | Self::SelectiveSync { .. }
+        )
+    }
 }
 
 /// A control response: `{"ok":true,...}` or `{"ok":false,"error":...}`.
 pub type Response = Value;
 
-fn error(message: impl Into<String>) -> Response {
+/// An error answer.
+pub fn error(message: impl Into<String>) -> Response {
     json!({"ok": false, "error": message.into()})
 }
 
@@ -99,8 +238,9 @@ pub fn handle(fm: &mut FolderMan, request: Request) -> Response {
             exclude,
             include,
         } => selective_sync(fm, &folder, &exclude, &include),
-        // The event loop answers it (it needs the configuration).
-        Request::Reload { .. } => error("reload is not available here"),
+        // The event loop's hooks answer the others (they need the
+        // configuration); a subscription is a connection of its own.
+        r => error(format!("{} is not available here", r.command())),
     }
 }
 
@@ -182,8 +322,14 @@ pub fn status(fm: &FolderMan) -> Response {
     v
 }
 
-/// Listens on `path` and posts every request to the event queue.
-pub fn serve(path: &Path, tx: UnboundedSender<Event>) -> std::io::Result<()> {
+/// Listens on `path` and posts every request to the event queue; a
+/// `subscribe` connection gets the events of `ui` (see
+/// [`FolderMan::ui_sender`]).
+pub fn serve(
+    path: &Path,
+    tx: UnboundedSender<Event>,
+    ui: broadcast::Sender<UiEvent>,
+) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         use std::os::unix::fs::PermissionsExt;
@@ -211,6 +357,7 @@ pub fn serve(path: &Path, tx: UnboundedSender<Event>) -> std::io::Result<()> {
                 continue;
             };
             let tx = tx.clone();
+            let ui = ui.clone();
             tokio::task::spawn_local(async move {
                 let (read, mut write) = stream.into_split();
                 let mut line = String::new();
@@ -219,6 +366,10 @@ pub fn serve(path: &Path, tx: UnboundedSender<Event>) -> std::io::Result<()> {
                     return;
                 }
                 let response = match serde_json::from_str::<Request>(line.trim()) {
+                    Ok(Request::Subscribe) => {
+                        stream_events(ui.subscribe(), &mut write).await;
+                        return;
+                    }
                     Ok(request) => {
                         let (otx, orx) = tokio::sync::oneshot::channel();
                         if tx.send(Event::Control(request, otx)).is_err() {
@@ -230,13 +381,41 @@ pub fn serve(path: &Path, tx: UnboundedSender<Event>) -> std::io::Result<()> {
                     }
                     Err(e) => error(format!("invalid request: {e}")),
                 };
-                let mut text = response.to_string();
-                text.push('\n');
-                let _ = write.write_all(text.as_bytes()).await;
+                let _ = write_line(&mut write, &response).await;
             });
         }
     });
     Ok(())
+}
+
+async fn write_line(
+    write: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &impl Serialize,
+) -> std::io::Result<()> {
+    let mut text = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    text.push('\n');
+    write.write_all(text.as_bytes()).await
+}
+
+/// A `subscribe` connection: `{"ok":true}`, then one event per line until
+/// the client goes away or the engine stops.
+async fn stream_events(
+    mut events: broadcast::Receiver<UiEvent>,
+    write: &mut (impl tokio::io::AsyncWrite + Unpin),
+) {
+    if write_line(write, &json!({"ok": true})).await.is_err() {
+        return;
+    }
+    loop {
+        let event = match events.recv().await {
+            Ok(e) => e,
+            Err(broadcast::error::RecvError::Lagged(missed)) => UiEvent::Lagged { missed },
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        if write_line(write, &event).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Sends one request to a running daemon (`ncsync status` & co).
@@ -293,5 +472,42 @@ mod tests {
                 include: Vec::new()
             }
         );
+        assert_eq!(
+            serde_json::from_str::<Request>(
+                r#"{"command":"add-folder","local_path":"/home/a/Nextcloud"}"#
+            )
+            .unwrap(),
+            Request::AddFolder {
+                local_path: "/home/a/Nextcloud".into(),
+                remote_path: "/".into(),
+                account: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::RemoveAccount {
+                account: "0".into(),
+                force: false
+            })
+            .unwrap(),
+            r#"{"command":"remove-account","account":"0"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Subscribe).unwrap(),
+            r#"{"command":"subscribe"}"#
+        );
+        let add = Request::AddAccount {
+            server_url: "https://cloud".into(),
+            login_name: "a".into(),
+            app_password: Secret("hunter2".into()),
+        };
+        assert!(
+            serde_json::to_string(&add)
+                .unwrap()
+                .contains(r#""app_password":"hunter2""#)
+        );
+        assert!(!format!("{add:?}").contains("hunter2"));
+        assert_eq!(add.command(), "add-account");
+        assert!(!add.is_folder_man_request());
+        assert!(Request::Status.is_folder_man_request());
     }
 }

@@ -33,6 +33,9 @@ pub enum Event {
         crate::control::Request,
         tokio::sync::oneshot::Sender<crate::control::Response>,
     ),
+    /// An operation of the hooks changed the configuration (it ran as a
+    /// task, without the folder manager): reload it, then answer.
+    Completed(Box<Completion>),
     /// A watchdog timer of the hooks fired (`ncsyncd`: half of systemd's
     /// `WatchdogSec`); handled by [`crate::daemon::DaemonHooks::watchdog`].
     WatchdogTick,
@@ -40,6 +43,18 @@ pub enum Event {
     Reload,
     /// Stop: abort the running syncs and quit.
     Shutdown,
+}
+
+/// The end of an operation that changed the configuration
+/// ([`Event::Completed`]): the event loop reloads the configuration
+/// (`DaemonHooks::reload`, wiping the journals of `wipe`), adds the reload's
+/// answer to `response` under `"reload"`, sends `event` to the UI
+/// subscribers and answers `reply`.
+pub struct Completion {
+    pub wipe: Vec<String>,
+    pub response: crate::control::Response,
+    pub reply: Option<tokio::sync::oneshot::Sender<crate::control::Response>>,
+    pub event: Option<crate::ui_event::UiEvent>,
 }
 
 /// `FolderMan` timers and queued invocations.

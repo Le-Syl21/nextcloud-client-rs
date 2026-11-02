@@ -604,13 +604,41 @@ pub fn reload(
     Ok(out)
 }
 
-/// The daemon's [`crate::daemon::DaemonHooks`]: [`reload`] for SIGHUP and the
-/// `reload` control request.
+/// The engine's configuration hooks ([`crate::daemon::DaemonHooks`]):
+/// [`reload`] for SIGHUP and the `reload` control request, and the GUI's
+/// operations on the configuration ([`crate::operations`]).
 pub struct ReloadHooks {
     pub options: Options,
+    pub(crate) logins: crate::operations::Logins,
+}
+
+impl ReloadHooks {
+    pub fn new(options: Options) -> Self {
+        Self {
+            options,
+            logins: Default::default(),
+        }
+    }
+
+    /// Reloads the configuration after an operation changed it; the answer
+    /// of the reload. Removed folders whose sync is still stopping are
+    /// wiped or closed once their engine is back.
+    pub(crate) fn reload_now(&mut self, fm: &mut FolderMan, wipe: &[String]) -> serde_json::Value {
+        crate::daemon::DaemonHooks::reload(self, fm, None, wipe).response
+    }
 }
 
 impl crate::daemon::DaemonHooks for ReloadHooks {
+    fn control(
+        &mut self,
+        fm: &mut FolderMan,
+        request: crate::control::Request,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::event::Event>,
+        reply: tokio::sync::oneshot::Sender<crate::control::Response>,
+    ) {
+        crate::operations::handle(self, fm, request, tx, reply);
+    }
+
     fn reload(
         &mut self,
         fm: &mut FolderMan,

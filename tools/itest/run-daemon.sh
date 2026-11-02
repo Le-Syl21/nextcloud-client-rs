@@ -113,6 +113,25 @@ sleep 5
 wait_for 30 "sync after resume" test -f "$work/local/paused.txt"
 "$ncsync" status
 
+echo "5a. events: a subscriber follows a sync, a pause and a resume"
+"$ncsync" events > "$work/events.log" 2>"$work/events.err" &
+events_pid=$!
+events_has() { grep -q -- "$1" "$work/events.log"; }
+# a sync-now changes the folder state: once it shows, the subscription is live
+subscribed() { "$ncsync" sync-now 1 >/dev/null; sleep 0.5; events_has '"event":"folder-state-changed"'; }
+wait_for 30 "subscription" subscribed
+wait_for 60 "idle" idle
+echo from-server-2 | curl -s "${auth[@]}" -T - "$dav/events.txt"
+wait_for 30 "item-completed event" events_has '"event":"item-completed","folder":"1","item":{"file":"events.txt"'
+"$ncsync" pause 1 >/dev/null || fail "pause"
+wait_for 10 "paused event" events_has '"event":"folder-state-changed","folder":{"alias":"1".*"paused":true'
+seen=$(wc -l < "$work/events.log")
+"$ncsync" resume 1 >/dev/null || fail "resume"
+resumed() { tail -n "+$((seen + 1))" "$work/events.log" | grep -q '"event":"folder-state-changed","folder":{"alias":"1".*"paused":false'; }
+wait_for 10 "resumed event" resumed
+kill "$events_pid" 2>/dev/null || true
+wait "$events_pid" 2>/dev/null || true
+
 echo "5b. selective sync through the daemon: exclude, include"
 curl -s "${auth[@]}" -X MKCOL "$dav/Excl" >/dev/null
 echo excluded | curl -s "${auth[@]}" -T - "$dav/Excl/x.txt"
