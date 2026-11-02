@@ -1544,7 +1544,6 @@ dependencies = [
  "qrcode",
  "regex",
  "rustix",
- "sd-notify",
  "serde",
  "serde_json",
  "tempfile",
@@ -1669,6 +1668,7 @@ dependencies = [
  "env_logger",
  "log",
  "nc-daemon",
+ "sd-notify",
  "tokio",
 ]
 

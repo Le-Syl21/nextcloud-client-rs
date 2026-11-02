@@ -88,7 +88,7 @@ All versions are the latest on crates.io on 2026-10-07 (`cargo add`).
 | Folder, FolderMan, AccountState, ConnectionValidator, SyncResult (`folder.cpp`, `folderman.cpp`, `accountstate.cpp`, `connectionvalidator.cpp`, `syncresult.cpp`) | ported | — | The scheduling (queue, pause after the last sync, etag polling one request at a time, time scheduler, failure back-off, follow-up syncs), the connection state machine and its retry back-off are the behaviour under test. |
 | Qt event loop, `QTimer` | **tokio** current-thread runtime + `LocalSet`; timers are local tasks posting generation-stamped events (`nc-daemon/src/timer.rs`) | 1.53.2 | One thread like the GUI thread: events are handled one at a time, in posting order; a stopped timer's late timeout is dropped like `QTimer::stop()` guarantees. |
 | Scheduled sync run timers for expiring server locks, touched files (`syncengine.cpp`) | ported (`nc-sync/src/scheduled_sync.rs`, `touched_files.rs`) as deadlines | — | The daemon arms one tokio timer on the earliest deadline. |
-| systemd `Type=notify`, watchdog, status | **sd-notify** | 0.5.0 | `READY=1`, `STATUS=`, `STOPPING=1`, and `WATCHDOG=1` sent from the event loop itself (half of `WatchdogSec`), so a stuck loop gets the service restarted. |
+| systemd `Type=notify`, watchdog, status (`ncsyncd` only, through its event loop hooks) | **sd-notify** | 0.5.0 | `READY=1`, `STATUS=`, `STOPPING=1`, and `WATCHDOG=1` sent from the event loop itself (half of `WatchdogSec`), so a stuck loop gets the service restarted. |
 | Control socket (no upstream counterpart: the GUI) | tokio `UnixListener`, one JSON line per request, **serde** (`derive`) + **serde_json** | 1.0.229, 1.0.151 | Mode 0600 in a 0700 runtime directory. |
 
 ## Phase 3 (in the tree)

@@ -33,9 +33,10 @@ pub enum Event {
         crate::control::Request,
         tokio::sync::oneshot::Sender<crate::control::Response>,
     ),
-    /// The systemd watchdog interval passed: the loop is alive.
+    /// A watchdog timer of the hooks fired (`ncsyncd`: half of systemd's
+    /// `WatchdogSec`); handled by [`crate::daemon::DaemonHooks::watchdog`].
     WatchdogTick,
-    /// Re-read the configuration and the credentials (SIGHUP).
+    /// Re-read the configuration and the credentials (`ncsyncd`: SIGHUP).
     Reload,
     /// Stop: abort the running syncs and quit.
     Shutdown,

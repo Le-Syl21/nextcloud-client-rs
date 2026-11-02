@@ -6,9 +6,9 @@
 //!
 //! Everything runs on one thread (a current-thread tokio runtime with a
 //! `LocalSet`), like the Qt GUI thread: the folder manager handles one
-//! [`Event`] at a time. systemd is told when the daemon is ready, its
-//! status, and is pinged by the watchdog from the loop itself, so a stuck
-//! loop gets the service restarted.
+//! [`Event`] at a time. What only one embedder needs (systemd's
+//! notifications and watchdog and the signal handlers of `ncsyncd`, the
+//! dialogs of a GUI) goes through its [`DaemonHooks`].
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -20,7 +20,6 @@ use crate::event::{Event, FolderId, WatcherEvent};
 use crate::folder::{FolderWatcherHandle, WatcherFactory};
 use crate::folder_man::{FolderMan, ManagerRequest};
 use crate::folder_watcher::{FolderWatcher, FolderWatcherEvent};
-use crate::timer::Timer;
 
 const LOG: &str = "nextcloud.daemon";
 
@@ -76,34 +75,6 @@ pub fn inotify_watcher_factory() -> WatcherFactory {
     })
 }
 
-/// systemd notification (no-op outside systemd).
-fn notify(state: &[sd_notify::NotifyState]) {
-    let _ = sd_notify::notify(state);
-}
-
-/// Posts [`Event::Shutdown`] on SIGTERM/SIGINT and [`Event::Reload`] on
-/// SIGHUP (`systemctl reload`).
-pub fn install_signal_handlers(tx: &UnboundedSender<Event>) -> std::io::Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    let mut hup = signal(SignalKind::hangup())?;
-    let tx = tx.clone();
-    tokio::task::spawn_local(async move {
-        loop {
-            let event = tokio::select! {
-                _ = term.recv() => Event::Shutdown,
-                _ = int.recv() => Event::Shutdown,
-                _ = hup.recv() => Event::Reload,
-            };
-            if tx.send(event).is_err() {
-                return;
-            }
-        }
-    });
-    Ok(())
-}
-
 /// The answer to a reload, and the removed folders whose sync is still
 /// stopping: the answer is sent once they are unloaded.
 pub struct ReloadResult {
@@ -120,8 +91,32 @@ impl ReloadResult {
     }
 }
 
-/// Hooks of the event loop for what the folder manager does not own.
+/// Hooks of the event loop for what the folder manager does not own: the
+/// configuration (reloads) and what is particular to the program running
+/// the loop (`ncsyncd` tells systemd, a GUI shows dialogs).
 pub trait DaemonHooks {
+    /// The loop starts (`ncsyncd`: `READY=1` and the watchdog timer, which
+    /// posts [`Event::WatchdogTick`]).
+    fn started(&mut self, _tx: &UnboundedSender<Event>) {}
+
+    /// [`Event::WatchdogTick`]: the loop is alive.
+    fn watchdog(&mut self) {}
+
+    /// The one-line summary of the accounts and folders changed.
+    fn status_changed(&mut self, _status: &str) {}
+
+    /// [`Event::Reload`] (SIGHUP) is about to re-read the configuration.
+    fn reloading(&mut self) {}
+
+    /// The [`Event::Reload`] reload is done.
+    fn reloaded(&mut self) {}
+
+    /// [`Event::Shutdown`]: the running syncs are being aborted.
+    fn stopping(&mut self) {}
+
+    /// The loop ended.
+    fn stopped(&mut self) {}
+
     /// SIGHUP (`config` `None`, nothing wiped) and the `reload` control
     /// request: re-reads the configuration (see
     /// [`crate::startup::reload`]). `config` is the file the requester
@@ -156,17 +151,33 @@ type PendingReply = (
 /// How long running syncs get to abort at shutdown.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
-fn status_line(fm: &FolderMan) -> String {
+/// The one-line summary given to [`DaemonHooks::status_changed`].
+pub fn status_line(fm: &FolderMan) -> String {
     let folders = fm.map().len();
     let syncing = fm.current_sync_folder().map(str::to_owned);
     let connected = fm.account_states().filter(|a| a.is_connected()).count();
     let accounts = fm.account_states().count();
-    match syncing {
+    let mut line = match syncing {
         Some(a) => {
             format!("{connected}/{accounts} accounts connected, {folders} folders, syncing {a}")
         }
         None => format!("{connected}/{accounts} accounts connected, {folders} folders, idle"),
+    };
+    let signed_out: Vec<&str> = fm
+        .account_states()
+        .filter(|a| {
+            matches!(
+                a.state(),
+                crate::account_state::State::SignedOut
+                    | crate::account_state::State::AskingCredentials
+            )
+        })
+        .map(|a| a.id())
+        .collect();
+    if !signed_out.is_empty() {
+        line.push_str(&format!(", sign-in needed: {}", signed_out.join(", ")));
     }
+    line
 }
 
 /// Runs the loop until [`Event::Shutdown`] (or the queue closes). Must run
@@ -177,12 +188,7 @@ pub async fn run(
     rx: &mut UnboundedReceiver<Event>,
     hooks: &mut dyn DaemonHooks,
 ) {
-    let mut watchdog = Timer::new(Duration::ZERO, false);
-    if let Some(interval) = sd_notify::watchdog_enabled() {
-        log::info!(target: LOG, "systemd watchdog every {} ms", interval.as_millis());
-        watchdog.start_with(interval / 2, tx, |_| Event::WatchdogTick);
-    }
-    notify(&[sd_notify::NotifyState::Ready]);
+    hooks.started(tx);
     let mut last_status = String::new();
     let mut shutting_down: Option<tokio::time::Instant> = None;
     // Reload answers waiting for removed folders to stop syncing.
@@ -219,21 +225,17 @@ pub async fn run(
                 let response = crate::control::handle(fm, request);
                 let _ = reply.send(response);
             }
-            Event::WatchdogTick => notify(&[sd_notify::NotifyState::Watchdog]),
+            Event::WatchdogTick => hooks.watchdog(),
             Event::Reload => {
                 log::info!(target: LOG, "SIGHUP: reloading the configuration");
-                let mut state = vec![sd_notify::NotifyState::Reloading];
-                if let Ok(now) = sd_notify::NotifyState::monotonic_usec_now() {
-                    state.push(now);
-                }
-                notify(&state);
+                hooks.reloading();
                 let _ = hooks.reload(fm, None, &[]);
-                notify(&[sd_notify::NotifyState::Ready]);
+                hooks.reloaded();
             }
             Event::Shutdown => {
                 if shutting_down.is_none() {
                     log::info!(target: LOG, "shutting down");
-                    notify(&[sd_notify::NotifyState::Stopping]);
+                    hooks.stopping();
                     fm.shutdown();
                     shutting_down = Some(tokio::time::Instant::now() + SHUTDOWN_GRACE);
                 }
@@ -255,9 +257,9 @@ pub async fn run(
         }
         let status = status_line(fm);
         if status != last_status {
-            notify(&[sd_notify::NotifyState::Status(&status)]);
+            hooks.status_changed(&status);
             last_status = status;
         }
     }
-    watchdog.stop();
+    hooks.stopped();
 }

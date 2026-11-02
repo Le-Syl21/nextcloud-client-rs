@@ -17,7 +17,8 @@ nc-daemon.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+sd-notify = "0.5.0"
 
 [lints]
 workspace = true

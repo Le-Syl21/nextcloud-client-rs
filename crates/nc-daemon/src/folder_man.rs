@@ -383,7 +383,7 @@ impl FolderMan {
                     }
                 }
                 AccountSignal::CredentialsNeeded => {
-                    log::warn!(target: LOG, "Account {id} needs credentials: run `ncsync account add <server_url>` (or provide the systemd credential) and reload the daemon");
+                    log::warn!(target: LOG, "Account {id} needs credentials");
                     self.requests
                         .push(ManagerRequest::CredentialsNeeded(id.to_owned()));
                     self.emit(|| {

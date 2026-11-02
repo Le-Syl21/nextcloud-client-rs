@@ -22,6 +22,8 @@ use nc_daemon::folder_man::FolderMan;
 use nc_daemon::settings::Settings;
 use nc_daemon::startup::{self, FileSettingsStore, Options, ReloadHooks};
 
+mod systemd;
+
 /// Unofficial Nextcloud sync daemon.
 #[derive(Parser, Debug)]
 #[command(name = "ncsyncd", version, about, long_about = None)]
@@ -183,13 +185,13 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
         eprintln!("ncsyncd: control socket {}: {e}", socket.display());
         return ExitCode::FAILURE;
     }
-    if let Err(e) = nc_daemon::daemon::install_signal_handlers(&tx) {
+    if let Err(e) = systemd::install_signal_handlers(&tx) {
         eprintln!("ncsyncd: signal handlers: {e}");
         return ExitCode::FAILURE;
     }
-    let mut hooks = ReloadHooks {
+    let mut hooks = systemd::SystemdHooks::new(ReloadHooks {
         options: options.clone(),
-    };
+    });
     log::info!(target: "nextcloud.daemon", "ncsyncd {} started: {} accounts, {} folders", env!("CARGO_PKG_VERSION"), fm.account_states().count(), fm.map().len());
     nc_daemon::daemon::run(&mut fm, &tx, &mut rx, &mut hooks).await;
     let _ = std::fs::remove_file(&socket);
