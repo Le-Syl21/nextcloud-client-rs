@@ -480,7 +480,12 @@ mod tests {
         let mut acc = AccountDefinition::new_webflow("0", "http://127.0.0.1:9", "alice");
         acc.password_file = Some(pw.to_string_lossy().into_owned());
         Settings::modify(&location.config_file, |s| save_account(s, &acc)).unwrap();
-        let local = dir.path().join("A").to_string_lossy().into_owned();
+        let local = format!(
+            "{}/A",
+            nc_platform::paths::from_native(
+                &std::fs::canonicalize(dir.path()).unwrap().to_string_lossy()
+            )
+        );
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

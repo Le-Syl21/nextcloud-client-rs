@@ -711,8 +711,12 @@ mod tests {
         };
         let cfg = location.config_file.clone();
         Settings::modify(&cfg, |s| save_account(s, &account("0", dir.path()))).unwrap();
-        let local =
-            |name: &str| nc_platform::paths::to_slash(&dir.path().join(name).to_string_lossy());
+        // The canonical form (macOS: /private/var, Windows: no \\?\ prefix),
+        // which is what the folders are compared with.
+        let base = nc_platform::paths::from_native(
+            &std::fs::canonicalize(dir.path()).unwrap().to_string_lossy(),
+        );
+        let local = |name: &str| format!("{base}/{name}");
         let one = manage::add_folder(&ctx, &local("A"), "/", None).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
