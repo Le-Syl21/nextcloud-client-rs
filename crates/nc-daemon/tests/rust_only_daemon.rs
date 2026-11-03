@@ -37,7 +37,8 @@ async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
 
 // Pending on Windows: the fixture opens a second connection to the journal the engine
 // holds; SQLite's locks are per handle there (exclusive locking mode), per process on Unix.
-#[cfg(not(windows))]
+// macOS: the FSEvents stream ignores this process's own changes (IgnoreSelf), and the test writes the file itself.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn rust_only_daemon_polls_watches_and_obeys_control_requests() {
     let mut fake_folder = FakeFolder::new(FileInfo::A12_B12_C12_S12());
