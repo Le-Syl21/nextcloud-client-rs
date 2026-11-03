@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 nextcloud-client-rs contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
-#![cfg_attr(windows, allow(unused, dead_code))] // some tests are pending on Windows
+#![cfg_attr(any(windows, target_os = "macos"), allow(unused, dead_code))] // some tests are pending on Windows
 
 //! rust_only: the daemon's event loop end to end against the FakeFolder
 //! server: the initial sync of a loaded folder, a remote change found by
@@ -185,7 +185,8 @@ fn status_of(tx: &UnboundedSender<Event>) -> Option<()> {
 /// capability.
 // Pending on Windows: the fixture opens a second connection to the journal the engine
 // holds; SQLite's locks are per handle there (exclusive locking mode), per process on Unix.
-#[cfg(not(windows))]
+// macOS has no folder watcher yet, and this one detects the lock files through it.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn rust_only_daemon_locks_documents_opened_in_an_office_application() {
     use std::sync::{Arc, Mutex};

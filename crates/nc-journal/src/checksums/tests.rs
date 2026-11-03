@@ -38,6 +38,10 @@ fn write_random_file(path: &Path) {
 }
 
 fn shell_sum(cmd: &str, file: &Path) -> Option<Vec<u8>> {
+    // Windows has no md5sum/sha1sum (the runners' Git ones escape backslashes in the output).
+    if cfg!(windows) {
+        return None;
+    }
     let out = Command::new(cmd).arg(file).output().ok()?;
     let mut sum = out.stdout;
     let end = sum.iter().position(|&c| c == b' ')?;
