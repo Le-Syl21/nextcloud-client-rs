@@ -207,3 +207,27 @@ fn test_recursive_deletion_long_paths() {
     ));
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// Regression for issue #10836: a trailing period must remain addressable
+/// during a rename (Windows only upstream).
+#[cfg(windows)]
+#[test]
+fn test_rename_file_with_trailing_period() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let root = nc_platform::paths::from_native(&temp_dir.path().to_string_lossy());
+    let source = format!("{root}/trailing-period.");
+    let destination = format!("{root}/renamed-file");
+    let path_exists =
+        |p: &str| std::fs::symlink_metadata(nc_platform::paths::long_win_path(p)).is_ok();
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(nc_platform::paths::long_win_path(&source))
+        .expect("create the file with a trailing period");
+    assert!(path_exists(&source), "Source file does not exist: {source}");
+
+    filesystem::rename(&source, &destination).expect("rename");
+    assert!(!path_exists(&source));
+    assert!(path_exists(&destination));
+}

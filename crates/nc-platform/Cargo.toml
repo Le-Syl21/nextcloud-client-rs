@@ -19,11 +19,18 @@ tokio = { workspace = true, features = ["net"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "FSEvents", "dispatch2"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFString", "CFBase"] }
+unicode-normalization.workspace = true
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "alloc", "objc2"] }
 
 [dev-dependencies]
 tempfile.workspace = true

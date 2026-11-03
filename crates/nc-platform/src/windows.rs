@@ -37,6 +37,7 @@ use windows_sys::Win32::System::Threading::{
     ResetEvent, SetEvent, WaitForMultipleObjects,
 };
 
+use crate::DirEvent;
 use crate::paths::{from_long_win_path, long_win_path};
 
 const LOG: &str = "nextcloud.gui.folderwatcher";
@@ -162,17 +163,6 @@ pub fn file_system_for_path(path: &str) -> Option<String> {
     }
     let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
     Some(String::from_utf16_lossy(&name[..len]))
-}
-
-/// What the directory watcher reports.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DirEvent {
-    /// `ready()`: the first `ReadDirectoryChangesW` is armed.
-    Ready,
-    /// `changed(path)`: an absolute, `/`-separated path.
-    Changed(String),
-    /// `lostChanges()`: the notification buffer overflowed.
-    LostChanges,
 }
 
 /// A raw handle that may cross threads (event handles are process wide).
@@ -525,4 +515,398 @@ pub fn find_file_names(path: &str) -> Vec<String> {
         FindClose(handle);
     }
     names
+}
+
+/// `ACCESS_DENIED_ACE_TYPE`.
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+
+/// A security descriptor returned by `GetSecurityInfo`, freed with
+/// `LocalFree`.
+struct LocalSecurity(*mut std::ffi::c_void);
+
+impl Drop for LocalSecurity {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: allocated by GetSecurityInfo / ConvertStringSidToSidW,
+            // which documents LocalFree as the way to release it; freed once.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
+        }
+    }
+}
+
+/// Opens `path` the way upstream's ACL code does: no content access, the
+/// object itself (reparse points are not followed), directories included.
+fn open_for_security(path: &str, access: u32) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(long_win_path(path))
+}
+
+/// The DACL of an open object and the descriptor that owns it.
+fn dacl_of(
+    file: &std::fs::File,
+) -> Result<(*mut windows_sys::Win32::Security::ACL, LocalSecurity), u32> {
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the handle belongs to `file`; the out pointers are valid. The
+    // DACL points into the descriptor, which the guard keeps alive.
+    let error = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let guard = LocalSecurity(descriptor);
+    if error != 0 {
+        return Err(error);
+    }
+    Ok((dacl, guard))
+}
+
+/// `FileSystem::isFolderReadOnly` on Windows: the DACL has an access denied
+/// ACE (`UP/src/libsync/filesystem.cpp:713-770`). False when it cannot be read.
+pub fn has_access_denied_ace(path: &str) -> bool {
+    use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
+    use windows_sys::Win32::Security::{ACE_HEADER, AclSizeInformation, GetAce, GetAclInformation};
+    const READ_CONTROL: u32 = 0x0002_0000;
+    let file = match open_for_security(path, READ_CONTROL) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!(target: "nextcloud.sync.filesystem", "CreateFileW failed, path={path} errorMessage={e}");
+            return false;
+        }
+    };
+    let Ok((dacl, _descriptor)) = dacl_of(&file) else {
+        return false;
+    };
+    if dacl.is_null() {
+        return false;
+    }
+    // SAFETY: plain data, all zeroes is valid.
+    let mut size: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `dacl` is valid while `_descriptor` lives; `size` is the right size.
+    let ok = unsafe {
+        GetAclInformation(
+            dacl,
+            std::ptr::addr_of_mut!(size).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+    for i in 0..size.AceCount {
+        let mut ace = std::ptr::null_mut();
+        // SAFETY: `i` is below the ACE count of a valid ACL.
+        if unsafe { GetAce(dacl, i, &mut ace) } == 0 {
+            return false;
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER.
+        let ace_type = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
+        if ace_type & ACCESS_DENIED_ACE_TYPE != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `FileSystem::setAclPermission`: rebuilds the DACL of a file or folder
+/// without its access denied ACEs and, for read-only, with one in front that
+/// forbids deleting, creating and writing for BUILTIN\Users
+/// (`UP/src/common/filesystembase.cpp:823-977`).
+pub fn set_acl_permission(path: &str, read_only: bool) -> bool {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, SE_FILE_OBJECT, SetSecurityInfo,
+    };
+    use windows_sys::Win32::Security::{
+        ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
+        AddAccessDeniedAceEx, AddAce, DACL_SECURITY_INFORMATION, GetAce, GetAclInformation,
+        GetLengthSid, InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+    const NO_PROPAGATE_INHERIT_ACE: u32 = 0x4;
+    // FILE_DELETE_CHILD | DELETE | FILE_WRITE_DATA | FILE_WRITE_EA | FILE_APPEND_DATA
+    const DENIED_MASK: u32 = 0x40 | 0x1_0000 | 0x2 | 0x10 | 0x4;
+    let warn = |what: &str, detail: &dyn std::fmt::Display| {
+        log::warn!(target: "nextcloud.sync.filesystem", "{what} failed, path={path} errorMessage={detail}");
+    };
+
+    let file = match open_for_security(path, READ_CONTROL | WRITE_DAC | MAXIMUM_ALLOWED) {
+        Ok(f) => f,
+        Err(e) => {
+            warn("CreateFileW", &e);
+            return false;
+        }
+    };
+    let (dacl, _descriptor) = match dacl_of(&file) {
+        Ok(v) => v,
+        Err(code) => {
+            warn(
+                "GetSecurityInfo",
+                &std::io::Error::from_raw_os_error(code as i32),
+            );
+            return false;
+        }
+    };
+    if dacl.is_null() {
+        warn("GetSecurityInfo", &"no DACL");
+        return false;
+    }
+    let sid_text = wide("S-1-5-32-545"); // BUILTIN\Users
+    let mut sid = std::ptr::null_mut();
+    // SAFETY: `sid_text` is NUL-terminated; the SID is freed by the guard.
+    if unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut sid) } == 0 {
+        warn("ConvertStringSidToSidW", &std::io::Error::last_os_error());
+        return false;
+    }
+    let _sid_guard = LocalSecurity(sid);
+
+    // SAFETY: plain data, all zeroes is valid.
+    let mut size: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `dacl` is valid while `_descriptor` lives.
+    let ok = unsafe {
+        GetAclInformation(
+            dacl,
+            std::ptr::addr_of_mut!(size).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        warn("GetAclInformation", &std::io::Error::last_os_error());
+        return false;
+    }
+
+    let mut new_acl_size = size.AclBytesInUse;
+    if read_only {
+        // Room for the ACCESS_DENIED_ACE without its SidStart member, plus
+        // the SID; an ACL cannot exceed 65532 bytes (older clients prepended a
+        // new ACE every time, so an ACL that is already that big is kept).
+        // SAFETY: `sid` is a valid SID.
+        let sid_len = unsafe { GetLengthSid(sid) };
+        let ace_size = (std::mem::size_of::<ACCESS_DENIED_ACE>() - std::mem::size_of::<u32>())
+            as u32
+            + sid_len;
+        if new_acl_size + ace_size < 65532 {
+            new_acl_size += ace_size;
+        }
+    }
+    // u32 elements: an ACL needs DWORD alignment.
+    let mut buffer = vec![0u32; (new_acl_size as usize).div_ceil(4)];
+    let new_dacl: *mut ACL = buffer.as_mut_ptr().cast();
+    // SAFETY: `new_dacl` points to at least `new_acl_size` writable bytes.
+    if unsafe { InitializeAcl(new_dacl, new_acl_size, ACL_REVISION) } == 0 {
+        warn("InitializeAcl", &std::io::Error::last_os_error());
+        return false;
+    }
+    let mut new_ace_index = 0u32;
+    if read_only {
+        // the access denied ACE needs to appear at the start of the ACL
+        // SAFETY: `new_dacl` was initialized above and has room for the ACE.
+        let ok = unsafe {
+            AddAccessDeniedAceEx(
+                new_dacl,
+                ACL_REVISION,
+                NO_PROPAGATE_INHERIT_ACE,
+                DENIED_MASK,
+                sid,
+            )
+        };
+        if ok == 0 {
+            warn("AddAccessDeniedAceEx", &std::io::Error::last_os_error());
+            return false;
+        }
+        new_ace_index += 1;
+    }
+    for i in 0..size.AceCount {
+        let mut ace = std::ptr::null_mut();
+        // SAFETY: `i` is below the ACE count of the old, valid ACL.
+        if unsafe { GetAce(dacl, i, &mut ace) } == 0 {
+            warn("GetAce", &std::io::Error::last_os_error());
+            return false;
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER.
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if header.AceType & ACCESS_DENIED_ACE_TYPE != 0 {
+            // skip any access denied ACEs from the previous ACL
+            continue;
+        }
+        // SAFETY: the ACE is `AceSize` bytes long and `new_dacl` has room.
+        if unsafe {
+            AddAce(
+                new_dacl,
+                ACL_REVISION,
+                new_ace_index,
+                ace,
+                u32::from(header.AceSize),
+            )
+        } == 0
+        {
+            warn("AddAce", &std::io::Error::last_os_error());
+            return false;
+        }
+        new_ace_index += 1;
+    }
+    // SAFETY: the handle belongs to `file`; `new_dacl` is a valid ACL that
+    // outlives the call.
+    let error = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            PROTECTED_DACL_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | READ_CONTROL
+                | WRITE_DAC,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    if error != 0 {
+        warn(
+            "SetSecurityInfo",
+            &std::io::Error::from_raw_os_error(error as i32),
+        );
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, SE_FILE_OBJECT, SetSecurityInfo,
+    };
+    use windows_sys::Win32::Security::{
+        ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
+        AddAccessDeniedAceEx, AddAce, DACL_SECURITY_INFORMATION, GetAce, GetAclInformation,
+        GetLengthSid, InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+
+    fn acl_size(file: &std::fs::File) -> ACL_SIZE_INFORMATION {
+        let (dacl, _d) = dacl_of(file).expect("GetSecurityInfo");
+        // SAFETY: plain data.
+        let mut size: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `dacl` stays valid while `_d` lives.
+        let ok = unsafe {
+            GetAclInformation(
+                dacl,
+                std::ptr::addr_of_mut!(size).cast(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        };
+        assert_ne!(ok, 0);
+        size
+    }
+
+    // testfilesystem.cpp: testAclWithManyDeniedAces. Regression from client
+    // versions < 4.0.2 (nextcloud/desktop#8860): the access denied ACE was
+    // added every time a file/folder was set to read-only, until the ACL was
+    // too big to be modified.
+    #[test]
+    fn acl_with_many_denied_aces() {
+        let dir = tempfile::tempdir().unwrap();
+        let test = dir.path().join("readonlyTest");
+        std::fs::create_dir(&test).unwrap();
+        let path = test.to_string_lossy().into_owned();
+
+        let file = open_for_security(&path, READ_CONTROL | WRITE_DAC | MAXIMUM_ALLOWED).unwrap();
+        let sid_text = wide("S-1-5-32-545");
+        let mut sid = std::ptr::null_mut();
+        // SAFETY: NUL-terminated string; the SID is freed by the guard.
+        let ok = unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut sid) };
+        assert_ne!(ok, 0);
+        let _sid = LocalSecurity(sid);
+
+        let initial = acl_size(&file);
+        // SAFETY: valid SID.
+        let sid_len = unsafe { GetLengthSid(sid) };
+        let ace_size = (std::mem::size_of::<ACCESS_DENIED_ACE>() - 4) as u32 + sid_len;
+        // ACLs can be up to 65532 bytes in size: add as many ACEs as possible
+        let count = (65532 - initial.AclBytesInUse) / ace_size;
+        let total = initial.AclBytesInUse + ace_size * count;
+        let mut buffer = vec![0u32; (total as usize).div_ceil(4)];
+        let new_dacl: *mut ACL = buffer.as_mut_ptr().cast();
+        // SAFETY: the buffer holds `total` bytes.
+        let ok = unsafe { InitializeAcl(new_dacl, total, ACL_REVISION) };
+        assert_ne!(ok, 0);
+        let mut index = 0;
+        for _ in 0..count {
+            // SAFETY: room for `count` ACEs was reserved.
+            let ok = unsafe { AddAccessDeniedAceEx(new_dacl, ACL_REVISION, 4, 0x1_0042, sid) };
+            assert_ne!(ok, 0);
+            index += 1;
+        }
+        let (old, _d) = dacl_of(&file).unwrap();
+        for i in 0..initial.AceCount {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: `i` is below the old ACL's ACE count.
+            let ok = unsafe { GetAce(old, i, &mut ace) };
+            assert_ne!(ok, 0);
+            // SAFETY: ACEs start with a header.
+            let size = u32::from(unsafe { (*ace.cast::<ACE_HEADER>()).AceSize });
+            // SAFETY: valid ACE, room reserved.
+            let ok = unsafe { AddAce(new_dacl, ACL_REVISION, index, ace, size) };
+            assert_ne!(ok, 0);
+            index += 1;
+        }
+        // SAFETY: valid handle and ACL.
+        let error = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                PROTECTED_DACL_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | READ_CONTROL
+                    | WRITE_DAC,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(error, 0);
+
+        // Test setup done, so let's verify the behaviour.
+        let duplicates = acl_size(&file);
+        assert!(duplicates.AceCount > initial.AceCount);
+        assert!(duplicates.AclBytesInUse > 65511);
+        assert!(has_access_denied_ace(&path));
+
+        // Try to mark the folder as readonly. This used to fail because the
+        // ACL size was always extended, even if it wasn't necessary.
+        assert!(set_acl_permission(&path, true));
+        let after_read_only = acl_size(&file);
+        assert!(after_read_only.AceCount > initial.AceCount);
+        assert!(after_read_only.AceCount < duplicates.AceCount);
+        assert!(after_read_only.AclBytesInUse < 512);
+        assert!(has_access_denied_ace(&path));
+
+        // Finally, remove the read-only ACL: the same ACEs as before the test.
+        assert!(set_acl_permission(&path, false));
+        let after_read_write = acl_size(&file);
+        assert_eq!(after_read_write.AceCount, initial.AceCount);
+        assert_eq!(after_read_write.AclBytesInUse, initial.AclBytesInUse);
+        assert!(!has_access_denied_ace(&path));
+    }
 }

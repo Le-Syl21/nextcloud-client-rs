@@ -54,7 +54,15 @@ pub fn long_win_path(path: &str) -> String {
         // should not happen as we require the path to be absolute
         return format!("\\\\?{native}");
     }
-    format!("\\\\?\\{native}")
+    // A verbatim path is not normalized by Win32: empty components (`a//b`,
+    // a trailing separator before a name) must go here.
+    let mut collapsed = String::with_capacity(native.len());
+    for c in native.chars() {
+        if c != '\\' || !collapsed.ends_with('\\') {
+            collapsed.push(c);
+        }
+    }
+    format!("\\\\?\\{collapsed}")
 }
 
 /// The reverse of [`long_win_path`] for display and comparison: the
@@ -214,6 +222,7 @@ mod tests {
         assert_eq!(long_win_path("\\\\?\\C:\\a"), "\\\\?\\C:\\a");
         assert_eq!(long_win_path("//srv/share/f"), "\\\\?\\UNC\\srv\\share\\f");
         assert_eq!(long_win_path(""), "");
+        assert_eq!(long_win_path("C:/a//b/"), "\\\\?\\C:\\a\\b\\");
         let long = format!("C:/{}", "a/".repeat(200));
         assert!(long_win_path(&long).starts_with("\\\\?\\C:\\a\\a"));
         assert_eq!(from_long_win_path("\\\\?\\C:\\a\\b"), "C:/a/b");

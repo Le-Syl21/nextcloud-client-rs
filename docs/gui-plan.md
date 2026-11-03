@@ -1236,10 +1236,15 @@ compare, macOS canonical NFC compare), `has_case_clash_accessibility_problem`,
 `canRemoveCaseClashConflictedCopy` (it was a stub). The 7 case-clash tests and the diverse-conflicts
 solver scenario run on Windows and macOS.
 
+**Done since (2):** item 4, folder ACLs: `nc_platform::windows::{set_acl_permission, has_access_denied_ace}`
+(port of `setAclPermission` and `isFolderReadOnly`), used by `set_file_read_only` and
+`set_folder_permissions_changed`; `testAclWithManyDeniedAces` and `testRenameFileWithTrailingPeriod` run on
+Windows. P3: the macOS folder watcher (`nc_platform::macos`, FSEvents through `objc2-core-services`, port of
+`folderwatcher_mac.cpp`: file events, `IgnoreSelf`, full rescan flags, NFC paths); it is compiled and tested only by
+the `macos-15` CI job (D4).
+
 **Left:**
 
-- item 4: folder ACLs (`setAclPermission`, `isFolderReadOnly`): folders are
-  never made read-only on Windows, `testAclWithManyDeniedAces` is pending;
 - item 5: the `LockWatcher` (re-sync once a locked file is released);
 - item 10: the Windows branches of the four `testCreateFileWithTrailingSpaces_*`
   tests and `maybe_rename_for_windows_compatibility` (those tests are

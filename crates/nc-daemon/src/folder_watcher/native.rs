@@ -13,8 +13,9 @@
 //!   notifications cross to the single-threaded watcher through a channel,
 //!   the way Qt delivers the signals of `WatcherThread` to the GUI thread.
 //!   A buffer overflow is `lostChanges`.
-//! * Other systems (macOS until its FSEvents backend is ported): no
-//!   watcher. It reports itself unreliable at once, so that the folder
+//! * macOS: one FSEvents stream on the root (`nc_platform::macos`, port of
+//!   `folderwatcher_mac.cpp`), delivered the same way.
+//! * Other systems: no watcher. It reports itself unreliable at once, so that the folder
 //!   falls back to the periodic full local discovery.
 
 use std::cell::RefCell;
@@ -30,6 +31,8 @@ pub(super) struct FolderWatcherPrivate {
     pub ready: bool,
     #[cfg(windows)]
     _watcher: Option<nc_platform::windows::DirWatcher>,
+    #[cfg(target_os = "macos")]
+    _watcher: Option<nc_platform::macos::DirWatcher>,
 }
 
 impl std::fmt::Debug for FolderWatcherPrivate {
@@ -40,12 +43,16 @@ impl std::fmt::Debug for FolderWatcherPrivate {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl FolderWatcherPrivate {
     /// `FolderWatcherPrivate(p, path)`: starts the thread and the task that
     /// forwards its notifications.
     pub(super) fn start(root: &str, inner: &Rc<RefCell<Inner>>) -> (Self, Option<JoinHandle<()>>) {
-        use nc_platform::windows::{DirEvent, DirWatcher};
+        use nc_platform::DirEvent;
+        #[cfg(target_os = "macos")]
+        use nc_platform::macos::DirWatcher;
+        #[cfg(windows)]
+        use nc_platform::windows::DirWatcher;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DirEvent>();
         let watcher = match DirWatcher::start(root, move |e| {
             let _ = tx.send(e);
@@ -86,7 +93,7 @@ impl FolderWatcherPrivate {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl FolderWatcherPrivate {
     /// No folder watcher on this system yet.
     pub(super) fn start(_root: &str, inner: &Rc<RefCell<Inner>>) -> (Self, Option<JoinHandle<()>>) {

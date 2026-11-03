@@ -71,7 +71,7 @@ pub enum OpendirError {
 
 /// `FileSystem::fileExists` (follows symlinks, like `QFileInfo::exists`).
 pub fn file_exists(path: &str) -> bool {
-    Path::new(path).exists()
+    Path::new(&*native(path)).exists()
 }
 
 /// `FileSystem::isDir`.
@@ -146,18 +146,28 @@ pub fn verify_file_unchanged(path: &str, previous_size: i64, previous_mtime: i64
     true
 }
 
+/// The form of a path handed to the Win32 calls that must not normalize it
+/// (`FileSystem::longWinPath`): verbatim on Windows, unchanged elsewhere.
+fn native(path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(nc_platform::paths::long_win_path(path))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
 /// `QFile::rename`: fails when the destination exists.
 pub fn rename(origin: &str, destination: &str) -> Result<(), String> {
     // On a case-insensitive file system a rename that only changes the case
     // finds the destination: it is the file itself.
     let same_file_other_case = cfg!(any(windows, target_os = "macos"))
         && origin.to_lowercase() == destination.to_lowercase();
-    if !same_file_other_case && fs::symlink_metadata(destination).is_ok() {
+    if !same_file_other_case && fs::symlink_metadata(&*native(destination)).is_ok() {
         let e = "Destination file exists".to_owned();
         log::warn!(target: "nextcloud.sync.filesystem", "Error renaming file {origin} to {destination} failed: {e}");
         return Err(e);
     }
-    fs::rename(origin, destination).map_err(|e| {
+    fs::rename(&*native(origin), &*native(destination)).map_err(|e| {
         log::warn!(target: "nextcloud.sync.filesystem", "Error renaming file {origin} to {destination} failed: {e}");
         e.to_string()
     })
@@ -165,11 +175,11 @@ pub fn rename(origin: &str, destination: &str) -> Result<(), String> {
 
 /// `FileSystem::uncheckedRenameReplace`: rename, overwriting the destination.
 pub fn unchecked_rename_replace(origin: &str, destination: &str) -> Result<(), String> {
-    if file_exists(destination) && fs::remove_file(destination).is_err() {
+    if file_exists(destination) && fs::remove_file(&*native(destination)).is_err() {
         log::warn!(target: "nextcloud.sync.filesystem", "Target file could not be removed.");
         return Err("Target file could not be removed".to_owned());
     }
-    fs::rename(origin, destination).map_err(|e| {
+    fs::rename(&*native(origin), &*native(destination)).map_err(|e| {
         log::warn!(target: "nextcloud.sync.filesystem", "Renaming temp file to final failed: {e}");
         e.to_string()
     })
@@ -177,11 +187,11 @@ pub fn unchecked_rename_replace(origin: &str, destination: &str) -> Result<(), S
 
 /// `FileSystem::remove` (a file).
 pub fn remove(path: &str) -> Result<(), String> {
-    if fs::symlink_metadata(path).is_err() {
+    if fs::symlink_metadata(&*native(path)).is_err() {
         log::info!(target: "nextcloud.sync.filesystem", "{path} has been already deleted");
         return Ok(());
     }
-    fs::remove_file(path).map_err(|e| {
+    fs::remove_file(&*native(path)).map_err(|e| {
         log::warn!(target: "nextcloud.sync.filesystem", "{e} {path}");
         e.to_string()
     })

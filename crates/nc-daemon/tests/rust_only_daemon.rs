@@ -185,7 +185,7 @@ fn status_of(tx: &UnboundedSender<Event>) -> Option<()> {
 /// capability.
 // Pending on Windows: the fixture opens a second connection to the journal the engine
 // holds; SQLite's locks are per handle there (exclusive locking mode), per process on Unix.
-// macOS has no folder watcher yet, and this one detects the lock files through it.
+// macOS: the FSEvents stream ignores this process's own changes (IgnoreSelf), and the test creates the lock files itself.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn rust_only_daemon_locks_documents_opened_in_an_office_application() {

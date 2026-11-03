@@ -1,7 +1,9 @@
 // Upstream gates nothing here: `testfolderwatcher.cpp` runs on every system.
 // The Linux port (`testfolderwatcher.rs`) drives inotify; this one runs the
-// same scenarios against the Windows backend (`ReadDirectoryChangesW`).
-#![cfg(windows)]
+// same scenarios against the Windows backend (`ReadDirectoryChangesW`) and the
+// macOS one (FSEvents, created with `IgnoreSelf`: the file operations run as
+// child processes, like upstream's `system()` calls).
+#![cfg(any(windows, target_os = "macos"))]
 
 /*
  * SPDX-FileCopyrightText: 2021 Nextcloud GmbH and Nextcloud contributors
@@ -31,8 +33,22 @@ use nc_daemon::folder_watcher::{FolderWatcher, FolderWatcherEvent};
 use nc_platform::paths::from_long_win_path;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
+/// Runs `program args` (upstream's `system()`); on macOS the watcher ignores
+/// this process's own changes, so every file operation goes through a child.
+fn run(program: &str, args: &[&str]) {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{program} {args:?}");
+}
+
 fn touch(file: &str) {
-    // Like `touch` and `copy /b file +,,`: create, or bump the mtime.
+    if cfg!(target_os = "macos") {
+        run("touch", &[file]);
+        return;
+    }
+    // Like `copy /b file +,,`: create, or bump the mtime.
     let f = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -42,7 +58,46 @@ fn touch(file: &str) {
 }
 
 fn mkdir(file: &str) {
-    fs::create_dir(file).unwrap();
+    if cfg!(target_os = "macos") {
+        run("mkdir", &[file]);
+    } else {
+        fs::create_dir(file).unwrap();
+    }
+}
+
+fn mv(from: &str, to: &str) {
+    if cfg!(target_os = "macos") {
+        run("mv", &[from, to]);
+    } else {
+        fs::rename(from, to).unwrap();
+    }
+}
+
+fn rm(file: &str) {
+    if cfg!(target_os = "macos") {
+        run("rm", &[file]);
+    } else {
+        fs::remove_file(file).unwrap();
+    }
+}
+
+fn rmdir(file: &str) {
+    if cfg!(target_os = "macos") {
+        run("rmdir", &[file]);
+    } else {
+        fs::remove_dir(file).unwrap();
+    }
+}
+
+fn write_file(file: &str, content: &str) {
+    if cfg!(target_os = "macos") {
+        run(
+            "sh",
+            &["-c", &format!("printf '%s' '{content}' > '{file}'")],
+        );
+    } else {
+        fs::write(file, content).unwrap();
+    }
 }
 
 fn write_random_file(path: &str) {
@@ -137,7 +192,7 @@ async fn test_a_create() {
         let mut t = TestFolderWatcher::new();
         t.init().await;
         let file = format!("{}/foo.txt", t.root_path);
-        fs::write(&file, "xyz\n").unwrap();
+        write_file(&file, "xyz");
         assert!(t.wait_for_path_changed(&file).await);
     })
     .await;
@@ -166,7 +221,7 @@ async fn test_move3_level_dir_with_file() {
         mkdir(&format!("{root}/a0/b"));
         mkdir(&format!("{root}/a0/b/c"));
         touch(&file);
-        fs::rename(format!("{root}/a0"), format!("{root}/a")).unwrap();
+        mv(&format!("{root}/a0"), &format!("{root}/a"));
         assert!(
             t.wait_for_path_changed(&format!("{root}/a/b/c/empty.txt"))
                 .await
@@ -198,7 +253,7 @@ async fn test_remove_a_dir() {
         let mut t = TestFolderWatcher::new();
         t.init().await;
         let file = format!("{}/a1/b3/c3", t.root_path);
-        fs::remove_dir(&file).unwrap();
+        rmdir(&file);
         assert!(t.wait_for_path_changed(&file).await);
     })
     .await;
@@ -211,7 +266,7 @@ async fn test_remove_a_file() {
         t.init().await;
         let file = format!("{}/a1/b2/todelete.bin", t.root_path);
         assert!(exists(&file));
-        fs::remove_file(&file).unwrap();
+        rm(&file);
         assert!(!exists(&file));
         assert!(t.wait_for_path_changed(&file).await);
     })
@@ -225,7 +280,7 @@ async fn test_rename_a_file() {
         t.init().await;
         let file1 = format!("{}/a2/renamefile", t.root_path);
         let file2 = format!("{}/a2/renamefile.renamed", t.root_path);
-        fs::rename(&file1, &file2).unwrap();
+        mv(&file1, &file2);
         assert!(t.wait_for_path_changed(&file1).await);
         assert!(t.wait_for_path_changed(&file2).await);
     })
@@ -239,7 +294,7 @@ async fn test_move_a_file() {
         t.init().await;
         let old_file = format!("{}/a1/movefile", t.root_path);
         let new_file = format!("{}/a2/movefile.renamed", t.root_path);
-        fs::rename(&old_file, &new_file).unwrap();
+        mv(&old_file, &new_file);
         assert!(t.wait_for_path_changed(&old_file).await);
         assert!(t.wait_for_path_changed(&new_file).await);
     })
@@ -254,7 +309,7 @@ async fn test_rename_directory_same_and_different_base() {
         let root = t.root_path.clone();
         // testRenameDirectorySameBase
         let (old_dir, new_dir) = (format!("{root}/a1/b1"), format!("{root}/a1/brename"));
-        fs::rename(&old_dir, &new_dir).unwrap();
+        mv(&old_dir, &new_dir);
         assert!(t.wait_for_path_changed(&old_dir).await);
         assert!(t.wait_for_path_changed(&new_dir).await);
         // Verify that further notifications end up with the correct paths
@@ -268,7 +323,7 @@ async fn test_rename_directory_same_and_different_base() {
         // testRenameDirectoryDifferentBase
         t.init().await;
         let (old_dir, new_dir) = (format!("{root}/a1/brename"), format!("{root}/bren"));
-        fs::rename(&old_dir, &new_dir).unwrap();
+        mv(&old_dir, &new_dir);
         assert!(t.wait_for_path_changed(&old_dir).await);
         assert!(t.wait_for_path_changed(&new_dir).await);
         let file = format!("{root}/bren/c1/random.bin");
@@ -281,6 +336,7 @@ async fn test_rename_directory_same_and_different_base() {
     .await;
 }
 
+#[cfg(windows)]
 /// A trailing dot or space is kept by the verbatim paths of the watcher
 /// (the reported name is the one the file system has).
 #[tokio::test]

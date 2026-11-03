@@ -134,15 +134,20 @@ pub fn set_mod_time(path: &str, mod_time: i64) -> bool {
     }
 }
 
-/// `FileSystem::setFileReadOnly`: the read-only attribute.
+/// `FileSystem::setFileReadOnly`: the read-only attribute, and the ACL
+/// that makes the object read-only (read-only: replace any existing deny ACE
+/// with one that still lets us change the attributes; read-write: remove the
+/// deny ACEs, they could block clearing the attribute).
 pub fn set_file_read_only(path: &str, readonly: bool) {
     let native = long_win_path(path);
-    if let Ok(md) = fs::metadata(&native) {
-        let mut perms = md.permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(readonly);
-        let _ = fs::set_permissions(&native, perms);
-    }
+    let Ok(md) = fs::metadata(&native) else {
+        return;
+    };
+    nc_platform::windows::set_acl_permission(path, readonly);
+    let mut perms = md.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(readonly);
+    let _ = fs::set_permissions(&native, perms);
 }
 
 /// `FileSystem::setFileReadOnlyWeak`: only makes writable when the file is
@@ -158,22 +163,30 @@ pub fn set_file_read_only_weak(path: &str, readonly: bool) -> bool {
     true
 }
 
-/// `FileSystem::setFolderPermissions`. Upstream writes a deny ACE into the
-/// DACL of the folder (`setAclPermission`); that part is not ported yet, so
-/// a folder is never made read-only here and the call reports success.
+/// `FileSystem::setFolderPermissions` (Windows): the files' read-only
+/// attribute and ACL of the folder object, then a deny ACE (or none) in the
+/// folder's DACL. As upstream, the change is always reported.
 pub fn set_folder_permissions_changed(
     path: &str,
-    _permissions: super::FolderPermissions,
+    permissions: super::FolderPermissions,
     permissions_changed: &mut bool,
 ) -> bool {
     *permissions_changed = false;
-    fs::metadata(long_win_path(path)).is_ok()
+    if fs::metadata(long_win_path(path)).is_err() {
+        return false;
+    }
+    let read_only = permissions == super::FolderPermissions::ReadOnly;
+    // current read-only folder ACL needs to be removed from files also when
+    // making a folder read-write
+    set_file_read_only(path, read_only);
+    nc_platform::windows::set_acl_permission(path, read_only);
+    *permissions_changed = true;
+    true
 }
 
-/// `FileSystem::isFolderReadOnly` (upstream reads the DACL; see
-/// [`set_folder_permissions_changed`]).
-pub fn is_folder_read_only(_path: &str) -> bool {
-    false
+/// `FileSystem::isFolderReadOnly`: an access denied ACE in the DACL.
+pub fn is_folder_read_only(path: &str) -> bool {
+    nc_platform::windows::has_access_denied_ace(path)
 }
 
 /// `FileSystem::isFileLocked`: opens the file with the share mode of `mode`

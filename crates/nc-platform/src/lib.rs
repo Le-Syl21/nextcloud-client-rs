@@ -26,3 +26,18 @@ pub use fd::register_async_fd;
 
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
+
+/// What a directory watcher backend reports (upstream's `WatcherThread`
+/// signals on Windows and the FSEvents callback on macOS).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirEvent {
+    /// `ready()`: the watcher is armed.
+    Ready,
+    /// `changed(path)`: an absolute, `/`-separated path.
+    Changed(String),
+    /// `lostChanges()`: notifications were lost; rescan.
+    LostChanges,
+}
