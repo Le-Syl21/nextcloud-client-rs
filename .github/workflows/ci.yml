@@ -198,7 +198,7 @@ jobs:
           path: dl/SHA256SUMS
 
   release:
-    needs: [lint, build, checksums]
+    needs: [lint, build, portable, checksums]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
