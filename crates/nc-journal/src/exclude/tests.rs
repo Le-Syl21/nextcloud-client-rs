@@ -953,6 +953,8 @@ fn rust_only_pcre_translation_keeps_pcre_semantics() {
     assert!(re("^[[:digit:]]$").is_match("7"));
 }
 
+// "Icon\r": a carriage return is an invalid character on Windows.
+#[cfg(not(windows))]
 #[test]
 fn rust_only_default_list_patterns_all_compile() {
     let mut ex = ExcludedFiles::default();

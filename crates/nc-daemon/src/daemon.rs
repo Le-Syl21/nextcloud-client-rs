@@ -37,10 +37,11 @@ impl FolderWatcherHandle for FolderWatcher {
     }
 }
 
-/// The inotify folder watcher (`Folder::registerFolderWatcher`): the
+/// The platform's folder watcher (`Folder::registerFolderWatcher`): inotify
+/// on Linux, `ReadDirectoryChangesW` on Windows: the
 /// watcher, its notification and permission self-tests, and a task
 /// forwarding its signals to the queue.
-pub fn inotify_watcher_factory() -> WatcherFactory {
+pub fn default_watcher_factory() -> WatcherFactory {
     Rc::new(|id, path, files_lock_available, tx| {
         let (wtx, mut wrx) = tokio::sync::mpsc::unbounded_channel::<FolderWatcherEvent>();
         let mut watcher = FolderWatcher::new(wtx);

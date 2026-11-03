@@ -339,7 +339,9 @@ impl<'a> AccountSetupFromCommandLineJob<'a> {
         if local_dir_path.is_empty() {
             local_dir_path = DEFAULT_CLIENT_FOLDER.to_owned();
             if !Path::new(&local_dir_path).is_absolute() {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = dirs::home_dir()
+                    .map(|h| h.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
                 local_dir_path = format!("{home}/{local_dir_path}");
             }
         }

@@ -220,8 +220,8 @@ The functions whose subject is ported are ported where that code lives.
 | testNormalizeEtag | `nc-sync … test_normalize_etag` | ported |
 | testFullRemotePathToRemoteSyncRootRelative | `nc-sync … test_full_remote_path_to_remote_sync_root_relative` | ported |
 | testFormatFingerprint, testLaunchOnStartup, testTimeAgo, testSetupFavLink | — | n/a (GUI / desktop integration helpers) |
-| testFileNamesEqual | — | n/a (`fileNamesEqual` is only used by the GUI folder watcher) |
-| testIsPathWindowsDrivePartitionRoot | — | n/a (Windows only; the function is not needed on Linux) |
+| testFileNamesEqual | `nc-daemon … folder_watcher::file_names_equal` (via the watcher tests) | adapted (the function lives in the folder watcher; the case-insensitive branch runs on Windows and macOS, covered by `testfolderwatcher_native.rs`) |
+| testIsPathWindowsDrivePartitionRoot | `nc-platform … paths::tests::drive_partition_root` | ported (the function is pure, so it runs on every system) |
 | testExpandCommandLineOptionValues_data + testExpandCommandLineOptionValues | `crates/ncsync/src/main.rs::tests::test_expand_command_line_option_values` | ported (13 rows; `cmd.cpp` applies it before parsing, so does `ncsync`) |
 
 ## test/testnetrcparser.cpp → `crates/ncsync/src/netrc.rs` (tests module)
@@ -555,7 +555,7 @@ The file keeps upstream's LGPL-2.1-or-later csync header.
 | Upstream | Rust | Status |
 |---|---|---|
 | initTestCase | — | n/a (test setup) |
-| check_long_win_path | — | n/a (Windows-only, `FileSystem::pathtoUNC`) |
+| check_long_win_path | `nc-platform … paths::tests::long_win` | ported (`long_win_path` is pure; the Windows part of `testLongPathStat` runs in the Windows VM and on the `windows-2025` runner) |
 | testLongPathStat (+_data: long, long emoji, long russian, long arabic, long chinese) | test_long_path_stat | ported (against `nc_sync::filesystem::csync_vio_local_stat`) |
 
 ## test/testchunkingng.cpp → `crates/nc-testutils/tests/testchunkingng.rs`
@@ -632,6 +632,14 @@ null parent `()`), whose inotify calls go through the `InotifySys` seam.
 | cleanupTestCase | — | n/a (tempdir cleanup is automatic) |
 
 ## test/testfolderwatcher.cpp → `crates/nc-daemon/tests/testfolderwatcher.rs`
+
+Windows: `crates/nc-daemon/tests/testfolderwatcher_native.rs` runs
+`testACreate`, `testATouch`, `testMove3LevelDirWithFile`, `testCreateADir`,
+`testRemoveADir`, `testRemoveAFile`, `testRenameAFile`, `testMoveAFile`,
+`testRenameDirectorySameBase` and `testRenameDirectoryDifferentBase` against
+the `ReadDirectoryChangesW` backend (plus a trailing-dot name of our own).
+`testDetectLockFiles*` and the watch count stay with the Linux port. macOS has
+no backend yet.
 
 Upstream runs the functions in order on one tree and one watcher; each Rust
 test builds the fixture, runs the `init()` check, the body and the

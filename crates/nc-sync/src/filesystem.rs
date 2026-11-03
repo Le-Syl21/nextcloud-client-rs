@@ -13,12 +13,27 @@
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use nc_journal::csync::ItemType;
 
 pub mod lock_file;
+
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use unix as sys;
+#[cfg(windows)]
+use windows as sys;
+
+pub use sys::{
+    csync_vio_local_readdir, csync_vio_local_stat, free_disk_space, is_file_locked_mode,
+    is_folder_read_only, is_writable, set_file_hidden, set_file_read_only, set_file_read_only_weak,
+    set_folder_permissions_changed, set_mod_time,
+};
 
 pub use lock_file::{
     FileLockingInfo, FileLockingType, file_path_lock_file_pattern_match,
@@ -41,33 +56,6 @@ pub struct FileStat {
     pub is_metadata_missing: bool,
 }
 
-/// `_csync_vio_local_stat_mb`: `lstat` mapped to a [`FileStat`]. `None` when
-/// `lstat` fails.
-pub fn csync_vio_local_stat(path: &str, check_permissions_validity: bool) -> Option<FileStat> {
-    let md = fs::symlink_metadata(path).ok()?;
-    let ft = md.file_type();
-    let item_type = if ft.is_dir() {
-        ItemType::Directory
-    } else if ft.is_file() {
-        ItemType::File
-    } else if ft.is_symlink() || std::os::unix::fs::FileTypeExt::is_socket(&ft) {
-        ItemType::SoftLink
-    } else {
-        ItemType::Skip
-    };
-    let mut st = FileStat {
-        item_type,
-        inode: md.ino(),
-        modtime: md.mtime(),
-        size: md.size() as i64,
-        ..FileStat::default()
-    };
-    if check_permissions_validity {
-        st.is_permissions_invalid = md.mode() & 0o002 == 0o002;
-    }
-    Some(st)
-}
-
 /// Why opening a directory for listing failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpendirError {
@@ -79,53 +67,6 @@ pub enum OpendirError {
     NotADirectory,
     /// Anything else.
     Other,
-}
-
-/// `csync_vio_local_opendir` + `readdir` loop: the entries of a directory
-/// (without `.` and `..`), each stat'ed like `csync_vio_local_readdir`.
-/// Entries whose stat fails get [`ItemType::Skip`].
-pub fn csync_vio_local_readdir(
-    path: &str,
-    check_permissions_validity: bool,
-) -> Result<Vec<FileStat>, OpendirError> {
-    let rd = fs::read_dir(path).map_err(|e| match e.raw_os_error() {
-        Some(13) => OpendirError::AccessDenied,
-        Some(2) => OpendirError::NotFound,
-        Some(20) => OpendirError::NotADirectory,
-        _ => OpendirError::Other,
-    })?;
-    let mut out = Vec::new();
-    for entry in rd {
-        let entry = entry.map_err(|_| OpendirError::Other)?;
-        let name = std::os::unix::ffi::OsStrExt::as_bytes(entry.file_name().as_os_str()).to_vec();
-        let full = format!(
-            "{}/{}",
-            path.trim_end_matches('/'),
-            String::from_utf8_lossy(&name)
-        );
-        // d_type first, then lstat (which overrides it).
-        let mut st = match entry.file_type() {
-            Ok(ft) if ft.is_dir() => FileStat {
-                item_type: ItemType::Directory,
-                ..FileStat::default()
-            },
-            Ok(ft) if ft.is_file() => FileStat {
-                item_type: ItemType::File,
-                ..FileStat::default()
-            },
-            _ => FileStat::default(),
-        };
-        if std::str::from_utf8(&name).is_ok() {
-            match csync_vio_local_stat(&full, check_permissions_validity) {
-                Some(s) => st = s,
-                // Will get excluded by _csync_detect_update.
-                None => st.item_type = ItemType::Skip,
-            }
-        }
-        st.name = name;
-        out.push(st);
-    }
-    Ok(out)
 }
 
 /// `FileSystem::fileExists` (follows symlinks, like `QFileInfo::exists`).
@@ -148,11 +89,6 @@ pub fn is_sym_link(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
-/// `FileSystem::isWritable` (`QFileInfo::isWritable`).
-pub fn is_writable(path: &str) -> bool {
-    rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
-}
-
 /// `FileSystem::isLnkFile`.
 pub fn is_lnk_file(filename: &str) -> bool {
     filename.ends_with(".lnk")
@@ -173,30 +109,11 @@ pub fn get_mod_time(path: &str) -> i64 {
     match csync_vio_local_stat(path, true) {
         Some(st) if st.modtime != 0 => st.modtime,
         _ => {
-            let t = fs::metadata(path).map(|m| m.mtime()).unwrap_or(-1);
+            let t = fs::metadata(path)
+                .map(|m| sys::metadata_mtime(&m))
+                .unwrap_or(-1);
             log::warn!(target: "nextcloud.sync.filesystem", "Could not get modification time for {path} with csync, using QFileInfo: {t}");
             t
-        }
-    }
-}
-
-/// `FileSystem::setModTime` (`c_utimes`: access and modification time).
-pub fn set_mod_time(path: &str, mod_time: i64) -> bool {
-    let ts = rustix::fs::Timestamps {
-        last_access: rustix::fs::Timespec {
-            tv_sec: mod_time,
-            tv_nsec: 0,
-        },
-        last_modification: rustix::fs::Timespec {
-            tv_sec: mod_time,
-            tv_nsec: 0,
-        },
-    };
-    match rustix::fs::utimensat(rustix::fs::CWD, path, &ts, rustix::fs::AtFlags::empty()) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!(target: "nextcloud.sync.filesystem", "Error setting mtime for {path} failed: {e}");
-            false
         }
     }
 }
@@ -231,7 +148,11 @@ pub fn verify_file_unchanged(path: &str, previous_size: i64, previous_mtime: i64
 
 /// `QFile::rename`: fails when the destination exists.
 pub fn rename(origin: &str, destination: &str) -> Result<(), String> {
-    if fs::symlink_metadata(destination).is_ok() {
+    // On a case-insensitive file system a rename that only changes the case
+    // finds the destination: it is the file itself.
+    let same_file_other_case = cfg!(any(windows, target_os = "macos"))
+        && origin.to_lowercase() == destination.to_lowercase();
+    if !same_file_other_case && fs::symlink_metadata(destination).is_ok() {
         let e = "Destination file exists".to_owned();
         log::warn!(target: "nextcloud.sync.filesystem", "Error renaming file {origin} to {destination} failed: {e}");
         return Err(e);
@@ -266,52 +187,23 @@ pub fn remove(path: &str) -> Result<(), String> {
     })
 }
 
-/// The write permissions `setFileReadOnly(false)` adds (`getDefaultWritePermissions`).
-fn default_write_permissions() -> u32 {
-    use std::sync::OnceLock;
-    static PERMS: OnceLock<u32> = OnceLock::new();
-    *PERMS.get_or_init(|| {
-        let mask = rustix::process::umask(rustix::fs::Mode::empty());
-        rustix::process::umask(mask);
-        let mask = mask.bits();
-        let mut result = 0o200;
-        if mask & 0o020 == 0 {
-            result |= 0o020;
-        }
-        if mask & 0o002 == 0 {
-            result |= 0o002;
-        }
-        result
-    })
+/// `FileSystem::LockMode`: how `isFileLocked` probes (the share mode of
+/// the probing handle on Windows).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LockMode {
+    /// Nobody else may have the file open.
+    #[default]
+    Exclusive,
+    /// Others may read and write.
+    Shared,
+    /// Others may read and write, the probe only reads.
+    SharedRead,
 }
 
-fn mode(path: &str) -> Option<u32> {
-    fs::metadata(path).ok().map(|m| m.permissions().mode())
-}
-
-/// `FileSystem::setFileReadOnly`.
-pub fn set_file_read_only(path: &str, readonly: bool) {
-    let Some(m) = mode(path) else {
-        return;
-    };
-    let mut m = m & !0o222;
-    if !readonly {
-        m |= default_write_permissions();
-    }
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(m));
-}
-
-/// `FileSystem::setFileReadOnlyWeak`: only makes writable when the owner
-/// cannot write. Returns whether permissions were changed.
-pub fn set_file_read_only_weak(path: &str, readonly: bool) -> bool {
-    let Some(m) = mode(path) else {
-        return false;
-    };
-    if !readonly && m & 0o200 != 0 {
-        return false; // already writable enough
-    }
-    set_file_read_only(path, readonly);
-    true
+/// `FileSystem::isFileLocked(fileName)` (exclusive mode): only Windows has
+/// mandatory locks.
+pub fn is_file_locked(path: &str) -> bool {
+    is_file_locked_mode(path, LockMode::Exclusive)
 }
 
 /// `FileSystem::FolderPermissions`.
@@ -324,37 +216,6 @@ pub enum FolderPermissions {
 /// `FileSystem::setFolderPermissions` (Unix).
 pub fn set_folder_permissions(path: &str, permissions: FolderPermissions) -> bool {
     set_folder_permissions_changed(path, permissions, &mut false)
-}
-
-/// `FileSystem::setFolderPermissions(path, permissions, &permissionsChanged)`:
-/// `permissions_changed` tells whether the mode was modified.
-pub fn set_folder_permissions_changed(
-    path: &str,
-    permissions: FolderPermissions,
-    permissions_changed: &mut bool,
-) -> bool {
-    *permissions_changed = false;
-    let Some(current) = mode(path) else {
-        log::warn!(target: "nextcloud.sync.filesystem", "exception when modifying folder permissions - path: {path}");
-        return false;
-    };
-    let new = match permissions {
-        FolderPermissions::ReadOnly => current & !0o222,
-        FolderPermissions::ReadWrite => (current & !0o002) | 0o200,
-    };
-    if new != current {
-        if fs::set_permissions(path, fs::Permissions::from_mode(new)).is_err() {
-            log::warn!(target: "nextcloud.sync.filesystem", "exception when modifying folder permissions - path: {path}");
-            return false;
-        }
-        *permissions_changed = true;
-    }
-    true
-}
-
-/// `FileSystem::isFolderReadOnly` (Unix): the owner cannot write.
-pub fn is_folder_read_only(path: &str) -> bool {
-    mode(path).is_some_and(|m| m & 0o200 != 0o200)
 }
 
 /// `FileSystem::FilePermissionsRestore`: temporarily gives a folder the
@@ -397,18 +258,12 @@ impl Drop for FilePermissionsRestore {
 pub fn parent_dir(path: &str) -> String {
     match path.trim_end_matches('/').rfind('/') {
         Some(0) => "/".to_owned(),
+        // "C:/name": the parent is the drive root
+        Some(2) if cfg!(windows) && path.as_bytes()[1] == b':' => path[..3].to_owned(),
         Some(i) => path[..i].to_owned(),
         None => ".".to_owned(),
     }
 }
-
-/// `FileSystem::isFileLocked`: only Windows has mandatory locks.
-pub fn is_file_locked(_path: &str) -> bool {
-    false
-}
-
-/// `FileSystem::setFileHidden`: a no-op outside Windows.
-pub fn set_file_hidden(_path: &str, _hidden: bool) {}
 
 /// `FileSystem::fileEquals`: same content.
 pub fn file_equals(a: &str, b: &str) -> bool {
@@ -491,14 +346,6 @@ pub fn mkpath(path: &str) -> bool {
     fs::create_dir_all(path).is_ok()
 }
 
-/// `Utility::freeDiskSpace`: available bytes, -1 if unknown.
-pub fn free_disk_space(path: &str) -> i64 {
-    match rustix::fs::statvfs(path) {
-        Ok(s) => (s.f_bavail as i64).saturating_mul(s.f_frsize as i64),
-        Err(_) => -1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,7 +363,12 @@ mod tests {
         assert!(verify_file_unchanged(&p, 5, 1_000_000));
         assert!(!verify_file_unchanged(&p, 6, 1_000_000));
         let link = format!("{}/l", dir.path().display());
+        // Creating a symlink needs a privilege on Windows.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&p, &link).unwrap();
+        #[cfg(not(unix))]
+        fs::write(&link, b"x").unwrap();
+        #[cfg(unix)]
         assert_eq!(
             csync_vio_local_stat(&link, true).unwrap().item_type,
             ItemType::SoftLink
@@ -529,8 +381,11 @@ mod tests {
         assert_eq!(parent_dir("/a"), "/");
     }
 
+    // The folder permissions of Windows are ACLs, not ported yet.
+    #[cfg(unix)]
     #[test]
     fn derived_read_only_helpers() {
+        use super::unix::mode;
         let dir = tempfile::tempdir().unwrap();
         let d = format!("{}/d", dir.path().display());
         fs::create_dir(&d).unwrap();

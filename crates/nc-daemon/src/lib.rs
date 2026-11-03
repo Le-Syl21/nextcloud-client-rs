@@ -32,5 +32,6 @@ pub mod startup;
 pub mod sync_result;
 pub mod takeover;
 pub mod timer;
+pub mod transport;
 pub mod tray_status;
 pub mod ui_event;

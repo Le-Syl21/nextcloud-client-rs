@@ -110,7 +110,7 @@ fn pause_and_resume(engine: &dyn EngineClient, sub: &mut Subscription) {
 
 fn wait_listening(socket: &Path) {
     let deadline = Instant::now() + TIMEOUT;
-    while std::os::unix::net::UnixStream::connect(socket).is_err() {
+    while nc_daemon::transport::connect(socket).is_err() {
         assert!(Instant::now() < deadline, "the endpoint does not listen");
         std::thread::sleep(Duration::from_millis(20));
     }

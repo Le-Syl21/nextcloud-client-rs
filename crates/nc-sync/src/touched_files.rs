@@ -101,33 +101,7 @@ impl TouchedFiles {
 /// `QDir::cleanPath`: collapses `//`, resolves `.` and `..`, drops a
 /// trailing '/' (except for the root).
 pub fn clean_path(p: &str) -> String {
-    let absolute = p.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in p.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|l| *l != "..") {
-                    parts.pop();
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            s => parts.push(s),
-        }
-    }
-    let joined = parts.join("/");
-    if absolute {
-        format!("/{joined}")
-    } else if joined.is_empty() {
-        if p.is_empty() {
-            String::new()
-        } else {
-            ".".to_owned()
-        }
-    } else {
-        joined
-    }
+    nc_platform::paths::clean_path(p)
 }
 
 #[cfg(test)]

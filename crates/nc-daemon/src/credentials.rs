@@ -180,6 +180,28 @@ pub trait SecretStore: Send + Sync {
     /// Items whose attributes contain all of `attributes` (Secret Service
     /// search, used to read QtKeychain items).
     fn search(&self, attributes: &[(&str, &str)]) -> Result<Vec<FoundSecret>, CredentialsError>;
+    /// The secret QtKeychain stored for the official client under `key`
+    /// (`WebFlowCredentials`' keychain key), as raw bytes with the base64
+    /// layer removed; `None` when there is none.
+    ///
+    /// The default is the Linux (libsecret) layout: attribute `server` =
+    /// `Nextcloud` (the app name), attribute `user` = `key`, attribute
+    /// `type` = `plaintext` or `base64`. Windows (Credential Manager,
+    /// target `Nextcloud_<key>`) and macOS (generic password, service
+    /// `Nextcloud`, account `key`) have their own layouts in
+    /// [`KeyringStore`].
+    fn official_item(&self, key: &str) -> Result<Option<Vec<u8>>, CredentialsError> {
+        let found = self.search(&[("user", key), ("server", APP_NAME)])?;
+        Ok(found.into_iter().next().map(|item| {
+            if item.attributes.get("type").is_some_and(|t| t == "base64") {
+                base64::engine::general_purpose::STANDARD
+                    .decode(item.secret.trim_ascii())
+                    .unwrap_or_default()
+            } else {
+                item.secret
+            }
+        }))
+    }
 }
 
 fn store_error(e: keyring_core::Error) -> CredentialsError {
@@ -197,8 +219,25 @@ pub struct KeyringStore {
 }
 
 impl KeyringStore {
+    /// The credential store of the platform: the Secret Service on Linux
+    /// and the BSDs, the Credential Manager on Windows, the login keychain
+    /// on macOS.
+    pub fn native() -> Result<Self, CredentialsError> {
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        return Self::secret_service();
+        #[cfg(windows)]
+        return windows_native_keyring_store::Store::new()
+            .map(|store| Self { store })
+            .map_err(|e| CredentialsError::StoreUnavailable(e.to_string()));
+        #[cfg(target_os = "macos")]
+        return apple_native_keyring_store::keychain::Store::new()
+            .map(|store| Self { store })
+            .map_err(|e| CredentialsError::StoreUnavailable(e.to_string()));
+    }
+
     /// The Secret Service of the session (gnome-keyring, KWallet's
     /// Secret Service API, KeePassXC, ...), via D-Bus.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     pub fn secret_service() -> Result<Self, CredentialsError> {
         let store = zbus_secret_service_keyring_store::Store::new()
             .map_err(|e| CredentialsError::StoreUnavailable(e.to_string()))?;
@@ -245,6 +284,42 @@ impl SecretStore for KeyringStore {
             out.push(FoundSecret { attributes, secret });
         }
         Ok(out)
+    }
+
+    /// QtKeychain on Windows: a generic credential whose target name is
+    /// `Nextcloud_<key>` (QtKeychain up to 0.16 ignores the service, so the
+    /// official client adds the app name itself,
+    /// `abstractcredentials.cpp:49-59`) or `<key>@Nextcloud` (0.17 and
+    /// later), and whose blob is the UTF-8 password: it is read as raw
+    /// bytes, `get_password` would decode UTF-16.
+    #[cfg(windows)]
+    fn official_item(&self, key: &str) -> Result<Option<Vec<u8>>, CredentialsError> {
+        for target in [format!("{APP_NAME}_{key}"), format!("{key}@{APP_NAME}")] {
+            let mods = HashMap::from([("target", target.as_str())]);
+            let entry = self
+                .store
+                .build(APP_NAME, key, Some(&mods))
+                .map_err(store_error)?;
+            match entry.get_secret() {
+                Ok(secret) => return Ok(Some(secret)),
+                Err(keyring_core::Error::NoEntry) => {}
+                Err(e) => return Err(store_error(e)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// QtKeychain on macOS: a generic password, service `Nextcloud`,
+    /// account `key`, raw bytes. Reading it from another binary asks the
+    /// user for access (the item's ACL).
+    #[cfg(target_os = "macos")]
+    fn official_item(&self, key: &str) -> Result<Option<Vec<u8>>, CredentialsError> {
+        let entry = self.store.build(APP_NAME, key, None).map_err(store_error)?;
+        match entry.get_secret() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
+            Err(e) => Err(store_error(e)),
+        }
     }
 }
 
@@ -523,29 +598,30 @@ fn write_secret_file(
     secret: &AppPassword,
 ) -> Result<(), CredentialsError> {
     use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     let werr = |source| CredentialsError::WriteFile {
         path: path.to_owned(),
         source,
     };
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(werr)?;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(werr)?;
+    let mut dirs = std::fs::DirBuilder::new();
+    dirs.recursive(true);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Private to the user; on Windows the files inherit the ACL of the
+    // profile directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+        dirs.mode(0o700);
+        options.mode(0o600);
+    }
+    dirs.create(dir).map_err(werr)?;
+    let mut f = options.open(path).map_err(werr)?;
     writeln!(f, "{}", secret.expose()).map_err(werr)
 }
 
 /// Reads the official client's app password for `acc` (an account of the
-/// official configuration, with its own id) from the Secret Service, as
-/// QtKeychain stored it: attribute `server` = `Nextcloud` (the app name),
+/// official configuration, with its own id) from the credential store, as
+/// QtKeychain stored it (Linux layout: attribute `server` = `Nextcloud` (the app name),
 /// attribute `user` = the keychain key, attribute `type` = `plaintext` or
 /// `base64`. Tried in order: the `WebFlowCredentials` password
 /// (`<user>:<url>/:<id>`), the copy written by `writeAppPasswordOnce`
@@ -571,16 +647,7 @@ pub fn official_client_app_password(
         keychain_key(&url, &user, ""),
     ];
     for key in candidates.into_iter().flatten() {
-        let found = store.search(&[("user", key.as_str()), ("server", APP_NAME)])?;
-        if let Some(item) = found.into_iter().next() {
-            let is_base64 = item.attributes.get("type").is_some_and(|t| t == "base64");
-            let bytes = if is_base64 {
-                base64::engine::general_purpose::STANDARD
-                    .decode(item.secret.trim_ascii())
-                    .unwrap_or_default()
-            } else {
-                item.secret
-            };
+        if let Some(bytes) = store.official_item(&key)? {
             let secret = String::from_utf8_lossy(&bytes).into_owned();
             if !secret.is_empty() {
                 log::info!(target: "nextcloud.sync.credentials", "Found the official client's app password for account {} ({user})", acc.id);
@@ -748,7 +815,11 @@ mod tests {
             .unwrap();
         let path = dir.path().join("credentials/ncsyncd-3");
         assert_eq!(src, CredentialSource::PasswordFile(path.clone()));
-        assert_eq!(acc.password_file.as_deref(), Some(path.to_str().unwrap()));
+        assert_eq!(
+            acc.password_file.as_deref().map(std::path::Path::new),
+            Some(path.as_path())
+        );
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(
@@ -822,7 +893,7 @@ mod tests {
     #[test]
     #[ignore = "needs a session Secret Service; writes a test entry"]
     fn derived_secret_service_round_trip() {
-        let store = KeyringStore::secret_service().unwrap();
+        let store = KeyringStore::native().unwrap();
         let key = "ncsyncd-test:https://example.invalid/:999";
         store.set(KEYRING_SERVICE, key, "test-secret").unwrap();
         assert_eq!(

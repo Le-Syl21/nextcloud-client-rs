@@ -153,8 +153,9 @@ pub fn unescape_alias(alias: &str) -> String {
 
 /// `Utility::trailingSlashPath`.
 fn trailing_slash_path(path: &str) -> String {
+    let path = nc_platform::paths::to_slash(path);
     if path.ends_with('/') {
-        path.to_owned()
+        path
     } else {
         format!("{path}/")
     }
@@ -180,7 +181,7 @@ impl FolderDefinition {
     /// `absoluteJournalPath()`: the journal path relative to the local path
     /// (`QDir(localPath).filePath(journalPath)`).
     pub fn absolute_journal_path(&self) -> String {
-        if self.journal_path.starts_with('/') {
+        if nc_platform::paths::is_absolute(&self.journal_path) {
             return self.journal_path.clone();
         }
         if self.journal_path.is_empty() {
@@ -596,7 +597,7 @@ pub struct ExistingFolder {
 /// configured one when it cannot be resolved), with a trailing `/`.
 pub fn folder_canonical_path(local_path: &str) -> String {
     let p = std::fs::canonicalize(local_path)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| nc_platform::paths::from_native(&p.to_string_lossy()))
         .unwrap_or_else(|_| {
             log::warn!(target: "nextcloud.gui.folder", "Broken symlink: {local_path}");
             local_path.to_owned()
@@ -606,32 +607,7 @@ pub fn folder_canonical_path(local_path: &str) -> String {
 
 /// `QDir::cleanPath` for absolute or relative `/` paths.
 pub fn clean_path(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-    let absolute = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for c in path.split('/') {
-        match c {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|l| *l != "..") {
-                    parts.pop();
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            c => parts.push(c),
-        }
-    }
-    let joined = parts.join("/");
-    if absolute {
-        format!("/{joined}")
-    } else if joined.is_empty() {
-        ".".to_owned()
-    } else {
-        joined
-    }
+    nc_platform::paths::clean_path(path)
 }
 
 /// `QFileInfo(path)`: (`dir().path()`, `fileName()`).
@@ -639,6 +615,10 @@ fn split_file_info(path: &str) -> (String, String) {
     match path.rfind('/') {
         None => (".".to_owned(), path.to_owned()),
         Some(0) => ("/".to_owned(), path[1..].to_owned()),
+        // "C:/name": the parent is the drive root
+        Some(2) if cfg!(windows) && path.as_bytes()[1] == b':' => {
+            (path[..3].to_owned(), path[3..].to_owned())
+        }
         Some(i) => (path[..i].to_owned(), path[i + 1..].to_owned()),
     }
 }
@@ -654,7 +634,7 @@ fn canonical_path(path: &str) -> String {
         return format!("{}/{name}", canonical_path(&parent));
     }
     std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| nc_platform::paths::from_native(&p.to_string_lossy()))
         .unwrap_or_default()
 }
 
@@ -674,7 +654,7 @@ fn number_of_sync_journals(path: &str) -> usize {
 }
 
 fn is_writable(path: &str) -> bool {
-    rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
+    nc_sync::filesystem::is_writable(path)
 }
 
 /// `checkPathValidityRecursive`.
@@ -807,7 +787,7 @@ pub fn find_good_path_for_new_sync_folder(
     // possibly find a valid sync folder inside it.
     let (parent, _) = split_file_info(base_path);
     let parent_canonical = std::fs::canonicalize(&parent)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| nc_platform::paths::from_native(&p.to_string_lossy()))
         .unwrap_or_default();
     if folder_for_path(&parent_canonical, existing).is_some() {
         return base_path.to_owned();

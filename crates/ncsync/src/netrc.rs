@@ -23,7 +23,12 @@ impl NetrcParser {
     pub fn new(file: Option<&str>) -> Self {
         let netrc_location = match file {
             Some(f) if !f.is_empty() => f.to_owned(),
-            _ => format!("{}/.netrc", std::env::var("HOME").unwrap_or_default()),
+            _ => format!(
+                "{}/.netrc",
+                dirs::home_dir()
+                    .map(|h| h.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default()
+            ),
         };
         Self {
             netrc_location,

@@ -72,7 +72,7 @@ impl Context {
     /// only when a secret has to be read or written there).
     pub fn secret_store(&self) -> Option<KeyringStore> {
         match self.location.mode {
-            ServiceMode::User => match KeyringStore::secret_service() {
+            ServiceMode::User => match KeyringStore::native() {
                 Ok(s) => Some(s),
                 Err(e) => {
                     log::warn!("{e}");
@@ -698,7 +698,7 @@ pub fn apply_selective_sync(
 /// remote root, or a local path inside the folder.
 pub fn selective_sync_path(folder: &FolderSummary, path: &str) -> String {
     let local = clean_path(&folder.local_path);
-    if path.starts_with('/') || path.starts_with('.') {
+    if nc_platform::paths::is_absolute(path) || path.starts_with('.') {
         let absolute = std::path::absolute(path)
             .map(|p| clean_path(&p.to_string_lossy()))
             .unwrap_or_else(|_| clean_path(path));

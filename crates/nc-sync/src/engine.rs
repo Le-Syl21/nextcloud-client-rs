@@ -650,6 +650,10 @@ impl SyncEngine {
         {
             self.should_enforce_windows_file_name_compatibility = true;
         }
+        // always on Windows (`syncengine.cpp:685-688`)
+        if cfg!(windows) {
+            self.should_enforce_windows_file_name_compatibility = true;
+        }
         discovery.should_enforce_windows_file_name_compatibility =
             self.should_enforce_windows_file_name_compatibility;
         // Check for invalid character in old server version

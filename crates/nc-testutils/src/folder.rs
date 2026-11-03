@@ -200,10 +200,14 @@ impl FakeFolder {
         // selects what is printed (captured by the test harness).
         let _ = env_logger::builder().is_test(true).try_init();
         let temp_dir = new_temp_dir();
-        let local_path = temp_dir
-            .path()
-            .canonicalize()
-            .expect("canonicalize temporary directory");
+        // Without the `\\?\` prefix of Windows: the paths of the port are `/`-separated.
+        let local_path = PathBuf::from(nc_platform::paths::from_native(
+            &temp_dir
+                .path()
+                .canonicalize()
+                .expect("canonicalize temporary directory")
+                .to_string_lossy(),
+        ));
         to_disk(&local_path, local_file_info.unwrap_or(&file_template));
         let server = FakeServer::new(file_template);
         let server_version = "10.0.0".to_owned();
@@ -479,6 +483,7 @@ impl Drop for FakeFolder {
     /// without write permission behind: make them writable again so the
     /// temporary directory can be removed.
     fn drop(&mut self) {
+        #[cfg(unix)]
         fn make_writable(dir: &Path) {
             use std::os::unix::fs::PermissionsExt;
             let Ok(meta) = std::fs::symlink_metadata(dir) else {
@@ -498,6 +503,7 @@ impl Drop for FakeFolder {
                 }
             }
         }
+        #[cfg(unix)]
         make_writable(&self.local_path);
     }
 }

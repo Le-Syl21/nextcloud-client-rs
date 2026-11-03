@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 nc-journal = { path = "crates/nc-journal" }
+nc-platform = { path = "crates/nc-platform" }
 nc-dav = { path = "crates/nc-dav" }
 rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 regex = "1.13.1"
@@ -43,8 +44,8 @@ jiff = "0.2.38"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 env_logger = "0.11.11"
 rpassword = "7.5.4"
-trash = { version = "5.2.9", default-features = false }
-rustix = { version = "1.1.5", features = ["fs", "process"] }
+trash = { version = "5.2.9", default-features = false, features = ["coinit_multithreaded"] }
+rustix = { version = "1.1.5", features = ["fs", "process", "system"] }
 nix = { version = "0.31.3", default-features = false, features = ["user"] }
 inotify = { version = "0.11.5", default-features = false }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
@@ -52,8 +53,15 @@ tokio-rustls = "0.26.6"
 rustls-platform-verifier = "0.7.1"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs"] }
 zlib-rs = { version = "0.6.8", default-features = false, features = ["std"] }
+windows-sys = "0.61.2"
+dirs = "7.0.0"
+unicode-normalization = "0.1.26"
+interprocess = { version = "2.4.7", features = ["tokio"] }
 ini-preserve = "0.1.4"
 keyring-core = "1.0.0"
+windows-native-keyring-store = "1.1.0"
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 qrcode = { version = "0.14.1", default-features = false }
 

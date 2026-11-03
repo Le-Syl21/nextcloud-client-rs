@@ -18,7 +18,9 @@
 //! the Windows policy registry keys; a key missing from our file gets the
 //! built-in default.
 
-use std::path::{Path, PathBuf};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::settings::Settings;
@@ -289,6 +291,9 @@ pub struct ConfigLocation {
     pub state_dir: PathBuf,
 }
 
+/// An XDG base directory (Linux and the other Unix systems): `$VAR` if it
+/// is absolute, else `~/fallback`.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, LocationError> {
     if let Some(v) = std::env::var_os(var)
         && Path::new(&v).is_absolute()
@@ -299,6 +304,25 @@ fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, LocationError> {
     Ok(PathBuf::from(home).join(fallback))
 }
 
+/// Where per-user configuration lives: `$XDG_CONFIG_HOME` (`~/.config`),
+/// `%APPDATA%` (roaming, `QStandardPaths::AppDataLocation`'s parent) or
+/// `~/Library/Application Support`.
+fn config_base() -> Result<PathBuf, LocationError> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return xdg_dir("XDG_CONFIG_HOME", ".config");
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    return dirs::config_dir().ok_or(LocationError::NoHome);
+}
+
+/// Where per-user state lives: `$XDG_STATE_HOME` (`~/.local/state`),
+/// `%LOCALAPPDATA%` or `~/Library/Application Support`.
+fn state_base() -> Result<PathBuf, LocationError> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return xdg_dir("XDG_STATE_HOME", ".local/state");
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    return dirs::data_local_dir().ok_or(LocationError::NoHome);
+}
+
 impl ConfigLocation {
     /// The user daemon: `$XDG_CONFIG_HOME/ncsyncd/ncsyncd.cfg` (default
     /// `~/.config/ncsyncd/ncsyncd.cfg`), state in `$XDG_STATE_HOME/ncsyncd`
@@ -306,8 +330,8 @@ impl ConfigLocation {
     pub fn user() -> Result<Self, LocationError> {
         Ok(Self {
             mode: ServiceMode::User,
-            config_file: xdg_dir("XDG_CONFIG_HOME", ".config")?.join("ncsyncd/ncsyncd.cfg"),
-            state_dir: xdg_dir("XDG_STATE_HOME", ".local/state")?.join("ncsyncd"),
+            config_file: config_base()?.join("ncsyncd/ncsyncd.cfg"),
+            state_dir: state_base()?.join("ncsyncd"),
         })
     }
 
@@ -344,8 +368,50 @@ impl ConfigLocation {
 
 /// The official client's configuration: `$XDG_CONFIG_HOME/Nextcloud/nextcloud.cfg`
 /// (`QStandardPaths::AppConfigLocation` + `Theme::configFileName()`).
+///
+/// * Windows: `%APPDATA%\Nextcloud\nextcloud.cfg`; older versions kept it
+///   in `%LOCALAPPDATA%\Nextcloud` (`ConfigFile::configPath`'s migration),
+///   used when only that one exists.
+/// * macOS: the v34 app is sandboxed, so its file is in
+///   `~/Library/Containers/com.nextcloud.desktopclient/Data/Library/Preferences/Nextcloud/`;
+///   older builds used `~/Library/Preferences/Nextcloud/`. The first that
+///   exists, the sandboxed one by default.
 pub fn official_client_config_file() -> Result<PathBuf, LocationError> {
-    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("Nextcloud/nextcloud.cfg"))
+    let candidates = official_client_config_candidates()?;
+    let first = candidates[0].clone();
+    Ok(candidates.into_iter().find(|p| p.exists()).unwrap_or(first))
+}
+
+/// The places [`official_client_config_file`] looks at, most likely first.
+pub fn official_client_config_candidates() -> Result<Vec<PathBuf>, LocationError> {
+    #[cfg(windows)]
+    {
+        let mut v = Vec::new();
+        if let Some(d) = dirs::config_dir() {
+            v.push(d.join("Nextcloud").join("nextcloud.cfg"));
+        }
+        if let Some(d) = dirs::data_local_dir() {
+            v.push(d.join("Nextcloud").join("nextcloud.cfg"));
+        }
+        if v.is_empty() {
+            return Err(LocationError::NoHome);
+        }
+        Ok(v)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().ok_or(LocationError::NoHome)?;
+        Ok(vec![
+            home.join("Library/Containers/com.nextcloud.desktopclient/Data/Library/Preferences/Nextcloud/nextcloud.cfg"),
+            home.join("Library/Preferences/Nextcloud/nextcloud.cfg"),
+        ])
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Ok(vec![
+            xdg_dir("XDG_CONFIG_HOME", ".config")?.join("Nextcloud/nextcloud.cfg"),
+        ])
+    }
 }
 
 #[cfg(test)]

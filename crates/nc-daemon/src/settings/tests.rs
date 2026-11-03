@@ -236,6 +236,7 @@ fn rust_only_save_load_modify_and_lock() {
     s.set_value("Accounts/0/url", "https://x");
     s.save().unwrap();
     assert!(!dir.path().join("sub/test.cfg.lock").exists());
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();

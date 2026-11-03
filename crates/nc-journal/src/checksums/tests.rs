@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 
 use super::*;

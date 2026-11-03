@@ -173,7 +173,7 @@ async fn run(options: Options, socket: PathBuf) -> ExitCode {
     let watcher = if options.no_watch {
         nc_daemon::folder_man::no_watcher()
     } else {
-        nc_daemon::daemon::inotify_watcher_factory()
+        nc_daemon::daemon::default_watcher_factory()
     };
     let mut fm = FolderMan::new(
         &tx,

@@ -24,8 +24,10 @@ pub enum InstanceError {
         "the system instance ncsyncd@{0} runs as the user {0}, but there is no such user (the instance name is the user name)"
     )]
     NoSuchUser(String),
+    #[cfg(unix)]
     #[error("could not look up the user {user}: {source}")]
     Lookup { user: String, source: nix::Error },
+    #[cfg(unix)]
     #[error("could not give {path} to the user {user}: {source}")]
     Chown {
         path: String,
@@ -39,6 +41,7 @@ pub enum InstanceError {
 }
 
 /// The uid and gid of the instance user (its primary group).
+#[cfg(unix)]
 pub fn instance_user(instance: &str) -> Result<(u32, u32), InstanceError> {
     match nix::unistd::User::from_name(instance) {
         Ok(Some(u)) => Ok((u.uid.as_raw(), u.gid.as_raw())),
@@ -52,7 +55,11 @@ pub fn instance_user(instance: &str) -> Result<(u32, u32), InstanceError> {
 
 /// `true` when this process runs as root.
 pub fn running_as_root() -> bool {
-    rustix::process::geteuid().is_root()
+    #[cfg(unix)]
+    return rustix::process::geteuid().is_root();
+    // There is no system instance on Windows.
+    #[cfg(not(unix))]
+    return false;
 }
 
 /// The daemon side: a system instance refuses to run as root.
@@ -65,6 +72,7 @@ pub fn check_daemon_user(location: &ConfigLocation) -> Result<(), InstanceError>
     }
 }
 
+#[cfg(unix)]
 fn chown_one(path: &Path, owner: (u32, u32), user: &str) -> Result<(), InstanceError> {
     std::os::unix::fs::lchown(path, Some(owner.0), Some(owner.1)).map_err(|source| {
         InstanceError::Chown {
@@ -75,6 +83,7 @@ fn chown_one(path: &Path, owner: (u32, u32), user: &str) -> Result<(), InstanceE
     })
 }
 
+#[cfg(unix)]
 fn chown_tree(path: &Path, owner: (u32, u32), user: &str) -> Result<(), InstanceError> {
     chown_one(path, owner, user)?;
     let meta = std::fs::symlink_metadata(path).map_err(|source| InstanceError::Chown {
@@ -109,17 +118,22 @@ pub fn hand_to_instance_user(
     if !running_as_root() {
         return Ok(());
     }
-    let owner = instance_user(instance)?;
-    if location.state_dir.exists() {
-        chown_tree(&location.state_dir, owner, instance)?;
+    #[cfg(unix)]
+    {
+        let owner = instance_user(instance)?;
+        if location.state_dir.exists() {
+            chown_tree(&location.state_dir, owner, instance)?;
+        }
+        if let Some(p) = extra {
+            chown_one(p, owner, instance)?;
+        }
     }
-    if let Some(p) = extra {
-        chown_one(p, owner, instance)?;
-    }
+    #[cfg(not(unix))]
+    let _ = (instance, extra);
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

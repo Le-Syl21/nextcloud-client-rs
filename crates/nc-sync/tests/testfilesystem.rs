@@ -11,7 +11,9 @@
 // `testAclWithManyDeniedAces` are Windows-only upstream (`#ifdef Q_OS_WIN`:
 // long Windows paths, ACLs).
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use nc_sync::filesystem::{
@@ -21,10 +23,14 @@ use nc_sync::filesystem::{
 // initTestCase: creates `existingDirectory` in the shared `testDir`; each
 // test below creates what it needs.
 
+// The Windows folder permissions are ACLs (`testAclWithManyDeniedAces`,
+// pending with the ACL port).
+#[cfg(unix)]
 fn permissions(path: &str) -> u32 {
     fs::metadata(path).expect("stat").permissions().mode() & 0o7777
 }
 
+#[cfg(unix)]
 #[test]
 fn test_set_folder_permissions_existing_directory() {
     let test_dir = tempfile::tempdir().expect("temporary directory");

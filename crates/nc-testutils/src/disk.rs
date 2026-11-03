@@ -23,9 +23,10 @@ use crate::file_info::{FileInfo, FileModifier, LockChange};
 /// one-second resolution like upstream's `qDateTimeToTime_t`.
 fn set_mod_time(path: &Path, mod_time: SystemTime) {
     let secs = crate::util::secs_since_epoch(mod_time);
-    let file = File::open(path).unwrap_or_else(|e| panic!("open {path:?} for setModTime: {e}"));
-    file.set_modified(crate::util::from_secs(secs))
-        .unwrap_or_else(|e| panic!("setModTime {path:?}: {e}"));
+    assert!(
+        nc_sync::filesystem::set_mod_time(&path.to_string_lossy(), secs),
+        "setModTime {path:?}"
+    );
 }
 
 fn write_fill(file: &mut File, size: i64, content_char: u8) {
@@ -52,7 +53,14 @@ impl DiskFileModifier {
 
     /// `find`: the absolute path of `relative_path` (upstream returns a `QFile`).
     pub fn find(&self, relative_path: &str) -> PathBuf {
-        self.root_dir.join(relative_path)
+        let path = self.root_dir.join(relative_path);
+        if cfg!(windows) {
+            // Like Qt's file engine: the verbatim form, which keeps trailing
+            // dots and spaces.
+            PathBuf::from(nc_platform::paths::long_win_path(&path.to_string_lossy()))
+        } else {
+            path
+        }
     }
 }
 

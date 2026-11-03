@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
 
-use crate::config_file::{ConfigLocation, ServiceMode};
+use crate::config_file::ConfigLocation;
+#[cfg(unix)]
+use crate::config_file::ServiceMode;
 
 /// The configuration path the hash is made of: canonical when it exists,
 /// else its canonical parent joined with its name (a GUI's first run
@@ -61,11 +63,33 @@ pub fn lock_path(location: &ConfigLocation) -> PathBuf {
     ))
 }
 
+/// Where the holder is also written on Windows: a byte-range lock makes the
+/// lock file itself unreadable to the process that is refused.
+#[cfg(windows)]
+fn holder_path(lock: &Path) -> PathBuf {
+    let mut p = lock.as_os_str().to_owned();
+    p.push(".holder");
+    PathBuf::from(p)
+}
+
 /// The default control endpoint of a configuration:
 /// `$XDG_RUNTIME_DIR/ncsyncd/<hash>.sock` for a user (without
 /// `XDG_RUNTIME_DIR`: `/tmp/ncsyncd-<uid>/ncsyncd/<hash>.sock`),
 /// `/run/ncsyncd/<instance>/<hash>.sock` for an instance of the system
 /// service (its `RuntimeDirectory=`).
+#[cfg(windows)]
+pub fn default_endpoint(location: &ConfigLocation) -> PathBuf {
+    // Windows: a named pipe of the user (the official client's socket API
+    // uses `\\.\pipe\<exe>-<USERNAME>`).
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    PathBuf::from(format!(
+        r"\\.\pipe\ncsyncd-{user}-{}",
+        config_hash(&location.config_file)
+    ))
+}
+
+/// See the Windows variant.
+#[cfg(unix)]
 pub fn default_endpoint(location: &ConfigLocation) -> PathBuf {
     let name = format!("{}.sock", config_hash(&location.config_file));
     if let ServiceMode::System { instance } = &location.mode {
@@ -139,11 +163,14 @@ impl InstanceGuard {
         };
         if !location.state_dir.exists() {
             std::fs::create_dir_all(&location.state_dir).map_err(io)?;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &location.state_dir,
-                std::fs::Permissions::from_mode(0o700),
-            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &location.state_dir,
+                    std::fs::Permissions::from_mode(0o700),
+                );
+            }
         }
         let mut file = OpenOptions::new()
             .read(true)
@@ -157,6 +184,11 @@ impl InstanceGuard {
             Err(TryLockError::WouldBlock) => {
                 let mut text = String::new();
                 let _ = file.read_to_string(&mut text);
+                // Windows: the lock covers the file, nobody else can read it.
+                #[cfg(windows)]
+                if text.is_empty() {
+                    text = std::fs::read_to_string(holder_path(&lock)).unwrap_or_default();
+                }
                 return Err(GuardError::Held {
                     config: location.config_file.clone(),
                     lock,
@@ -172,6 +204,11 @@ impl InstanceGuard {
             file.flush()
         };
         write(&mut file).map_err(io)?;
+        #[cfg(windows)]
+        let _ = std::fs::write(
+            holder_path(&lock),
+            format!("{}\n{program}\n", std::process::id()),
+        );
         Ok(Self {
             _file: file,
             hash: config_hash(&location.config_file),
@@ -193,6 +230,7 @@ impl InstanceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_file::ServiceMode;
 
     fn location(dir: &Path) -> ConfigLocation {
         ConfigLocation {
@@ -233,14 +271,20 @@ mod tests {
         std::fs::write(&cfg, "").unwrap();
         assert_eq!(config_hash(&cfg), before);
         let link = dir.path().join("link.cfg");
-        std::os::unix::fs::symlink(&cfg, &link).unwrap();
-        assert_eq!(config_hash(&link), before);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&cfg, &link).unwrap();
+            assert_eq!(config_hash(&link), before);
+        }
+        let _ = &link;
         let dotted = dir.path().join(".").join("ncsyncd.cfg");
         assert_eq!(config_hash(&dotted), before);
         assert_eq!(before.len(), 12);
         assert_ne!(config_hash(&dir.path().join("other.cfg")), before);
     }
 
+    // The Windows endpoint is a named pipe.
+    #[cfg(unix)]
     #[test]
     fn derived_endpoint_names() {
         let dir = tempfile::tempdir().unwrap();

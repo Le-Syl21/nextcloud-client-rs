@@ -58,7 +58,7 @@ fn rust_only_daemon_polls_watches_and_obeys_control_requests() {
             &tx,
             settings,
             Box::new(NullSettingsStore),
-            daemon::inotify_watcher_factory(),
+            daemon::default_watcher_factory(),
         );
         let mut events = fm.subscribe();
         fm.add_fake_connected_account("0", fake_folder.account().clone());
@@ -236,7 +236,7 @@ fn rust_only_daemon_locks_documents_opened_in_an_office_application() {
             &tx,
             settings,
             Box::new(NullSettingsStore),
-            daemon::inotify_watcher_factory(),
+            daemon::default_watcher_factory(),
         );
         fm.add_fake_connected_account("0", fake_folder.account().clone());
         fm.add_folder_from_settings(

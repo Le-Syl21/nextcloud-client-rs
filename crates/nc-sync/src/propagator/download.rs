@@ -11,7 +11,6 @@
 //! temporary file in place.
 
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 
 use http::{HeaderMap, HeaderValue, Method};
@@ -1057,20 +1056,7 @@ fn download_finished(
     let mut previous_file_exists =
         filesystem::file_exists(&filename) && instruction != Instruction::CaseClashConflict;
     if previous_file_exists {
-        // Preserve the existing file permissions.
-        if let (Ok(existing), Ok(tmp)) = (std::fs::metadata(&filename), std::fs::metadata(tmp_path))
-        {
-            if existing.permissions().mode() & 0o7777 != tmp.permissions().mode() & 0o7777 {
-                let _ = std::fs::set_permissions(
-                    tmp_path,
-                    std::fs::Permissions::from_mode(existing.permissions().mode()),
-                );
-            }
-            // preserveGroupOwnership
-            if let Err(e) = std::os::unix::fs::chown(tmp_path, None, Some(existing.gid())) {
-                log::warn!(target: LOG, "preserveGroupOwnership: chown error {e}: setting group {} failed on file {tmp_path}", existing.gid());
-            }
-        }
+        preserve_permissions(&filename, tmp_path);
     }
     {
         let i = ctx.item.borrow();
@@ -1193,6 +1179,34 @@ fn update_metadata(ctx: &JobCtx, is_conflict: bool) -> Outcome {
         Status::Success
     };
     done(status, "", ErrorCategory::NoError)
+}
+
+/// Preserve the existing file permissions (`propagatedownload.cpp`:
+/// `FileSystem::setFileReadOnly` / ACL copy and `preserveGroupOwnership`).
+#[cfg(unix)]
+fn preserve_permissions(filename: &str, tmp_path: &str) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if let (Ok(existing), Ok(tmp)) = (std::fs::metadata(filename), std::fs::metadata(tmp_path)) {
+        if existing.permissions().mode() & 0o7777 != tmp.permissions().mode() & 0o7777 {
+            let _ = std::fs::set_permissions(
+                tmp_path,
+                std::fs::Permissions::from_mode(existing.permissions().mode()),
+            );
+        }
+        // preserveGroupOwnership
+        if let Err(e) = std::os::unix::fs::chown(tmp_path, None, Some(existing.gid())) {
+            log::warn!(target: LOG, "preserveGroupOwnership: chown error {e}: setting group {} failed on file {tmp_path}", existing.gid());
+        }
+    }
+}
+
+/// On Windows the permissions that matter to the engine are the read-only
+/// attribute (upstream also copies the ACL).
+#[cfg(windows)]
+fn preserve_permissions(filename: &str, tmp_path: &str) {
+    if let Ok(existing) = std::fs::metadata(filename) {
+        crate::filesystem::set_file_read_only(tmp_path, existing.permissions().readonly());
+    }
 }
 
 #[cfg(test)]

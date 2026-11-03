@@ -191,9 +191,22 @@ pub struct HasHydratedDehydrated {
 
 /// `SyncJournalDb::getPHash`: the `phash` of a relative path.
 ///
-/// On macOS upstream first normalizes the path to NFC; not implemented yet
-/// (Linux is the target of this port).
+/// On macOS the path is first normalized to NFC (`#ifdef Q_OS_MACOS`):
+/// HFS+ and the Finder hand out NFD names, the official client keys its
+/// journal by the NFC form, and the two clients must agree for a takeover.
 pub fn get_phash(file: &[u8]) -> i64 {
+    get_phash_with(file, cfg!(target_os = "macos"))
+}
+
+/// [`get_phash`] with the macOS normalization chosen by the caller (for
+/// tests on other systems).
+pub fn get_phash_with(file: &[u8], nfc: bool) -> i64 {
+    if nfc {
+        use unicode_normalization::UnicodeNormalization as _;
+        // `QString::fromUtf8` replaces invalid sequences, like lossy.
+        let normalized: String = String::from_utf8_lossy(file).nfc().collect();
+        return c_jhash64(normalized.as_bytes(), 0) as i64;
+    }
     c_jhash64(file, 0) as i64
 }
 
@@ -500,7 +513,18 @@ fn default_journal_mode(db_path: &Path) -> String {
         info!(target: LOG_TARGET, "Mounted sync dir, do not use WAL for {}", db_path.display());
         return "DELETE".to_owned();
     }
-    // TODO(windows): FileSystem::fileSystemForPath() contains "FAT" => DELETE.
+    #[cfg(windows)]
+    {
+        // See #2693: Some exFAT file systems seem unable to cope with the
+        // WAL journaling mode. They work fine with DELETE.
+        let file_system = nc_platform::windows::file_system_for_path(&db_path.to_string_lossy())
+            .unwrap_or_default();
+        info!(target: LOG_TARGET, "Detected filesystem {file_system} for {}", db_path.display());
+        if file_system.contains("FAT") {
+            info!(target: LOG_TARGET, "Filesystem contains FAT - using DELETE journal mode");
+            return "DELETE".to_owned();
+        }
+    }
     "WAL".to_owned()
 }
 
@@ -1013,6 +1037,12 @@ impl Inner {
         self.metadata_table_is_empty = self.get_file_record_count() == 0;
 
         // FileSystem::setFileHidden() is a no-op outside Windows.
+        #[cfg(windows)]
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = self.db_file.clone().into_os_string();
+            name.push(suffix);
+            nc_platform::windows::set_file_hidden(&PathBuf::from(name).to_string_lossy(), true);
+        }
         rc
     }
 

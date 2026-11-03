@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 /*
  * SPDX-FileCopyrightText: 2021 Nextcloud GmbH and Nextcloud contributors
  * SPDX-FileCopyrightText: 2016 ownCloud GmbH

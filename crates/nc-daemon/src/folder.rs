@@ -63,7 +63,7 @@ pub struct Definition {
 impl Definition {
     /// `absoluteJournalPath()`: journalPath relative to localPath.
     pub fn absolute_journal_path(&self) -> String {
-        if self.journal_path.starts_with('/') {
+        if nc_platform::paths::is_absolute(&self.journal_path) {
             self.journal_path.clone()
         } else {
             format!(
@@ -433,7 +433,7 @@ impl Folder {
         let local = &self.definition.local_path;
         let canonical = std::fs::canonicalize(local)
             .ok()
-            .map(|p| p.to_string_lossy().into_owned());
+            .map(|p| nc_platform::paths::from_native(&p.to_string_lossy()));
         self.canonical_local_path = match canonical {
             Some(c) if !c.is_empty() => c,
             _ => {

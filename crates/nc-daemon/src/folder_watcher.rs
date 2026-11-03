@@ -8,8 +8,10 @@
 //! `FolderWatcher`: monitors a directory recursively for changes.
 //!
 //! The folder watcher monitors a directory and its sub directories for
-//! changes in the local file system. Only the Linux (inotify) implementation
-//! is ported ([`linux`]).
+//! changes in the local file system. The Linux (inotify) implementation is
+//! `linux`, the Windows one (`ReadDirectoryChangesW`) is in `native`; other
+//! systems have no watcher yet and report themselves unreliable, so that
+//! the folder falls back to periodic full local discovery.
 //!
 //! # Runtime
 //!
@@ -48,18 +50,24 @@
 //!   ([`FolderWatcher::folder_account_capabilities_changed`]), called by the
 //!   owner when the capabilities change.
 
+#[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(not(target_os = "linux"))]
+mod native;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use inotify::Inotify;
 use log::{debug, info, warn};
+#[cfg(target_os = "linux")]
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -67,7 +75,10 @@ use tokio::task::JoinHandle;
 use nc_sync::filesystem;
 use nc_sync::filesystem::lock_file::{self, FileLockingType};
 
+#[cfg(target_os = "linux")]
 use self::linux::{FolderWatcherPrivate, InotifySys, LinuxInotify, NoInotify, WatcherParent};
+#[cfg(not(target_os = "linux"))]
+use self::native::FolderWatcherPrivate;
 
 const LOG: &str = "nextcloud.gui.folderwatcher";
 
@@ -151,11 +162,18 @@ impl Drop for FolderWatcher {
     }
 }
 
-/// `Utility::fileNamesEqual`: the canonical paths are equal (case sensitive
-/// on Linux). Only meaningful for existing paths.
+/// `Utility::fileNamesEqual`: the canonical paths are equal (case
+/// insensitive when the file system is case preserving: Windows and macOS). Only meaningful for existing paths.
 fn file_names_equal(a: &str, b: &str) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => !a.as_os_str().is_empty() && a == b,
+        (Ok(a), Ok(b)) if a.as_os_str().is_empty() => {
+            let _ = b;
+            false
+        }
+        (Ok(a), Ok(b)) if nc_journal::utility::fs_case_preserving() => {
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        }
+        (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
@@ -314,6 +332,7 @@ impl Core {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl WatcherParent for Core {
     fn change_detected(&mut self, path: &str) {
         self.change_detected_path(path);
@@ -408,6 +427,24 @@ impl FolderWatcher {
     /// `init(root)`: watches `root` (the path of the root of the folder,
     /// without trailing `/`) and its sub directories. Must run inside a
     /// `LocalSet`.
+    #[cfg(not(target_os = "linux"))]
+    pub fn init(&mut self, root: &str) {
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
+        let (d, reader) = FolderWatcherPrivate::start(root, &self.inner);
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.d = Some(d);
+            inner.core.timer = Some(Instant::now());
+        }
+        self.reader = reader;
+    }
+
+    #[cfg(target_os = "linux")]
+    /// `init(root)`: watches `root` (the path of the root of the folder,
+    /// without trailing `/`) and its sub directories. Must run inside a
+    /// `LocalSet`.
     pub fn init(&mut self, root: &str) {
         if let Some(reader) = self.reader.take() {
             reader.abort();
@@ -440,6 +477,7 @@ impl FolderWatcher {
     /// [`Self::init`] with another implementation of the inotify calls
     /// (for tests); nothing reads events, feed them with
     /// [`Self::handle_inotify_events`].
+    #[cfg(target_os = "linux")]
     pub fn init_with(&mut self, sys: Box<dyn InotifySys>, root: &str) {
         let mut inner = self.inner.borrow_mut();
         let d = FolderWatcherPrivate::new(sys, root, &mut inner.core);
@@ -448,6 +486,7 @@ impl FolderWatcher {
     }
 
     /// Handles decoded inotify events as if read from the descriptor.
+    #[cfg(target_os = "linux")]
     pub fn handle_inotify_events(&self, events: &[linux::RawInotifyEvent]) {
         let mut inner = self.inner.borrow_mut();
         let Inner { core, d } = &mut *inner;
@@ -524,6 +563,7 @@ impl FolderWatcher {
 
     /// `testLinuxWatchCount()`: the number of inotify watches (0 before
     /// [`Self::init`]).
+    #[cfg(target_os = "linux")]
     pub fn test_linux_watch_count(&self) -> usize {
         self.inner
             .borrow()
@@ -562,13 +602,14 @@ impl FolderWatcher {
 
 /// Registers the inotify descriptor with tokio's reactor, the
 /// `QSocketNotifier` constructor of `FolderWatcherPrivate`.
-#[allow(unsafe_code)]
+#[cfg(target_os = "linux")]
 fn register(inotify: Inotify) -> std::io::Result<AsyncFd<Inotify>> {
-    // SAFETY: `Inotify` owns its descriptor: it stays open, and is the one
+    // `Inotify` owns its descriptor: it stays open, and is the one
     // `as_raw_fd()` returns, until the `AsyncFd` drops the `Inotify`.
-    Ok(unsafe { AsyncFd::register(inotify) }?)
+    nc_platform::register_async_fd(inotify)
 }
 
+#[cfg(target_os = "linux")]
 /// The `QSocketNotifier` of `FolderWatcherPrivate`: calls
 /// `slotReceivedNotification` while the descriptor is readable.
 async fn read_notifications(fd: AsyncFd<Inotify>, weak: Weak<RefCell<Inner>>) {

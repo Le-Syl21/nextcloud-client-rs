@@ -120,7 +120,7 @@ struct Found {
 fn same_path(a: &str, b: &str) -> bool {
     let canon = |p: &str| {
         std::fs::canonicalize(p)
-            .map(|c| c.to_string_lossy().into_owned())
+            .map(|c| nc_platform::paths::from_native(&c.to_string_lossy()))
             .unwrap_or_else(|_| clean_path(p))
     };
     clean_path(a) == clean_path(b) || canon(a) == canon(b)
@@ -146,7 +146,7 @@ fn select(settings: &Settings, selector: &str) -> Result<Found, TakeoverError> {
         .iter()
         .filter(|f| f.definition.alias == selector)
         .collect();
-    let looks_like_path = selector.starts_with('/') || selector.starts_with('.');
+    let looks_like_path = nc_platform::paths::is_absolute(selector) || selector.starts_with('.');
     let candidates: Vec<&Found> = if !by_alias.is_empty() && !looks_like_path {
         by_alias
     } else {
@@ -363,6 +363,7 @@ fn file_name(p: &str) -> &str {
 }
 
 /// Whether a process looks like the official desktop client.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn is_official_client(comm: &str, exe: Option<&str>, argv0: &str) -> bool {
     let argv0_name = file_name(argv0);
     let lower = argv0_name.to_ascii_lowercase();
@@ -373,6 +374,35 @@ fn is_official_client(comm: &str, exe: Option<&str>, argv0: &str) -> bool {
 }
 
 /// The official client's processes owned by `uid` (all users when `None`).
+///
+/// On Linux `/proc` is scanned; on Windows and macOS the process list is
+/// read with `sysinfo` and only the executable name is compared (`uid` is
+/// not used there: a Windows configuration belongs to the profile).
+#[cfg(not(target_os = "linux"))]
+pub fn official_client_processes(_uid: Option<u32>) -> Vec<RunningProcess> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+    let me = std::process::id();
+    let Ok(mut sys) = System::new_with_specifics(RefreshKind::nothing()) else {
+        return Vec::new();
+    };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys.processes()
+        .iter()
+        .filter(|(pid, _)| pid.as_u32() != me)
+        .filter_map(|(pid, p)| {
+            let name = p.name().to_string_lossy().into_owned();
+            let stem = name.strip_suffix(".exe").unwrap_or(&name);
+            stem.eq_ignore_ascii_case("nextcloud")
+                .then(|| RunningProcess {
+                    pid: pid.as_u32(),
+                    name,
+                })
+        })
+        .collect()
+}
+
+/// See the other variant.
+#[cfg(target_os = "linux")]
 pub fn official_client_processes(uid: Option<u32>) -> Vec<RunningProcess> {
     use std::os::unix::fs::MetadataExt as _;
     let me = std::process::id();
@@ -416,8 +446,16 @@ pub fn official_client_processes(uid: Option<u32>) -> Vec<RunningProcess> {
 }
 
 fn ensure_official_client_stopped(official_file: &Path) -> Result<(), TakeoverError> {
-    use std::os::unix::fs::MetadataExt as _;
-    let uid = std::fs::metadata(official_file).ok().map(|m| m.uid());
+    #[cfg(unix)]
+    let uid = {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(official_file).ok().map(|m| m.uid())
+    };
+    #[cfg(not(unix))]
+    let uid = {
+        let _ = official_file;
+        None
+    };
     let running = official_client_processes(uid);
     if running.is_empty() {
         Ok(())

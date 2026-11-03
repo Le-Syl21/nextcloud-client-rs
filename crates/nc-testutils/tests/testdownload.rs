@@ -7,8 +7,10 @@
 // any purpose.
 //
 // Port of upstream test/testdownload.cpp (nextcloud/desktop v34.0.5).
+#![cfg_attr(not(unix), allow(unused))]
 
 use std::cell::{Cell, RefCell};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -188,6 +190,7 @@ fn server_maintenence() {
     );
 }
 
+#[cfg(unix)] // QSKIP on Windows, as upstream (testMoveFailsInAConflict)
 #[test]
 fn test_move_fails_in_a_conflict() {
     // Test for https://github.com/owncloud/client/issues/7015

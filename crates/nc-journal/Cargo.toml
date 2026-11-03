@@ -19,6 +19,10 @@ sha3.workspace = true
 adler2.workspace = true
 log.workspace = true
 serde_json.workspace = true
+unicode-normalization.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+nc-platform.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -886,18 +886,42 @@ impl Settings {
                 .map_err(werr)?;
             file.sync_all().map_err(werr)?;
         }
+        // A new file is private to its user; on Windows it inherits the ACL
+        // of the profile directory.
         let perms = match std::fs::metadata(path) {
-            Ok(m) => m.permissions(),
+            Ok(m) => Some(m.permissions()),
+            #[cfg(unix)]
             Err(_) => {
                 use std::os::unix::fs::PermissionsExt as _;
-                std::fs::Permissions::from_mode(0o600)
+                Some(std::fs::Permissions::from_mode(0o600))
             }
+            #[cfg(not(unix))]
+            Err(_) => None,
         };
-        std::fs::set_permissions(&tmp, perms).map_err(werr)?;
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            werr(e)
-        })
+        if let Some(perms) = perms {
+            std::fs::set_permissions(&tmp, perms).map_err(werr)?;
+        }
+        // On Windows a reader (an antivirus, the Explorer) can hold the
+        // destination for a moment: a sharing violation shows as
+        // `PermissionDenied`, so try again a few times.
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(&tmp, path) {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if cfg!(windows)
+                        && e.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt < 10 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(werr(e));
+                }
+            }
+        }
     }
 }
 
@@ -936,8 +960,7 @@ impl LockFile {
                 .open(&path)
             {
                 Ok(mut f) => {
-                    let host =
-                        std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+                    let host = nc_platform::process::hostname();
                     let _ = write!(f, "{}\nncsyncd\n{}\n", std::process::id(), host.trim());
                     return Ok(Self { path });
                 }
@@ -973,7 +996,7 @@ impl LockFile {
             .lines()
             .next()
             .and_then(|l| l.trim().parse::<u32>().ok());
-        let alive = pid.is_some_and(|p| Path::new(&format!("/proc/{p}")).exists());
+        let alive = pid.is_some_and(nc_platform::process::process_is_alive);
         if !alive {
             return true;
         }

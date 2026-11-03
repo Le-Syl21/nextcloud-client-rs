@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")] // inotify; the Windows backend has `testfolderwatcher_windows.rs`
+
 /*
  * SPDX-FileCopyrightText: 2021 Nextcloud GmbH and Nextcloud contributors
  * SPDX-FileCopyrightText: 2011 ownCloud GmbH

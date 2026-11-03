@@ -1,0 +1,37 @@
+[package]
+name = "nc-platform"
+description = "Operating system calls of nextcloud-client-rs: the only crate of the workspace that contains unsafe code (Win32 and file descriptor registration)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The one crate allowed to contain `unsafe`: every block says why it is sound.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

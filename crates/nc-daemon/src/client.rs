@@ -247,8 +247,8 @@ impl Remote {
     }
 
     /// Opens the event stream: `{"command":"subscribe"}`, then `{"ok":true}`.
-    fn open_stream(&self) -> std::io::Result<std::io::BufReader<std::os::unix::net::UnixStream>> {
-        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket)?;
+    fn open_stream(&self) -> std::io::Result<std::io::BufReader<crate::transport::SyncStream>> {
+        let mut stream = crate::transport::connect(&self.socket)?;
         let mut text = serde_json::to_string(&Request::Subscribe).map_err(std::io::Error::other)?;
         text.push('\n');
         stream.write_all(text.as_bytes())?;

@@ -129,7 +129,7 @@ impl FolderSettingsStore for FileSettingsStore {
             return;
         };
         let store = match self.mode {
-            ServiceMode::User => KeyringStore::secret_service().ok(),
+            ServiceMode::User => KeyringStore::native().ok(),
             ServiceMode::System { .. } => None,
         };
         let resolver = CredentialResolver::new(
@@ -247,7 +247,7 @@ fn official_client_paths(options: &Options) -> Vec<String> {
 /// there is none).
 fn credential_store(options: &Options) -> Option<KeyringStore> {
     match options.location.mode {
-        ServiceMode::User => KeyringStore::secret_service()
+        ServiceMode::User => KeyringStore::native()
             .map_err(|e| log::warn!(target: LOG, "The keyring is not available: {e}"))
             .ok(),
         ServiceMode::System { .. } => None,
@@ -711,7 +711,8 @@ mod tests {
         };
         let cfg = location.config_file.clone();
         Settings::modify(&cfg, |s| save_account(s, &account("0", dir.path()))).unwrap();
-        let local = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let local =
+            |name: &str| nc_platform::paths::to_slash(&dir.path().join(name).to_string_lossy());
         let one = manage::add_folder(&ctx, &local("A"), "/", None).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()

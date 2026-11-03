@@ -113,6 +113,8 @@ fn derived_take_over_and_hand_back_round_trip() {
     ));
 }
 
+// Fake /home paths: on Windows the selector is made absolute with a drive.
+#[cfg(unix)]
 #[test]
 fn derived_take_over_by_path_reuses_our_account() {
     let mut off = official();
@@ -144,6 +146,7 @@ fn derived_take_over_by_path_reuses_our_account() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn derived_take_over_refusals() {
     let mut off = official();

@@ -8,6 +8,9 @@
 //
 // Port of upstream test/testpermissions.cpp (nextcloud/desktop v34.0.5).
 
+// Upstream gates these tests with `#ifndef Q_OS_WIN` (they set POSIX modes).
+#![cfg(unix)]
+
 mod common;
 
 use std::cell::RefCell;

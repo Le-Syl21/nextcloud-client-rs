@@ -863,3 +863,17 @@ fn rust_only_autotest_fail_counter() {
     assert!(f.db.delete_file_record("x", false).is_err()); // counter 0 -> fail
     assert!(f.db.delete_file_record("x", false).is_ok()); // -1: disabled again
 }
+
+/// macOS hands out NFD names; the official client keys its journal by the
+/// NFC form (`SyncJournalDb::getPHash`).
+#[test]
+fn phash_normalizes_to_nfc_on_macos() {
+    let nfd = "e\u{301}.txt".as_bytes(); // e + combining acute
+    let nfc = "\u{e9}.txt".as_bytes();
+    assert_ne!(get_phash_with(nfd, false), get_phash_with(nfc, false));
+    assert_eq!(get_phash_with(nfd, true), get_phash_with(nfc, true));
+    assert_eq!(get_phash_with(nfd, true), get_phash_with(nfc, false));
+    if cfg!(target_os = "macos") {
+        assert_eq!(get_phash(nfd), get_phash(nfc));
+    }
+}

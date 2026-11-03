@@ -293,21 +293,47 @@ fn selective_sync_fixup(journal: &SyncJournalDb, new_list: &[String]) {
     journal.set_selective_sync_list(SelectiveSyncListType::BlackList, new_list);
 }
 
-/// `ConfigFile::excludeFileFromSystem()`: `/etc/Nextcloud/sync-exclude.lst`.
+/// `ConfigFile::excludeFileFromSystem()`: `/etc/Nextcloud/sync-exclude.lst`
+/// (on Windows next to the executable, on macOS in the bundle's
+/// `Resources`).
 /// When it does not exist (this client is not installed with it), the
 /// default list of the reference upstream version is written to the user's
 /// cache directory and used instead, so the behaviour matches an installed
 /// `nextcloudcmd`.
 fn system_exclude_file() -> String {
-    let system = "/etc/Nextcloud/sync-exclude.lst";
-    if std::path::Path::new(system).exists() {
-        return system.to_owned();
+    let system = if cfg!(windows) {
+        std::env::current_exe().ok().and_then(|e| {
+            e.parent().map(|d| {
+                d.join("sync-exclude.lst")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+        })
+    } else if cfg!(target_os = "macos") {
+        std::env::current_exe().ok().and_then(|e| {
+            e.parent().map(|d| {
+                d.join("../Resources/sync-exclude.lst")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+    } else {
+        Some("/etc/Nextcloud/sync-exclude.lst".to_owned())
+    };
+    if let Some(system) = system
+        && std::path::Path::new(&system).exists()
+    {
+        return system;
     }
-    let base = std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
-        .unwrap_or_else(|| ".".to_owned());
+    let base = if cfg!(any(windows, target_os = "macos")) {
+        dirs::cache_dir().map(|d| d.to_string_lossy().replace('\\', "/"))
+    } else {
+        std::env::var("XDG_CACHE_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
+    }
+    .unwrap_or_else(|| ".".to_owned());
     let dir = format!("{base}/ncsync");
     let path = format!("{dir}/sync-exclude.lst");
     let up_to_date = std::fs::read(&path)
@@ -341,7 +367,7 @@ fn run_sync(args: SyncArgs) -> ExitCode {
         eprintln!("Source dir '{source_dir}' does not exist.");
         return ExitCode::FAILURE;
     };
-    let mut source_dir = abs.to_string_lossy().into_owned();
+    let mut source_dir = nc_platform::paths::from_native(&abs.to_string_lossy());
     if !source_dir.ends_with('/') {
         source_dir.push('/');
     }
@@ -597,9 +623,10 @@ async fn sync_main(
             // the folder is loaded but never matches. Kept as is (ISO), with
             // a warning upstream does not print.
             let name = ex.rsplit('/').next().unwrap_or(ex);
-            let dir = std::fs::canonicalize(ex)
-                .ok()
-                .and_then(|p| p.parent().map(|d| format!("{}/", d.to_string_lossy())));
+            let dir = std::fs::canonicalize(ex).ok().and_then(|p| {
+                p.parent()
+                    .map(|d| format!("{}/", nc_platform::paths::from_native(&d.to_string_lossy())))
+            });
             if !name.eq_ignore_ascii_case("sync-exclude.lst")
                 && !dir.is_some_and(|d| d.starts_with(&source_dir))
             {

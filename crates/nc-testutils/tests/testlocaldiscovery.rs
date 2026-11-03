@@ -551,6 +551,8 @@ fn test_redownload_deleted_live_photo_mov() {
     assert_eq!(item.direction, Direction::Down);
 }
 
+// The `Q_OS_WINDOWS` branch of this upstream test is pending (docs/gui-plan.md P2 item 10).
+#[cfg(not(windows))]
 #[test]
 fn test_create_file_with_trailing_spaces_local_and_remote_trimmed_do_not_exist_rename_and_upload_file()
  {
@@ -798,6 +800,8 @@ fn test_create_local_paths_with_leading_and_trailing_spaces_sync_on_supporting_o
     );
 }
 
+// The `Q_OS_WINDOWS` branch of this upstream test is pending (docs/gui-plan.md P2 item 10).
+#[cfg(not(windows))]
 #[test]
 fn test_create_file_with_trailing_spaces_remote_get_renamed_manually() {
     // On Windows we can't create files/folders with leading/trailing spaces locally. So, we have to fail those items. On other OSs - we just sync them down normally.
@@ -969,6 +973,8 @@ fn test_create_file_with_trailing_spaces_local_trimmed_also_created_dont_rename_
     );
 }
 
+// The `Q_OS_WINDOWS` branch of this upstream test is pending (docs/gui-plan.md P2 item 10).
+#[cfg(not(windows))]
 #[test]
 fn test_create_file_with_trailing_spaces_local_and_remote_trimmed_exists_rename_file() {
     let mut fake_folder = FakeFolder::new(FileInfo::default());

@@ -143,7 +143,8 @@ impl Ctx {
                 if name.starts_with('.') {
                     continue;
                 }
-                let full = Path::new(&dir).join(&name).to_string_lossy().into_owned();
+                let full =
+                    nc_platform::paths::to_slash(&Path::new(&dir).join(&name).to_string_lossy());
                 let file_path = full[root.len()..].to_owned();
                 let pushed_status = self.spy.status_of(&file_path);
                 if pushed_status != SyncFileStatus::default() {

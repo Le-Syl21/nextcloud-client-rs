@@ -366,13 +366,14 @@ Deliberate behavioural differences with the official client v34.0.5:
 
 ### Limitations
 
-- **Linux only.** The daemon is built on Linux facilities: inotify to watch the folders,
-  systemd for the services, the credential store and the watchdog, the Secret Service
-  (GNOME Keyring, KWallet) for app passwords. The one-shot `ncsync sync` is not offered on
-  Windows or macOS either: the official client has code paths of its own on those systems
-  (file names in Unicode NFC on macOS, file attributes, long paths and case-insensitive
-  names on Windows), which are not ported, so "the same behaviour as the official client"
-  could not be claimed there.
+- **Linux first.** The engine now builds and is tested in CI on Windows and macOS too
+  (`docs/gui-plan.md`, phases P1 to P3), but only Linux is released and fully ported. On
+  Windows the folder watcher (`ReadDirectoryChangesW`), the Credential Manager takeover,
+  long paths, file attributes and share-mode lock detection are ported; folder ACLs, the
+  lock watcher and the case-clash solver are not. macOS is **experimental**: built and tested in CI on GitHub's macOS runners only, never
+  validated by hand on a real Mac (GUI window, menu-bar tray, Keychain prompt, takeover from
+  the sandboxed official app), and it has no folder watcher yet (folders are rescanned
+  periodically).
 - **No end-to-end encryption.** Encrypted folders are skipped, as the official client does
   when E2EE is not set up.
 - **No virtual files** (files that are downloaded on first use). Folders in virtual files
@@ -860,13 +861,15 @@ Différences de comportement voulues avec le client officiel v34.0.5 :
 
 ### Limites
 
-- **Linux uniquement.** Le service repose sur des briques de Linux : inotify pour surveiller
-  les dossiers, systemd pour les services, le magasin d'identifiants et le chien de garde,
-  le Secret Service (GNOME Keyring, KWallet) pour les mots de passe d'application.
-  `ncsync sync` n'est pas proposé non plus sous Windows ou macOS : le client officiel y a
-  des comportements propres (noms de fichiers en Unicode NFC sous macOS, attributs de
-  fichiers, chemins longs et noms insensibles à la casse sous Windows), qui ne sont pas
-  portés, et « le même comportement que le client officiel » n'y serait pas vrai.
+- **Linux d'abord.** Le moteur se compile et est testé en CI sous Windows et macOS aussi
+  (`docs/gui-plan.md`, phases P1 à P3), mais seul Linux est publié et entièrement porté. Sous
+  Windows, le surveillant de dossiers (`ReadDirectoryChangesW`), la reprise via le
+  gestionnaire d'identifiants, les chemins longs, les attributs de fichiers et la détection
+  de verrous sont portés ; les ACL de dossiers, le surveillant de verrous et le résolveur de
+  conflits de casse ne le sont pas. macOS est **expérimental** : compilé et testé uniquement en CI sur les machines macOS de
+  GitHub, jamais validé à la main sur un vrai Mac (fenêtre, icône de barre de menus, invite
+  du Trousseau, reprise depuis l'application officielle sandboxée), et sans surveillant de
+  dossiers pour l'instant (les dossiers sont revérifiés périodiquement).
 - **Pas de chiffrement de bout en bout.** Les dossiers chiffrés sont ignorés, comme le fait
   le client officiel quand le chiffrement de bout en bout n'est pas configuré.
 - **Pas de fichiers virtuels** (fichiers téléchargés seulement à la première ouverture). Les

@@ -15,8 +15,15 @@ use nc_daemon::settings::Settings;
 
 fn ncsyncd(dir: &Path, cfg: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_ncsyncd"));
+    // The same endpoint as the default one on Unix; a named pipe on Windows
+    // is named after this path.
+    let socket = dir
+        .join("run/ncsyncd")
+        .join(format!("{}.sock", nc_daemon::guard::config_hash(cfg)));
     c.arg("--config")
         .arg(cfg)
+        .arg("--socket")
+        .arg(socket)
         .args(["--no-watch", "--no-push", "--official-config"])
         .arg(dir.join("no-official.cfg"))
         .env("XDG_RUNTIME_DIR", dir.join("run"))
@@ -35,7 +42,7 @@ fn ncsyncd(dir: &Path, cfg: &Path) -> Command {
 fn wait_listening(socket: &Path, child: &mut Child) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(30) {
-        if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+        if nc_daemon::transport::connect(socket).is_ok() {
             return;
         }
         if let Some(status) = child.try_wait().unwrap() {
@@ -85,6 +92,7 @@ fn rust_only_guard_refuses_a_second_daemon_until_the_first_dies() {
     // kill -9: no clean-up ran, the socket file is stale, but the lock is
     // free again.
     kill(&mut first);
+    #[cfg(unix)]
     assert!(socket.exists());
     let mut third = ncsyncd(dir.path(), &cfg).spawn().unwrap();
     wait_listening(&socket, &mut third);

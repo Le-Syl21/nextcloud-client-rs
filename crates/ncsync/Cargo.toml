@@ -17,12 +17,14 @@ nc-journal.workspace = true
 nc-dav.workspace = true
 nc-sync.workspace = true
 nc-daemon.workspace = true
+nc-platform.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
 rpassword.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

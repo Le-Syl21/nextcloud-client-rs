@@ -47,15 +47,58 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-  # Linux only: the daemon needs inotify, systemd and the Secret Service, and
-  # the official client has Windows and macOS code paths that are not ported
-  # (see the README's Limitations). Native runners, no cross-compiling.
-  # Built on Ubuntu 22.04, the oldest runner image, so that the binaries need
-  # glibc 2.35 at most (Debian 12, Ubuntu 22.04 and later); glibc rather than
-  # a static musl build, so that user lookups (`--instance alice`) go through
-  # NSS like any other program (LDAP, sssd, systemd-homed users).
+  # Windows and macOS: the cfg-gated code is invisible to the Linux clippy, so
+  # each system lints and tests its own. Not part of the release (yet): the
+  # Windows and macOS packages come with the later phases of docs/gui-plan.md.
+  portable:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            label: windows-x86_64
+          - os: macos-15
+            label: macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          key: ${{ matrix.label }}
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --workspace
+
+      - name: Build
+        run: cargo build --locked --release -p ncsync -p ncsyncd
+
+      - name: Smoke test (--version)
+        shell: bash
+        run: |
+          target/release/ncsync --version
+          target/release/ncsyncd --version
+
+  # Linux packages. Built on Ubuntu 22.04, the oldest runner image, so that
+  # the binaries need glibc 2.35 at most (Debian 12, Ubuntu 22.04 and later);
+  # glibc rather than a static musl build, so that user lookups (`--instance
+  # alice`) go through NSS like any other program (LDAP, sssd, systemd-homed
+  # users). Native runners, no cross-compiling.
   build:
     needs: lint
     strategy:

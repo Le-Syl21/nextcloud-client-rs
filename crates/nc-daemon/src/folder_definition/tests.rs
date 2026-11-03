@@ -84,7 +84,7 @@ fn derived_load_fixture_folders() {
 #[test]
 fn derived_load_rules_and_migrations() {
     let dir = tempfile::tempdir().unwrap();
-    let l = dir.path().to_string_lossy().into_owned();
+    let l = nc_platform::paths::to_slash(&dir.path().to_string_lossy());
     let text = format!(
         "[Accounts]\n0\\url=https://h\n0\\authType=webflow\n0\\webflow_user=u\n\
          0\\Folders\\a\\localPath={l}\n0\\Folders\\a\\targetPath=remote/\n\
@@ -230,10 +230,13 @@ fn add_folder(existing: &mut Vec<ExistingFolder>, path: &str, server: &ServerIde
     });
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn is_ok(r: Result<(), (PathValidityError, String)>) -> bool {
     r.is_ok()
 }
 
+// The Windows and drive-letter rows of upstream (:272, :381) are pending.
+#[cfg(unix)]
 #[test]
 fn test_check_path_validity_for_new_folder() {
     let dir = tempfile::tempdir().unwrap();
@@ -243,10 +246,8 @@ fn test_check_path_validity_for_new_folder() {
     std::fs::create_dir_all(base.join("sub/free")).unwrap();
     std::fs::create_dir_all(base.join("free2/sub")).unwrap();
     std::fs::write(base.join("sub/file.txt"), b"hello").unwrap();
-    let dir_path = std::fs::canonicalize(base)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let dir_path =
+        nc_platform::paths::from_native(&std::fs::canonicalize(base).unwrap().to_string_lossy());
 
     let account = ServerIdentity {
         url: "http://example.de".into(),
@@ -395,10 +396,8 @@ fn test_find_good_path_for_new_sync_folder() {
     ] {
         std::fs::create_dir_all(base.join(d)).unwrap();
     }
-    let dir_path = std::fs::canonicalize(base)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let dir_path =
+        nc_platform::paths::from_native(&std::fs::canonicalize(base).unwrap().to_string_lossy());
     let url = ServerIdentity {
         url: "http://example.de".into(),
         user: "testuser".into(),

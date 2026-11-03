@@ -6,6 +6,18 @@ official Nextcloud desktop client v34.0.5.
 
 ## Unreleased
 
+- **Windows and macOS build (phases P1 and P2 of `docs/gui-plan.md`).** New crate
+  `nc-platform`, the only one allowed `unsafe` (Win32 calls, descriptor registration). The
+  control endpoint uses `interprocess` (Unix socket, Windows named pipe), the lock file no
+  longer reads `/proc`, config and state paths come from `dirs` off Linux, the macOS journal
+  key is NFC-normalized as upstream does, the official client's configuration is looked up
+  in its Windows and sandboxed macOS locations, credentials use the Windows Credential
+  Manager (takeover reads QtKeychain's `Nextcloud_<key>` item) and the macOS keychain, and
+  `trash` gets `coinit_multithreaded`. Windows engine: verbatim long paths, file index as
+  inode, hidden and read-only attributes, share-mode lock detection, FAT journal mode, a
+  `ReadDirectoryChangesW` folder watcher ported from `folderwatcher_win.cpp` with lost-change
+  handling, Ctrl events in `ncsyncd`. CI lints and tests on `windows-2025` and `macos-15`.
+
 - **One program per configuration.** `ncsyncd` takes an exclusive lock on its
   configuration file (`instance-<hash>.lock` in its state directory) before reading it; a
   second `ncsyncd` on the same file is refused and names the pid holding it. The OS frees

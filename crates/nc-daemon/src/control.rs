@@ -6,10 +6,11 @@
 //! attached to a running `ncsyncd` drives it with the same requests it
 //! sends to its own engine, see [`crate::client`]).
 //!
-//! A Unix stream socket, named after the configuration it serves
+//! A local socket ([`crate::transport`]: a Unix stream socket, or a named
+//! pipe on Windows), named after the configuration it serves
 //! ([`crate::guard::default_endpoint`]); each connection carries one
 //! request, a JSON object on one line, and gets one JSON object on one line
-//! back. The socket is created with mode 0600 in the daemon's runtime
+//! back. A Unix socket is created with mode 0600 in the daemon's runtime
 //! directory, so only its user (or root) can drive it.
 //!
 //! Requests: `{"command":"status"}`, `{"command":"pause","folder":"1"}`,
@@ -330,38 +331,19 @@ pub fn serve(
     tx: UnboundedSender<Event>,
     ui: broadcast::Sender<UiEvent>,
 ) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-    // A stale socket of a previous run.
-    if path.exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                format!("another ncsyncd is listening on {}", path.display()),
-            ));
-        }
-        let _ = std::fs::remove_file(path);
-    }
-    let listener = tokio::net::UnixListener::bind(path)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let listener = crate::transport::bind(path)?;
     log::info!(target: LOG, "control socket listening on {}", path.display());
     tokio::task::spawn_local(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok(stream) = listener.accept().await else {
                 continue;
             };
             let tx = tx.clone();
             let ui = ui.clone();
             tokio::task::spawn_local(async move {
-                let (read, mut write) = stream.into_split();
+                let mut write = &stream;
                 let mut line = String::new();
-                let mut reader = BufReader::new(read);
+                let mut reader = BufReader::new(&stream);
                 if reader.read_line(&mut line).await.is_err() {
                     return;
                 }
@@ -421,7 +403,7 @@ async fn stream_events(
 /// Sends one request to a running daemon (`ncsync status` & co).
 pub fn request(path: &Path, request: &Request) -> std::io::Result<Response> {
     use std::io::{BufRead, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+    let mut stream = crate::transport::connect(path)?;
     // A reload waits for the syncs of removed folders to stop.
     stream.set_read_timeout(Some(crate::daemon::SHUTDOWN_GRACE * 2))?;
     let mut text = serde_json::to_string(request).map_err(std::io::Error::other)?;

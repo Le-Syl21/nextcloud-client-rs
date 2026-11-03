@@ -1,7 +1,7 @@
 # GUI and multi-OS plan
 
-Status: study, 2026-11-02. P0 (§9) is implemented: see the notes there for
-what it left to later phases.
+Status: study, 2026-11-02. P0 and P1 (§9) are implemented, P2 is largely
+implemented (2026-11-03): see the notes there for what is left.
 
 Goal: a real multi-OS (Linux, Windows, macOS) desktop client. A new GUI
 binary built with egui/eframe 0.37 on the glow backend, with a light, dark or
@@ -1170,6 +1170,38 @@ the snapshots), `FolderMan::take_requests()` drained into
 macOS-only tests that need P2 stay marked as pending in
 `docs/test-parity.md`.
 
+**Status (2026-11-03): done**, except that the CI result of the new
+`portable` job is reported in the commit that added it.
+
+- `nc-platform` is the only crate with `unsafe` (`undocumented_unsafe_blocks`
+  is a warning there; `unsafe_code = "deny"` stays everywhere else). It holds
+  the pure path helpers (`long_win_path`, `clean_path`, `is_absolute`,
+  `to_slash`, `from_native`), host name and process liveness for the lock
+  file, the descriptor registration of the Linux watcher, and the Win32 calls.
+- The control endpoint is an `interprocess` local socket (`nc_daemon::transport`):
+  a Unix socket as before, a named pipe `\\.\pipe\ncsyncd-<USERNAME>-<hash>` on
+  Windows. The blocking client side (`ncsync`, `EngineClient::Remote`) keeps
+  its read timeout through a reader thread on Windows. The pipe uses the
+  default security descriptor (owner-only DACL and `FILE_FLAG_FIRST_PIPE_INSTANCE`
+  are not done yet, see "Left" in P2).
+- `LockFile` uses `rustix` (`uname`, `test_kill_process`) or Win32.
+- Config paths: `dirs` off Linux; the official client's file is looked up in
+  `%APPDATA%\Nextcloud` then `%LOCALAPPDATA%\Nextcloud` (Windows) and in the
+  sandbox container then `~/Library/Preferences/Nextcloud` (macOS).
+- Credentials: `KeyringStore::native()` (Secret Service, Credential Manager,
+  login keychain). `SecretStore::official_item` reads QtKeychain's items:
+  Windows target `Nextcloud_<key>` then `<key>@Nextcloud` with `get_secret`.
+- macOS: NFC `get_phash` (tested on every OS through `get_phash_with`),
+  `UF_HIDDEN`. macOS has **no folder watcher** yet (it reports itself
+  unreliable, so the folder rescans periodically) and nothing was run on a
+  Mac: macOS is experimental (D4), validated by the `macos-15` CI job only.
+- `trash` has `coinit_multithreaded`; the User-Agent still says `(Linux)`
+  (**left**).
+- Not part of the original list but needed: the ported tests that set POSIX
+  modes (`testpermissions`, `testPropagatePermissions`, the mode half of
+  `testfilesystem`, `testMoveFailsInAConflict`) are `cfg(unix)`, as upstream
+  `#ifndef Q_OS_WIN` / `QSKIP`.
+
 ### P2. Windows engine parity
 
 In order:
@@ -1190,6 +1222,33 @@ In order:
 14. Windows keychain takeover (`Nextcloud_<key>`, `get_secret`);
 15. the Ctrl events;
 16. CRLF config check.
+
+**Status (2026-11-03).** Items 1, 2, 3 (files), 5 (`is_file_locked` and
+`LockMode`), 6 (std opens already share read/write/delete), 7, 8, 9, 10 (the
+`should_enforce_windows_file_name_compatibility` switch only), 14 and 15 are
+done; the engine's own tests pass in the Windows VM (see the commit message for
+the exact count) and a real `ncsync sync` / `ncsyncd` run against the itest
+server works from the VM.
+
+**Left:**
+
+- item 4: folder ACLs (`setAclPermission`, `isFolderReadOnly`): folders are
+  never made read-only on Windows, `testAclWithManyDeniedAces` is pending;
+- item 5: the `LockWatcher` (re-sync once a locked file is released);
+- item 10: the Windows branches of the four `testCreateFileWithTrailingSpaces_*`
+  tests and `maybe_rename_for_windows_compatibility` (those tests are
+  `cfg(not(windows))` for now);
+- items 11 and 12: `local_file_name_clash`, `hasCaseClashAccessibilityProblem`
+  and `caseclashconflictsolver.cpp` (the 7 case-clash tests are
+  `cfg(not(any(windows, macos)))`);
+- item 13: Restart Manager editors;
+- item 16: whether QSettings writes CRLF on Windows is still unchecked
+  (`ini-preserve` keeps whatever the file has);
+- the named pipe has the default DACL, no `FILE_FLAG_FIRST_PIPE_INSTANCE`;
+  `testfolderwatcher_native.rs` ports 10 of the 15 `testfolderwatcher.cpp`
+  functions; `test_upload_while_file_is_changing` is pending on Windows;
+- takeover against the official Windows client v34.0.5 (not installed in the
+  VM yet).
 
 **Test:**
 
@@ -1212,7 +1271,7 @@ In order:
 - the launchd plist for ncsyncd.
 
 **Test:** the §7.2 tests on the `macos-15` runner. The takeover and keychain
-prompt on a real Mac (decision D4).
+prompt are not validated on a real Mac (decision D4: macOS is experimental).
 
 ### P4. GUI skeleton and tray (three OS)
 
@@ -1371,7 +1430,7 @@ Taken by Sylvain on 2026-11-02.
 | D1 | Product name, binary name, app id | **nc-client**, as the rest of the project already says "nc" for Nextcloud. Downloads `nc-client-cli-<target>` (`ncsync`, `ncsyncd`) and `nc-client-gui-<target>` (`nc-client`). App id `io.github.le_syl21.nc_client` (underscores, so it is also a valid D-Bus name), display name "nc-client", "for Nextcloud" in the descriptions only. |
 | D2 | Which configuration file the GUI uses | **The ncsyncd file**: one configuration, the GUI and the daemon are interchangeable on a machine. |
 | D3 | When ncsyncd holds the configuration | **Attach, designed in from the start.** The GUI talks to the engine through one interface with two implementations: in-process (it owns the lock) or remote (ncsyncd owns it, the GUI drives it over the control endpoint). The control protocol therefore carries every GUI operation and an event subscription (the `UiEvent` stream) from P0 on, and the GUI never reaches into the engine by another path. |
-| D4 | macOS testing | **A real Mac** is to be bought second hand (Apple Silicon). Until it is there, macOS is built and unit-tested in CI only. |
+| D4 | macOS testing | **No Mac will be bought or rented** (revised 2026-11-03). macOS ships as **experimental**: built, signed and unit/integration-tested in CI on GitHub's macOS runners, which is the validation level. Not validated by hand on a real Mac, and said so in the README and docs: the GUI window, the menu-bar tray, the Keychain access prompt and the takeover from the sandboxed official app. No work item depends on a real Mac. |
 | D5 | Windows tray right-click | One menu on both clicks. |
 | D6 | Translations | Seed from upstream's `client_*.ts` (GPL, attribution) for the strings kept word for word. |
 | D7 | Installers | **Binaries first** (archives with the binary, plus the `.desktop` file on Linux); installers later. Without an installer, Windows toasts carry a generic origin until the AppUserModelID is registered by one. |
