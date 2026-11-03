@@ -322,7 +322,24 @@ impl Propagator {
         if self.shared.abort_requested.get() {
             return;
         }
-        // (hasCaseClashAccessibilityProblem only looks for a problem on Windows.)
+        // Check if the specific file can be accessed
+        if self
+            .shared
+            .has_case_clash_accessibility_problem(&file_to_upload.file)
+        {
+            let message = format!(
+                "File {} cannot be uploaded because another file with the same name, differing only in case, exists",
+                nc_platform::paths::to_native_separators(&item.borrow().file)
+            );
+            self.bulk_done(
+                id,
+                &item,
+                Status::NormalError,
+                message,
+                ErrorCategory::GenericError,
+            );
+            return;
+        }
         // slotComputeTransmissionChecksum: the computation runs in a thread
         // upstream; its result comes back as a posted event.
         self.posted.push_back(PostedEvent::BulkChecksum(

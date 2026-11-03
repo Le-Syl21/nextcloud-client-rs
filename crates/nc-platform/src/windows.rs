@@ -490,3 +490,39 @@ pub fn set_file_times(path: &str, unix_seconds: i64) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+/// `FindFirstFileW` / `FindNextFileW` on `path` (no wildcard): the names as
+/// the file system stores them, so a lookup by another case answers with the
+/// real name (`OwncloudPropagator::localFileNameClash` and
+/// `hasCaseClashAccessibilityProblem`). Empty when nothing matches.
+pub fn find_file_names(path: &str) -> Vec<String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
+    };
+    let w = wide(&long_win_path(path));
+    // SAFETY: `WIN32_FIND_DATAW` is plain data, so all zeroes is valid.
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // SAFETY: `w` is NUL-terminated and `data` outlives the call.
+    let handle = unsafe { FindFirstFileW(w.as_ptr(), &mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let name = |d: &WIN32_FIND_DATAW| {
+        let len = d
+            .cFileName
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(d.cFileName.len());
+        String::from_utf16_lossy(&d.cFileName[..len])
+    };
+    let mut names = vec![name(&data)];
+    // SAFETY: `handle` comes from the successful FindFirstFileW above and is
+    // closed once; `data` outlives each call.
+    unsafe {
+        while FindNextFileW(handle, &mut data) != 0 {
+            names.push(name(&data));
+        }
+        FindClose(handle);
+    }
+    names
+}

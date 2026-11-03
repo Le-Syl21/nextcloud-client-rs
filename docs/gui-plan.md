@@ -1230,6 +1230,12 @@ done; the engine's own tests pass in the Windows VM (see the commit message for
 the exact count) and a real `ncsync sync` / `ncsyncd` run against the itest
 server works from the VM.
 
+**Done since:** items 11 and 12 (2026-11-03): `local_file_name_clash` (Windows `FindFirstFileW` real-name
+compare, macOS canonical NFC compare), `has_case_clash_accessibility_problem`,
+`nc_sync::case_clash_solver` (port of `caseclashconflictsolver.cpp`, drives PROPFIND/MOVE), and the real
+`canRemoveCaseClashConflictedCopy` (it was a stub). The 7 case-clash tests and the diverse-conflicts
+solver scenario run on Windows and macOS.
+
 **Left:**
 
 - item 4: folder ACLs (`setAclPermission`, `isFolderReadOnly`): folders are
@@ -1238,9 +1244,6 @@ server works from the VM.
 - item 10: the Windows branches of the four `testCreateFileWithTrailingSpaces_*`
   tests and `maybe_rename_for_windows_compatibility` (those tests are
   `cfg(not(windows))` for now);
-- items 11 and 12: `local_file_name_clash`, `hasCaseClashAccessibilityProblem`
-  and `caseclashconflictsolver.cpp` (the 7 case-clash tests are
-  `cfg(not(any(windows, macos)))`);
 - item 13: Restart Manager editors;
 - item 16: whether QSettings writes CRLF on Windows is still unchecked
   (`ini-preserve` keeps whatever the file has);

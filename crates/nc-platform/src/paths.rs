@@ -103,6 +103,15 @@ pub fn to_slash(path: &str) -> String {
     }
 }
 
+/// `QDir::toNativeSeparators`: `\\` on Windows, unchanged elsewhere.
+pub fn to_native_separators(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_owned()
+    }
+}
+
 /// `QDir::cleanPath`: native separators become `/` (Windows), `//` is
 /// collapsed, `.` and `..` are resolved, a trailing `/` is dropped (except
 /// for a root). On Windows a drive (`C:`) or a share (`//server`) is kept

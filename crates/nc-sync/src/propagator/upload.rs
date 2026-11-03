@@ -580,6 +580,19 @@ async fn upload_common(up: &mut Upload<'_>, ng: bool) -> Outcome {
     if ctx.shared.abort_requested.get() {
         return None;
     }
+    // Check if the specific file can be accessed
+    if ctx
+        .shared
+        .has_case_clash_accessibility_problem(&up.file_to_upload.file)
+    {
+        return done(
+            Status::NormalError,
+            format!(
+                "File {} cannot be uploaded because another file with the same name, differing only in case, exists",
+                nc_platform::paths::to_native_separators(&ctx.item.borrow().file)
+            ),
+        );
+    }
     // Check if we believe that the upload will fail due to remote quota limits
     let quota_guess = ctx
         .shared

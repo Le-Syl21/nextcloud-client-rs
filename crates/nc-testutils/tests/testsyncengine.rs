@@ -11,7 +11,7 @@
 mod common;
 
 use common::*;
-use nc_testutils::{FakeFolder, FileInfo, FileModifier, ItemCompletedSpy};
+use nc_testutils::{FakeFolder, FileInfo, FileModifier, ItemCompletedSpy, PathComponents};
 
 #[test]
 fn test_file_download() {
@@ -1823,12 +1823,10 @@ fn test_folder_removal_with_case_clash() {
     folder_removal_with_case_clash(false);
 }
 
-// On Linux there is no case clash (case-sensitive file system).
-const SHOULD_HAVE_CASE_CLASH_CONFLICT: bool = false;
+// On Linux there is no case clash (case-sensitive file system); elsewhere
+// (`#if defined Q_OS_LINUX` upstream) there is one.
+const SHOULD_HAVE_CASE_CLASH_CONFLICT: bool = !cfg!(target_os = "linux");
 
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_case_clash_create_conflict() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -1880,9 +1878,6 @@ fn test_server_case_clash_create_conflict() {
     );
 }
 
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_sub_folder_case_clash_create_conflict() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -1938,9 +1933,6 @@ fn test_server_sub_folder_case_clash_create_conflict() {
     );
 }
 
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_case_clash_create_conflict_on_move() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -2010,9 +2002,6 @@ fn test_server_case_clash_create_conflict_on_move() {
     );
 }
 
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_sub_folder_case_clash_create_conflict_on_move() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -2090,9 +2079,6 @@ fn test_server_sub_folder_case_clash_create_conflict_on_move() {
 /// The `CaseClashConflictSolver` part only runs where case clashes exist
 /// (not on Linux), like upstream; the solver itself is a GUI class not
 /// ported yet.
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_case_clash_create_conflict_and_solve_it() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -2145,9 +2131,6 @@ fn test_server_case_clash_create_conflict_and_solve_it() {
 }
 
 /// Same as above: the solver part does not run on Linux.
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_sub_folder_case_clash_create_conflict_and_solve_it() {
     use nc_sync::discovery::LocalDiscoveryStyle;
@@ -2203,7 +2186,6 @@ fn test_server_sub_folder_case_clash_create_conflict_and_solve_it() {
     );
 }
 
-#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn server_case_clash_create_conflict_then_remove_one_remote_file(move_to_trash_enabled: bool) {
     use nc_sync::discovery::LocalDiscoveryStyle;
     let test_lower_case_file = "test";
@@ -2295,9 +2277,6 @@ fn server_case_clash_create_conflict_then_remove_one_remote_file(move_to_trash_e
     assert!(fake_folder.sync_once());
 }
 
-// Upstream expects case clash conflicts on Windows and macOS too: needs
-// caseclashconflictsolver.cpp (not ported yet, docs/gui-plan.md P2 item 12).
-#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn test_server_case_clash_create_conflict_then_remove_one_remote_file() {
     // _data rows "move to trash" and "delete"
@@ -2306,10 +2285,14 @@ fn test_server_case_clash_create_conflict_then_remove_one_remote_file() {
 }
 
 /// On Linux upstream only builds the folders (everything else is under
-/// `if (shouldHaveCaseClashConflict)`).
+/// `if (shouldHaveCaseClashConflict)`); elsewhere the whole scenario runs,
+/// with the `CaseClashConflictSolver` renaming the server's copies.
 #[test]
 fn test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_them() {
-    let fake_folder = FakeFolder::new(FileInfo::default());
+    use nc_sync::case_clash_solver::CaseClashConflictSolver;
+    use nc_sync::discovery::LocalDiscoveryStyle;
+    use nc_sync::item::Status;
+    let mut fake_folder = FakeFolder::new(FileInfo::default());
 
     let conflicts_folder_path_components = ["Documents", "DiverseConflicts"];
 
@@ -2333,7 +2316,7 @@ fn test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_t
 
     let test_invalid_char_folder = "Really?";
 
-    let d = &diverse_conflicts_folder_path;
+    let d = diverse_conflicts_folder_path.clone();
     fake_folder
         .remote_modifier()
         .insert(&format!("{d}/{test_lower_case_file}"), 64, b'W');
@@ -2352,7 +2335,93 @@ fn test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_t
         .remote_modifier()
         .mkdir(&format!("{d}/{test_invalid_char_folder}"));
 
-    const { assert!(!SHOULD_HAVE_CASE_CLASH_CONFLICT) };
+    if !SHOULD_HAVE_CASE_CLASH_CONFLICT {
+        return;
+    }
+
+    let complete_spy = ItemCompletedSpy::new(&mut fake_folder);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local_path = fake_folder.local_path().to_owned();
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    // verify the parent of a folder where caseclash and invalidchar conflicts were found, has
+    // corresponding flags set (conflict info must get propagated to the very top)
+    let parent = complete_spy.find_item(conflicts_folder_path_components[0]);
+    assert!(parent.is_any_case_clash_child);
+    assert!(parent.is_any_invalid_char_child);
+    complete_spy.clear();
+
+    let folder_info = |f: &FakeFolder| {
+        f.current_local_state()
+            .find(PathComponents::new(&d))
+            .cloned()
+            .expect("the folder exists locally")
+    };
+    let info = folder_info(&fake_folder);
+    let conflicts_file = find_case_clash_conflicts(&info);
+    assert_eq!(conflicts_file.len(), 1);
+    assert!(expect_conflict(&info, test_lower_case_file));
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    let conflicts_file = find_case_clash_conflicts(&folder_info(&fake_folder));
+    assert_eq!(conflicts_file.len(), 1);
+
+    let solver = CaseClashConflictSolver::new(
+        &format!("{local_path}{d}/{test_lower_case_file}"),
+        &format!("{local_path}{}", conflicts_file[0]),
+        "/",
+        &local_path,
+        fake_folder.account(),
+        fake_folder.sync_journal(),
+    );
+    rt.block_on(solver.solve_conflict("testfile2")).unwrap();
+
+    assert!(fake_folder.sync_once());
+    assert!(find_case_clash_conflicts(&folder_info(&fake_folder)).is_empty());
+
+    fake_folder
+        .sync_engine()
+        .set_local_discovery_options(LocalDiscoveryStyle::DatabaseAndFilesystem, []);
+    assert!(fake_folder.sync_once());
+
+    // After solving file conflict, verify that we did not lose conflict detection of caseclash
+    // and invalidchar for folders
+    let invalid = complete_spy.find_item(&format!("{d}/{test_invalid_char_folder}"));
+    assert_eq!(invalid.status, Status::FileNameInvalid);
+
+    let lower = complete_spy.find_item(&format!("{d}/{test_lower_case_folder}"));
+    let upper = complete_spy.find_item(&format!("{d}/{test_upper_case_folder}"));
+    complete_spy.clear();
+    // we always create UPPERCASE folder in current syncengine logic for now and then create a
+    // conflict for a lowercase folder, but this may change, so keep this check more future proof
+    assert!(lower.status == Status::FileNameClash || upper.status == Status::FileNameClash);
+
+    // solve case clash folders conflict
+    let solver = CaseClashConflictSolver::new(
+        &format!("{local_path}{d}/{test_lower_case_folder}"),
+        &format!("{local_path}{d}/{test_upper_case_folder}"),
+        "/",
+        &local_path,
+        fake_folder.account(),
+        fake_folder.sync_journal(),
+    );
+    rt.block_on(solver.solve_conflict("testfolder1")).unwrap();
+    assert!(fake_folder.sync_once());
+
+    // verify invalid filename conflict folder item is still present
+    let invalid = complete_spy.find_item(&format!("{d}/{test_invalid_char_folder}"));
+    assert_eq!(invalid.status, Status::FileNameInvalid);
 }
 
 #[test]

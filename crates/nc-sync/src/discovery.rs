@@ -1245,6 +1245,12 @@ impl DiscoveryPhase {
 
         let query_server = self.job(id).query_server;
         let current_folder = self.job(id).current_folder.clone();
+        // `allEntries` of canRemoveCaseClashConflictedCopy: the names of the
+        // directory and whether the server has them.
+        let all_entries: Vec<(String, bool)> = entries
+            .iter()
+            .map(|(k, e)| (k.0.clone(), e.server_entry.is_valid()))
+            .collect();
         for (key, mut e) in entries {
             let name = if e.name_override.is_empty() {
                 key.0.clone()
@@ -1271,8 +1277,14 @@ impl DiscoveryPhase {
             let is_blacklisted = query_server == QueryMode::InBlackList
                 || self.is_in_selective_sync_black_list(&path.original)
                 || is_encrypted_folder_but_e2e_is_not_setup;
-            let will_be_excluded =
-                self.handle_excluded(id, &path.target, &e, is_hidden, is_blacklisted);
+            let will_be_excluded = self.handle_excluded(
+                id,
+                &path.target,
+                &e,
+                &all_entries,
+                is_hidden,
+                is_blacklisted,
+            );
             if will_be_excluded {
                 continue;
             }
@@ -1297,6 +1309,7 @@ impl DiscoveryPhase {
         id: JobId,
         path: &str,
         entries: &Entries,
+        all_entries: &[(String, bool)],
         is_hidden: bool,
         is_blacklisted: bool,
     ) -> bool {
@@ -1422,7 +1435,7 @@ impl DiscoveryPhase {
             i.instruction = Instruction::Ignore;
         }
         if excluded == ExcludeType::FileExcludeCaseClashConflict
-            && self.can_remove_case_clash_conflicted_copy(path, entries)
+            && self.can_remove_case_clash_conflicted_copy(path, all_entries)
         {
             {
                 let mut i = item.borrow_mut();
@@ -1581,14 +1594,42 @@ impl DiscoveryPhase {
         true
     }
 
-    /// `canRemoveCaseClashConflictedCopy`.
-    fn can_remove_case_clash_conflicted_copy(&mut self, path: &str, _entries: &Entries) -> bool {
-        // Upstream checks the other entries of the directory being processed;
-        // case clash conflict copies only arise on case-insensitive file
-        // systems, which this port does not target. The record lookup is kept.
+    /// `canRemoveCaseClashConflictedCopy`: the conflicted copy goes when the
+    /// original entry left the server, or when the server no longer has two
+    /// entries that differ only in case.
+    fn can_remove_case_clash_conflicted_copy(
+        &mut self,
+        path: &str,
+        all_entries: &[(String, bool)],
+    ) -> bool {
         let conflict_record = self.statedb.case_conflict_record_by_path(path);
         let initial = String::from_utf8_lossy(&conflict_record.initial_base_path).into_owned();
-        let _original_base_file_name = initial.rsplit('/').next().unwrap_or("").to_owned();
+        let original_base_file_name = initial.rsplit('/').next().unwrap_or("").to_owned();
+
+        if !all_entries
+            .iter()
+            .any(|(name, _)| *name == original_base_file_name)
+        {
+            // original entry is no longer on the server, remove conflicted copy
+            log::debug!(target: LOG, "original entry: {original_base_file_name} is no longer on the server, remove conflicted copy: {path}");
+            return true;
+        }
+
+        let lower = original_base_file_name.to_lowercase();
+        let num_matching_entries = all_entries
+            .iter()
+            // only case-insensitive matching entries that are present on the server
+            .filter(|(name, on_server)| *on_server && name.to_lowercase() == lower)
+            .take(2)
+            .count();
+
+        if num_matching_entries < 2 {
+            // original entry is present on the server but there is no case-clash conflict anymore, remove conflicted copy (only 1 matching file found during case-insensitive search)
+            log::debug!(target: LOG, "original entry: {original_base_file_name} is present on the server, but there is no case-clash conflict anymore, remove conflicted copy: {path}");
+            self.another_sync_needed = true;
+            return true;
+        }
+
         false
     }
 

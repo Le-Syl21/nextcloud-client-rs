@@ -592,24 +592,80 @@ impl Shared {
         if !nc_journal::utility::fs_case_preserving() {
             return false;
         }
-        // On Linux, the file system is case sensitive, but this code is useful for testing.
-        // Just check that there is no other file with the same name and different casing.
-        let dir = filesystem::parent_dir(&file);
-        let fname = file.rsplit('/').next().unwrap_or("").to_owned();
-        let lower = fname.to_lowercase();
-        let list: Vec<String> = std::fs::read_dir(&dir)
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .filter(|n| n.to_lowercase() == lower)
-                    .collect()
-            })
-            .unwrap_or_default();
-        if list.len() > 1 || (list.len() == 1 && list[0] != fname) {
-            log::warn!(target: LOG, "Detected case clash between {file} and {}", list[0]);
-            return true;
+        #[cfg(target_os = "macos")]
+        {
+            use unicode_normalization::UnicodeNormalization as _;
+            if !std::path::Path::new(&file).exists() {
+                return false;
+            }
+            // Need to normalize to composited form because of QTBUG-39622/QTBUG-55896
+            let Ok(canonical) = std::fs::canonicalize(&file) else {
+                return false;
+            };
+            let c_name: String = canonical.to_string_lossy().nfc().collect();
+            if file != c_name && !c_name.ends_with(rel_file) {
+                log::warn!(target: LOG, "Detected case clash between {file} and {c_name}");
+                return true;
+            }
+            false
         }
-        false
+        #[cfg(windows)]
+        {
+            // The name the file system stores for `file`: a lookup by another
+            // case answers with the real one.
+            if let Some(real) = nc_platform::windows::find_file_names(&file).first()
+                && !file.ends_with(real.as_str())
+            {
+                log::warn!(target: LOG, "Detected case clash between {file} and {real}");
+                return true;
+            }
+            false
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            // On Linux, the file system is case sensitive, but this code is useful for testing.
+            // Just check that there is no other file with the same name and different casing.
+            let dir = filesystem::parent_dir(&file);
+            let fname = file.rsplit('/').next().unwrap_or("").to_owned();
+            let lower = fname.to_lowercase();
+            let list: Vec<String> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.filter_map(Result::ok)
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n.to_lowercase() == lower)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if list.len() > 1 || (list.len() == 1 && list[0] != fname) {
+                log::warn!(target: LOG, "Detected case clash between {file} and {}", list[0]);
+                return true;
+            }
+            false
+        }
+    }
+
+    /// `hasCaseClashAccessibilityProblem`: Windows only, two paths that
+    /// differ only in case for the same name.
+    pub fn has_case_clash_accessibility_problem(&self, rel_file: &str) -> bool {
+        #[cfg(windows)]
+        {
+            let file = format!("{}{}", self.local_dir, rel_file);
+            let names = nc_platform::windows::find_file_names(&file);
+            if let [first, second, ..] = names.as_slice() {
+                // This extra check shouldn't be necessary, but ensures that there
+                // are two different filenames that are identical when case is ignored.
+                if first != second && first.to_lowercase() == second.to_lowercase() {
+                    log::warn!(target: LOG, "Found two filepaths that only differ in case: {first} {second}");
+                    return true;
+                }
+            }
+            false
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rel_file;
+            false
+        }
     }
 
     /// `updateMetadata(item)` (`staticUpdateMetadata` with the VFS off).
