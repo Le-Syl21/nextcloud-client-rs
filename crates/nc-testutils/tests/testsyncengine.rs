@@ -2339,6 +2339,10 @@ fn test_server_case_clash_create_diverse_conflicts_inside_one_folder_and_solve_t
         return;
     }
 
+    // Windows enforces the compatible names itself; elsewhere the capabilities
+    // of the server say so (divergence: upstream relies on the platform here, and
+    // the macOS run would not flag the `?` folder).
+    fake_folder.enable_enforce_windows_file_name_compatibility();
     let complete_spy = ItemCompletedSpy::new(&mut fake_folder);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
