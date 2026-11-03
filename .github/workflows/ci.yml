@@ -82,8 +82,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      # --no-fail-fast: one run lists every failing test binary.
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --no-fail-fast
 
       - name: Build
         run: cargo build --locked --release -p ncsync -p ncsyncd
