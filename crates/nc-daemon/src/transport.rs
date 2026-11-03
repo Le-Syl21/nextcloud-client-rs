@@ -27,10 +27,8 @@ fn name_of(path: &Path) -> io::Result<Name<'static>> {
 #[cfg(windows)]
 fn pipe_name(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let name = text
-        .strip_prefix(r"\\.\pipe\")
-        .map_or_else(|| text.replace(['\\', '/', ':'], "_"), str::to_owned);
-    name
+    text.strip_prefix(r"\\.\pipe\")
+        .map_or_else(|| text.replace(['\\', '/', ':'], "_"), str::to_owned)
 }
 
 #[cfg(windows)]
@@ -184,12 +182,10 @@ impl io::Read for SyncStream {
 #[cfg(windows)]
 impl io::Write for SyncStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        use std::io::Write as _;
         (&*self.inner).write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        use std::io::Write as _;
         (&*self.inner).flush()
     }
 }

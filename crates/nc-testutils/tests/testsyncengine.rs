@@ -2203,6 +2203,7 @@ fn test_server_sub_folder_case_clash_create_conflict_and_solve_it() {
     );
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn server_case_clash_create_conflict_then_remove_one_remote_file(move_to_trash_enabled: bool) {
     use nc_sync::discovery::LocalDiscoveryStyle;
     let test_lower_case_file = "test";
