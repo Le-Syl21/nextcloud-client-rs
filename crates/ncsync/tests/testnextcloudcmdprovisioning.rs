@@ -325,7 +325,7 @@ fn fake_server(propfind_status: u16) -> HttpServer {
 }
 
 // Reads the XDG state layout (home/.local/state/...).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn rust_only_provisioning_writes_account_folder_and_app_password() {
     let sb = Sandbox::new();
@@ -496,7 +496,7 @@ fn requested_paths(server: &HttpServer) -> Vec<String> {
 // credentials (for the GUI to log in later); here the login is done right
 // away with Login Flow v2, its link printed in the terminal.
 // Reads the XDG state layout (home/.local/state/...).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn rust_only_provisioning_without_app_password_logs_in_with_login_flow_v2() {
     let sb = Sandbox::new();
