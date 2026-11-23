@@ -17,7 +17,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -58,9 +58,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2025
+          - os: windows-latest
             label: windows-x86_64
-          - os: macos-15
+          - os: macos-latest
             label: macos-aarch64
 
     runs-on: ${{ matrix.os }}
@@ -106,6 +106,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # glibc floor: built natively, so this stays on the same Ubuntu as the arm64 job;
+          # ubuntu-latest (26.04) would raise the glibc the binary needs from 2.35 to 2.43.
           - os: ubuntu-22.04
             label: linux-x86_64
           - os: ubuntu-22.04-arm
@@ -175,7 +177,7 @@ jobs:
   checksums:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Download the archives
         uses: actions/download-artifact@v8
@@ -200,7 +202,7 @@ jobs:
   release:
     needs: [lint, build, portable, checksums]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
