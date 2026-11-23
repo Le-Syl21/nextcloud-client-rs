@@ -54,8 +54,8 @@ How close it is:
 
 ### Install
 
-**Release binaries** (Linux x86_64 and aarch64, glibc 2.35 or later: Debian 12,
-Ubuntu 22.04 and later): download the archive and `SHA256SUMS` from the
+**Release binaries** (Linux x86_64 and aarch64, glibc 2.39 or later: Debian 13,
+Ubuntu 24.04 and later): download the archive and `SHA256SUMS` from the
 [releases page](https://github.com/Le-Syl21/nextcloud-client-rs/releases), check them (the
 key's fingerprint is given in the release notes), and install the two programs where the
 systemd units expect them:
@@ -531,8 +531,8 @@ du client officiel, un dossier peut passer du client officiel à `ncsyncd` et re
 
 ### Installation
 
-**Binaires des versions publiées** (Linux x86_64 et aarch64, glibc 2.35 ou plus récente :
-Debian 12, Ubuntu 22.04 et suivantes) : téléchargez l'archive et `SHA256SUMS` sur la
+**Binaires des versions publiées** (Linux x86_64 et aarch64, glibc 2.39 ou plus récente :
+Debian 13, Ubuntu 24.04 et suivantes) : téléchargez l'archive et `SHA256SUMS` sur la
 [page des versions](https://github.com/Le-Syl21/nextcloud-client-rs/releases), vérifiez-les
 (l'empreinte de la clé figure dans les notes de version), puis installez les deux
 programmes là où les unités systemd les attendent :

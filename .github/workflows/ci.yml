@@ -17,7 +17,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -95,8 +95,8 @@ jobs:
           target/release/ncsync --version
           target/release/ncsyncd --version
 
-  # Linux packages. Built on Ubuntu 22.04, the oldest runner image, so that
-  # the binaries need glibc 2.35 at most (Debian 12, Ubuntu 22.04 and later);
+  # Linux packages. Built on Ubuntu 24.04, so that
+  # the binaries need glibc 2.39 at most (Debian 13, Ubuntu 24.04 and later);
   # glibc rather than a static musl build, so that user lookups (`--instance
   # alice`) go through NSS like any other program (LDAP, sssd, systemd-homed
   # users). Native runners, no cross-compiling.
@@ -106,15 +106,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             label: linux-x86_64
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             label: linux-aarch64
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.label }}
     env:
-      GLIBC_MAX: '2.35'
+      GLIBC_MAX: '2.39'
 
     steps:
       - uses: actions/checkout@v7
@@ -175,7 +175,7 @@ jobs:
   checksums:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Download the archives
         uses: actions/download-artifact@v8
@@ -200,7 +200,7 @@ jobs:
   release:
     needs: [lint, build, portable, checksums]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
@@ -236,8 +236,8 @@ jobs:
 
           | system | file |
           |---|---|
-          | Linux x86_64 (glibc 2.35 or later) | \`nextcloud-client-rs-linux-x86_64.tar.gz\` |
-          | Linux aarch64 (glibc 2.35 or later) | \`nextcloud-client-rs-linux-aarch64.tar.gz\` |
+          | Linux x86_64 (glibc 2.39 or later) | \`nextcloud-client-rs-linux-x86_64.tar.gz\` |
+          | Linux aarch64 (glibc 2.39 or later) | \`nextcloud-client-rs-linux-aarch64.tar.gz\` |
 
           **Verify:**
 
